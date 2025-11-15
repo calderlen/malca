@@ -17,12 +17,12 @@ if __name__ == "__main__":
         choices=MAG_BINS,
         help="Specify bins to run; omit to process all.",
     )
-    parser.add_argument("--out-dir", default="./peak_results")
-    parser.add_argument("--format", choices=("parquet", "csv"), default="parquet")
+    parser.add_argument("--out-dir", default="./results_peaks")
+    parser.add_argument("--format", choices=("parquet", "csv"), default="csv")
     parser.add_argument(
         "--n-workers",
         type=int,
-        default=None,
+        default=64,
         help="Parallel workers (processes). Default: min(32, CPU-2)",
     )
     parser.add_argument(
