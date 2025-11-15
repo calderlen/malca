@@ -23,7 +23,7 @@ if __name__ == "__main__":
         "--n-workers",
         type=int,
         default=64,
-        help="Parallel workers (processes). Default: min(32, CPU-2)",
+        help="Parallel processes",
     )
     parser.add_argument(
         "--chunk-size",
@@ -35,7 +35,7 @@ if __name__ == "__main__":
         "--metrics-baseline",
         dest="metrics_baseline",
         default=None,
-        help="Baseline function import path (e.g. 'calder.lc_baseline:global_mean_baseline'); omit for default.",
+        help="Baseline function import path",
     )
     parser.add_argument(
         "--metrics-dip-threshold",

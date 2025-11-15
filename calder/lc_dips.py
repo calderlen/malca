@@ -204,16 +204,24 @@ def naive_dip_finder(
     lc_path="/data/poohbah/1/assassin/rowan.90/lcsv2",
     mag_bins=('12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15'),
     id_column="asas_sn_id",
-    out_dir="./results_peaks",
+    out_dir="./peak_results",
     out_format="csv",
     n_workers=None,
     chunk_size=250000,
     max_inflight=None,
-    baseline_func=per_camera_trend_baseline,
+    baseline_func=per_camera_median_baseline,
     metrics_baseline_func=None,
     metrics_dip_threshold=0.3,
+    target_ids_by_bin: dict[str, set[str]] | None = None,
+    return_rows: bool = False,
     **baseline_kwargs,
 ):
+    """Run the naive dip search across one or more magnitude bins.
+
+    Args:
+        target_ids_by_bin: optional mapping of ``mag_bin`` to set of ASAS-SN IDs to check if some subset of candidates are reproduced.
+        return_rows: when True, return a DataFrame of all processed rows instead of just writing peak CSV/Parquet files.
+    """
     os.makedirs(out_dir, exist_ok=True)
     timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S%z")
 
@@ -227,7 +235,19 @@ def naive_dip_finder(
     if max_inflight is None:
         max_inflight = max(4, n_workers * 4)
 
-    for b in tqdm(mag_bins, desc="Bins", unit="bin"):
+    target_ids_norm: dict[str, set[str]] | None = None
+    if target_ids_by_bin:
+        target_ids_norm = {
+            str(bin_key): {str(asas_id) for asas_id in ids if asas_id is not None}
+            for bin_key, ids in target_ids_by_bin.items()
+            if ids
+        }
+
+    bins_iter = [b for b in mag_bins if not target_ids_norm or b in target_ids_norm]
+
+    collected_rows: list[dict] | None = [] if return_rows else None
+
+    for b in tqdm(bins_iter, desc="Bins", unit="bin"):
         suffix = f"_{timestamp}" if timestamp else ""
         out_path = os.path.join(out_dir, f"peaks_{b.replace('.','_')}{suffix}.{out_format}")
         if os.path.exists(out_path):
@@ -257,6 +277,8 @@ def naive_dip_finder(
                     if fut.done():
                         row = fut.result()
                         rows_buffer.append(row)
+                        if collected_rows is not None:
+                            collected_rows.append(row)
                         all_pending.remove(fut)
                         done_now += 1
                         flush_if_needed()
@@ -268,6 +290,10 @@ def naive_dip_finder(
                 mag_bins=[b],
                 id_column=id_column,
             ):
+                if target_ids_norm is not None:
+                    allowed = target_ids_norm.get(rec["mag_bin"])
+                    if not allowed or str(rec["asas_sn_id"]) not in allowed:
+                        continue
                 if not rec.get("found", False):
                     continue
                 pending.add(
@@ -305,4 +331,6 @@ def naive_dip_finder(
                 pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
                 rows_buffer.clear()
 
+    if collected_rows is not None:
+        return pd.DataFrame(collected_rows)
     return None
