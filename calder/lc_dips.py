@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
-from lc_baseline import per_camera_median_baseline, per_camera_mean_baseline, global_mean_baseline
+from lc_baseline import per_camera_trend_baseline, per_camera_median_baseline, per_camera_mean_baseline, global_mean_baseline
 from lc_utils import read_lc_dat, read_lc_raw, match_index_to_lc
 from df_utils import naive_peak_search
 from lc_metrics import run_metrics, is_dip_dominated
@@ -80,7 +80,7 @@ def process_record_naive(
     record: dict,
     baseline_kwargs: dict,
     *,
-    baseline_func=per_camera_median_baseline,
+    baseline_func=per_camera_trend_baseline,
     metrics_baseline_func=None,
     metrics_dip_threshold=0.3,
 ):
@@ -204,12 +204,12 @@ def naive_dip_finder(
     lc_path="/data/poohbah/1/assassin/rowan.90/lcsv2",
     mag_bins=('12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15'),
     id_column="asas_sn_id",
-    out_dir="./peak_results",
+    out_dir="./results_peaks",
     out_format="csv",
     n_workers=None,
     chunk_size=250000,
     max_inflight=None,
-    baseline_func=per_camera_median_baseline,
+    baseline_func=per_camera_trend_baseline,
     metrics_baseline_func=None,
     metrics_dip_threshold=0.3,
     **baseline_kwargs,

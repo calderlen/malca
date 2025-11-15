@@ -1,6 +1,6 @@
 import numpy as np
 
-from lc_baseline import per_camera_median_baseline, per_camera_mean_baseline, global_mean_baseline
+from lc_baseline import per_camera_trend_baseline, per_camera_median_baseline, per_camera_mean_baseline, global_mean_baseline
 
 
 def find_runs(mask, max_gap=1, min_length=1):
@@ -30,7 +30,7 @@ def find_runs(mask, max_gap=1, min_length=1):
 
 def run_metrics(
     df,
-    baseline_func=per_camera_median_baseline,
+    baseline_func=per_camera_trend_baseline,
     dip_threshold=0.3,
     **baseline_kwargs,
 ):

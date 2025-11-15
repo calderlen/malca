@@ -115,9 +115,7 @@ def run_one(
     return df
 
 def main() -> int:
-    p = argparse.ArgumentParser(
-        description="Run filter_csv on one peaks CSV or on selected peaks_*.csv in a directory; outputs mirror source."
-    )
+    p = argparse.ArgumentParser(description="Run filter_csv on one peaks CSV or on selected peaks_*.csv in a directory; outputs mirror source.")
     p.add_argument("csv_path", type=Path,
                    help="Input peaks CSV path OR a directory containing peaks_*.csv files.")
     # selection controls (only used when csv_path is a directory)
