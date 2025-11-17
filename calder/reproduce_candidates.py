@@ -42,12 +42,23 @@ BRAYDEN_CANDIDATES: list[dict[str, object]] = [
 ]
 
 
+def _load_manifest_df(manifest_path: Path | str) -> pd.DataFrame:
+    path = Path(manifest_path).expanduser()
+    suffix = path.suffix.lower()
+    if suffix in {".parquet", ".pq"}:
+        df = pd.read_parquet(path)
+    else:
+        df = pd.read_csv(path)
+    if "source_id" not in df.columns and "asas_sn_id" in df.columns:
+        df = df.rename(columns={"asas_sn_id": "source_id"})
+    df["source_id"] = df["source_id"].astype(str)
+    return df
+
+
 def _dataframe_from_candidates(data: Sequence[Mapping[str, object]] | None = None) -> pd.DataFrame:
     df = pd.DataFrame(data or BRAYDEN_CANDIDATES).copy()
     df.rename(columns={"Source": "source", "Source ID": "source_id"}, inplace=True)
     df["source_id"] = df["source_id"].astype(str)
-    if "mag_bin" not in df.columns or df["mag_bin"].isna().any():
-        raise ValueError("Candidate list must include 'mag_bin' for each source")
     return df
 
 
@@ -56,6 +67,29 @@ def _target_map(df: pd.DataFrame) -> dict[str, set[str]]:
     for mag_bin, chunk in df.groupby("mag_bin"):
         grouped[mag_bin] = set(chunk["source_id"].astype(str))
     return grouped
+
+
+def _records_from_manifest(df: pd.DataFrame) -> dict[str, list[dict[str, object]]]:
+    records: dict[str, list[dict[str, object]]] = {}
+    for rec in df.to_dict("records"):
+        source_id = str(rec.get("source_id"))
+        mag_bin = rec.get("mag_bin")
+        lc_dir = rec.get("lc_dir")
+        mag_bin_str = str(mag_bin)
+        lc_dir_str = str(lc_dir)
+        dat_path = rec.get("dat_path") or str(Path(lc_dir_str) / f"{source_id}.dat")
+        record = {
+            "mag_bin": mag_bin_str,
+            "index_num": rec.get("index_num"),
+            "index_csv": rec.get("index_csv"),
+            "lc_dir": lc_dir_str,
+            "asas_sn_id": source_id,
+            "dat_path": dat_path,
+            "found": bool(rec.get("dat_exists", True)),
+        }
+        records.setdefault(mag_bin_str, []).append(record)
+
+    return records
 
 
 def build_reproduction_report(
@@ -68,12 +102,37 @@ def build_reproduction_report(
     metrics_baseline_func=None,
     metrics_dip_threshold: float = 0.3,
     extra_columns: Iterable[str] | None = None,
+    manifest_path: Path | str | None = None,
     **baseline_kwargs,
 ) -> pd.DataFrame:
-    """Run a targeted naive_dip_finder search for the supplied candidates and report detection status."""
+    """
+    runs a targeted naive_dip_finder search for the supplied candidates and report detection status
+    """
 
-    df_targets = _dataframe_from_candidates(candidates)
+    manifest_df = _load_manifest_df(manifest_path) if manifest_path is not None else None
+
+    if candidates is not None:
+        df_targets = _dataframe_from_candidates(candidates)
+    elif manifest_df is not None:
+        df_targets = manifest_df.copy()
+    else:
+        df_targets = _dataframe_from_candidates(None)
+
+    manifest_subset = None
+    if manifest_df is not None:
+        manifest_subset = manifest_df[manifest_df["source_id"].isin(df_targets["source_id"])].copy()
+        if "mag_bin" in manifest_subset.columns:
+            df_targets = df_targets.drop(columns=["mag_bin"], errors="ignore").merge(
+                manifest_subset[["source_id", "mag_bin", "lc_dir", "index_num", "index_csv", "dat_path", "dat_exists"]],
+                on="source_id",
+                how="left",
+            )
+
+    if "mag_bin" not in df_targets.columns:
+        df_targets["mag_bin"] = manifest_subset["mag_bin"]
+
     target_map = _target_map(df_targets)
+    records_map = _records_from_manifest(manifest_subset) if manifest_subset is not None else None
 
     rows = naive_dip_finder(
         mag_bins=sorted(target_map),
@@ -84,6 +143,7 @@ def build_reproduction_report(
         metrics_baseline_func=metrics_baseline_func,
         metrics_dip_threshold=metrics_dip_threshold,
         target_ids_by_bin=target_map,
+        records_by_bin=records_map,
         return_rows=True,
         **baseline_kwargs,
     )
@@ -157,13 +217,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out-dir", default="./results_test", help="Directory for peak_results output")
     parser.add_argument("--out-format", choices=("csv", "parquet"), default="csv")
-    parser.add_argument("--n-workers", type=int, default=1, help="ProcessPool worker count for naive_dip_finder")
+    parser.add_argument("--n-workers", type=int, default=10, help="ProcessPool worker count for naive_dip_finder")
     parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per chunk flush for CSV output")
     parser.add_argument(
         "--metrics-dip-threshold",
         type=float,
         default=0.3,
         help="Dip threshold for run_metrics",
+    )
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help="Path to lc_manifest CSV/Parquet for targeted reproduction",
     )
     return parser
 
@@ -176,6 +241,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         n_workers=args.n_workers,
         chunk_size=args.chunk_size,
         metrics_dip_threshold=args.metrics_dip_threshold,
+        manifest_path=args.manifest,
     )
 
     columns = [

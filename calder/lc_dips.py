@@ -215,6 +215,7 @@ def naive_dip_finder(
     metrics_baseline_func=None,
     metrics_dip_threshold=0.3,
     target_ids_by_bin: dict[str, set[str]] | None = None,
+    records_by_bin: dict[str, list[dict[str, object]]] | None = None,
     return_rows: bool = False,
     **baseline_kwargs,
 ):
@@ -245,7 +246,36 @@ def naive_dip_finder(
             if ids
         }
 
-    bins_iter = [b for b in mag_bins if not target_ids_norm or b in target_ids_norm]
+    record_map: dict[str, list[dict[str, object]]] | None = None
+    if records_by_bin:
+        record_map = {}
+        for bin_key, records in records_by_bin.items():
+            norm_key = str(bin_key)
+            if not records:
+                continue
+            record_map[norm_key] = []
+            for rec in records:
+                if rec is None:
+                    continue
+                norm = dict(rec)
+                norm["mag_bin"] = str(norm.get("mag_bin", norm_key))
+                norm["asas_sn_id"] = str(norm.get("asas_sn_id"))
+                if not norm["asas_sn_id"]:
+                    continue
+                norm.setdefault("lc_dir", "")
+                norm.setdefault("index_num", None)
+                norm.setdefault("index_csv", None)
+                norm.setdefault("dat_path", os.path.join(norm["lc_dir"], f"{norm['asas_sn_id']}.dat"))
+                norm.setdefault("found", True)
+                record_map[norm_key].append(norm)
+
+    if record_map:
+        bins_iter = [b for b in mag_bins if b in record_map]
+        for extra in record_map.keys():
+            if extra not in bins_iter:
+                bins_iter.append(extra)
+    else:
+        bins_iter = [b for b in mag_bins if not target_ids_norm or b in target_ids_norm]
 
     collected_rows: list[dict] | None = [] if return_rows else None
 
@@ -288,15 +318,20 @@ def naive_dip_finder(
                         flush_if_needed()
                 return done_now
 
-            for rec in match_index_to_lc(
-                index_path=index_path,
-                lc_path=lc_path,
-                mag_bins=[b],
-                id_column=id_column,
-            ):
+            if record_map and b in record_map:
+                record_iter = record_map[b]
+            else:
+                record_iter = match_index_to_lc(
+                    index_path=index_path,
+                    lc_path=lc_path,
+                    mag_bins=[b],
+                    id_column=id_column,
+                )
+
+            for rec in record_iter:
                 if target_ids_norm is not None:
-                    allowed = target_ids_norm.get(rec["mag_bin"])
-                    if not allowed or str(rec["asas_sn_id"]) not in allowed:
+                    allowed = target_ids_norm.get(str(rec.get("mag_bin", b)))
+                    if allowed is None or str(rec.get("asas_sn_id")) not in allowed:
                         continue
                 if not rec.get("found", False):
                     continue
