@@ -13,3 +13,9 @@ Follow changes in the [`CHANGELOG.md`](CHANGELOG.md)
   - `build_manifest.py` – utility that maps `source_id → (mag_bin, index_csv, lc_dir, dat_path)` so reproduction runs can skip directory scans.
   - `script_search_naive.py` – thin CLI wrapper around `naive_dip_finder` for full-bin searches.
   - Other helpers (`df_utils.py`, `lc_baseline.py`, `lc_metrics.py`, `vsx_crossmatch.py`, etc.) that provide baselines, metrics, plotting, and catalog crossmatching
+
+## Dependencies
+- numpy, pandas, scipy, astropy
+- numba
+- tqdm
+- pyarrow
