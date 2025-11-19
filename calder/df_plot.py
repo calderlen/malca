@@ -27,6 +27,8 @@ asassn_raw_columns = [
                '90percentlow',
                '90percenthigh']
 
+PLOT_OUTPUT_DIR = Path("/data/poohbah/1/assassin/lenhart/asassn-variability/calder/lc_plots")
+
 asassn_index_columns = ['asassn_id',
                         'ra_deg',
                         'dec_deg',
@@ -139,7 +141,7 @@ def read_asassn_dat(dat_path):
 def plot_dat_lightcurve(
     dat_path,
     *,
-    out_path='/data/poohbah/1/assassin/lenhart/asassn-variability/calder/lc_plots',
+    out_path=None,
     title=None,
     jd_offset=0.0,
     figsize=(10, 6),
@@ -153,8 +155,8 @@ def plot_dat_lightcurve(
         dat_path (str | Path):
             Path to the .dat file.
         out_path (str | Path | None):
-            Where to store the resulting image. When None, a PNG is written
-            next to the .dat file.
+            Destination PNG path. When None, the figure is saved to
+            /data/poohbah/1/assassin/lenhart/asassn-variability/calder/lc_plots/<basename>.png.
         title (str | None):
             Figure title; defaults to "<basename> light curve".
         jd_offset (float):
@@ -211,12 +213,9 @@ def plot_dat_lightcurve(
     ax.set_title(fig_title)
 
     if out_path is None:
-        out_dir = Path("lc_plots")
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{dat_path.stem}.png"
-    else:
-        out_path = Path(out_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path = PLOT_OUTPUT_DIR / f"{dat_path.stem}.png"
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     fig.savefig(out_path, dpi=200)
     if show:
