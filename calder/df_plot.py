@@ -3,14 +3,9 @@ import matplotlib.ticker as tick
 from matplotlib.lines import Line2D
 import pandas as pd
 import numpy as np
-import scipy.signal
 from pathlib import Path
-from astropy.time import Time
-from df_utils import jd_to_year, year_to_jd
-from lc_baseline import global_mean_baseline, global_median_baseline, rolling_time_median, rolling_time_mad, per_camera_mean_baseline, per_camera_median_baseline, per_camera_trend_baseline
 
-# these are all of the non-derived columns we have to work with -- consider joining them together here as necessary
-
+# --- CONFIG ---
 
 asassn_columns=["JD",
                 "mag",
@@ -112,23 +107,10 @@ asassn_index_columns = ['asassn_id',
                         'nstat']
 
 
-# stats you have to work with, this is everything you've derived from the above data and the file structure
-import matplotlib.pyplot as pl
-import matplotlib.ticker as tick
-from matplotlib.lines import Line2D
-import pandas as pd
-import numpy as np
-from pathlib import Path
-
-# --- CONFIG ---
-PLOT_OUTPUT_DIR = Path("/data/poohbah/1/assassin/lenhart/asassn-variability/calder/lc_plots")
-DETECTION_RESULTS_FILE = Path("calder/detection_results.csv")
-
 def read_asassn_dat(dat_path):
     """
     Read an ASAS-SN .dat file using whitespace separation.
     """
-    # Using sep='\s+' is generally more robust for these files than fixed-width
     df = pd.read_csv(
         dat_path,
         sep=r'\s+',
@@ -176,6 +158,8 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, c
         "source_id": str(row.get("Source_ID")),
         "category": row.get("Category"),
     }
+
+# --- STANDARD PLOTTING FUNCTIONS ---
 
 def plot_one_lc(
     dat_path,
@@ -257,7 +241,7 @@ def plot_one_lc(
         if legend_handles:
             ax.legend(handles=list(legend_handles.values()), title="Cameras", loc="best", fontsize="small")
 
-    axes[-1].set_xlabel("JD (raw)")
+    axes[-1].set_xlabel("JD")
 
     asassn_id = dat_path.stem
     category = metadata.get("category") if metadata else None
@@ -301,7 +285,6 @@ def plot_many_lc(
     source_names=None,
     figsize=(10, 6),
     show=False,
-    # Removed jd_offset here too
 ):
     outputs = []
     dat_paths = list(dat_paths)
@@ -333,6 +316,7 @@ def plot_many_lc(
 
     return outputs
 
+# --- RESIDUAL PLOTTING FUNCTIONS (UPDATED) ---
 
 def _plot_lc_with_residuals_df(
     df,
@@ -370,6 +354,7 @@ def _plot_lc_with_residuals_df(
         constrained_layout=True,
         sharex="col",
     )
+    
     if n_cols == 1:
         axes = np.array(axes).reshape(2, 1)
 
@@ -388,18 +373,46 @@ def _plot_lc_with_residuals_df(
         raw_ax = axes[0, col_idx]
         resid_ax = axes[1, col_idx]
 
+        # --- TOP PLOT (RAW MAG) ---
         raw_ax.invert_yaxis()
         raw_ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        # Force JD labels on top axis
+        raw_ax.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
+
+        # --- BOTTOM PLOT (RESIDUALS) ---
         resid_ax.grid(True, which="both", linestyle="--", alpha=0.3)
-        resid_ax.axhline(0.0, color="black", linestyle="--", alpha=0.4)
+        resid_ax.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
+        
+        # Invert Y so positive residuals (dips) look like dips
+        resid_ax.invert_yaxis()
+
+        # Draw grey exclusion zones with zorder=0 so they are BEHIND points
+        # We fill from 0.3 to infinity (or large number) and -0.3 to -infinity
+        resid_ax.axhline(0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        resid_ax.axhline(-0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        
+        resid_ax.fill_between(
+            [band_df["JD"].min(), band_df["JD"].max()],
+            0.3, 100, # Fill "down" (visually) for dips > 0.3
+            color="lightgrey", alpha=0.5, zorder=0
+        )
+        resid_ax.fill_between(
+            [band_df["JD"].min(), band_df["JD"].max()],
+            -0.3, -100, # Fill "up" (visually) for negative deviations < -0.3
+            color="lightgrey", alpha=0.45, zorder=0
+        )
 
         legend_handles = {}
+        
         for cam in camera_ids:
             cam_subset = band_df[band_df["camera#"] == cam]
             if cam_subset.empty:
                 continue
+            
             color = camera_colors[cam]
             marker = band_markers.get(band, "o")
+            
+            # Top Panel
             raw_ax.errorbar(
                 cam_subset["JD"],
                 cam_subset["mag"],
@@ -414,6 +427,8 @@ def _plot_lc_with_residuals_df(
                 markeredgecolor="black",
                 markeredgewidth=0.5,
             )
+            
+            # Bottom Panel - zorder=3 puts points ON TOP of grey regions
             resid_ax.scatter(
                 cam_subset["JD"],
                 cam_subset["resid"],
@@ -423,46 +438,32 @@ def _plot_lc_with_residuals_df(
                 edgecolor="black",
                 linewidth=0.3,
                 marker=marker,
+                zorder=3 
             )
+            
             if cam not in legend_handles:
                 legend_handles[cam] = Line2D(
-                    [],
-                    [],
-                    color=color,
-                    marker="o",
-                    linestyle="",
-                    markeredgecolor="black",
-                    markeredgewidth=0.5,
+                    [], [],
+                    color=color, marker="o", linestyle="",
+                    markeredgecolor="black", markeredgewidth=0.5,
                     label=f"Camera {cam}",
                 )
 
-        raw_ax.set_ylabel(f"{band_labels.get(band, f'band {band}')} mag")
-        resid_ax.set_ylabel("Residual mag")
-        resid_ax.set_xlabel("JD (raw)")
-        if col_idx == 0:
-            raw_ax.xaxis.set_label_position("top")
-            raw_ax.set_xlabel("JD (raw)")
-        resid_ax.axhline(0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
-        resid_ax.axhline(-0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
-        ymin, ymax = resid_ax.get_ylim()
-        resid_ax.fill_between(
-            [band_df["JD"].min(), band_df["JD"].max()],
-            0.3,
-            ymax,
-            color="lightgrey",
-            alpha=0.5,
-            zorder=0,
-        )
-        resid_ax.fill_between(
-            [band_df["JD"].min(), band_df["JD"].max()],
-            ymin,
-            -0.3,
-            color="lightgrey",
-            alpha=0.45,
-            zorder=0,
-        )
-        for collection in resid_ax.collections:
-            collection.set_zorder(2)
+        band_name = band_labels.get(band, f'band {band}')
+        raw_ax.set_ylabel(f"{band_name} mag")
+        resid_ax.set_ylabel(f"Residual {band_name}")
+        resid_ax.set_xlabel("JD")
+
+        # Auto-scale residuals but respect inversion (max is bottom, min is top)
+        resid_min = band_df["resid"].min()
+        resid_max = band_df["resid"].max()
+        # Add 10% padding
+        pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
+        # If the data is entirely within the grey zone, ensure we still see the grey zone limits
+        plot_min = min(resid_min - pad, -0.35) 
+        plot_max = max(resid_max + pad, 0.35)
+        resid_ax.set_ylim(plot_max, plot_min)
+
         if legend_handles:
             raw_ax.legend(
                 handles=list(legend_handles.values()),
@@ -471,17 +472,25 @@ def _plot_lc_with_residuals_df(
                 fontsize="small",
             )
 
+    # Title Generation
     source_id = metadata.get("source_id") if metadata else None
     category = metadata.get("category") if metadata else None
     src_name = source_name or (metadata.get("source") if metadata else None)
-    label = f"{src_name} ({source_id})" if (src_name and source_id) else (src_name or source_id or "")
+    
+    if src_name and source_id:
+        label = f"{src_name} ({source_id})"
+    else:
+        label = src_name or source_id or ""
+        
     jd_start = float(data["JD"].min())
     jd_end = float(data["JD"].max())
     jd_label = f"JD {jd_start:.0f}-{jd_end:.0f}"
-    title_parts = [label] if label else []
-    if category:
-        title_parts.append(category)
+    
+    title_parts = []
+    if label: title_parts.append(label)
+    if category: title_parts.append(category)
     title_parts.append(jd_label)
+    
     fig.suptitle(title or " – ".join(title_parts), fontsize="large")
 
     if out_path is None:
@@ -503,12 +512,11 @@ def _plot_lc_with_residuals_df(
 
     return str(out_path)
 
-
 def plot_lc_with_residuals(
     df=None,
     *,
     dat_paths=None,
-    baseline_func=global_median_baseline,
+    baseline_func=None,
     baseline_kwargs=None,
     out_path=None,
     out_format="pdf",
@@ -519,12 +527,18 @@ def plot_lc_with_residuals(
     metadata=None,
 ):
     """
-    Plot raw light curves and residuals either from a provided DataFrame or by
-    computing baselines for one or more .dat files.
+    Wrapper to handle either a DataFrame or a list of file paths.
     """
+    # Fallback import if not passed
+    from lc_baseline import global_median_baseline
+    
+    if baseline_func is None:
+        baseline_func = global_median_baseline
+        
     baseline_kwargs = baseline_kwargs or {}
     results: list[str] = []
 
+    # Case 1: DF provided
     if df is not None:
         return _plot_lc_with_residuals_df(
             df,
@@ -537,6 +551,7 @@ def plot_lc_with_residuals(
             metadata=metadata,
         )
 
+    # Case 2: File paths provided
     if dat_paths is None:
         dat_paths = DEFAULT_DAT_PATHS
     dat_paths = list(dat_paths)
@@ -558,6 +573,7 @@ def plot_lc_with_residuals(
             print(f"[warn] Failed to read {path}: {exc}")
             continue
 
+        # Compute Baseline
         if baseline_func is not None:
             try:
                 df_base = baseline_func(df_raw, **baseline_kwargs)
@@ -571,6 +587,7 @@ def plot_lc_with_residuals(
             print(f"[warn] No 'resid' column for {path}; skipping.")
             continue
 
+        # Get Metadata
         meta = metadata
         if meta is None:
             try:
@@ -578,6 +595,7 @@ def plot_lc_with_residuals(
             except FileNotFoundError:
                 meta = None
 
+        # determine output filename
         if multi:
             ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
             dest = (out_dir / f"{path.stem}_residuals{ext}") if out_dir else None
