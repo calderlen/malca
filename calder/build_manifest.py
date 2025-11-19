@@ -144,7 +144,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("./lc_manifest.parquet"),
+        default=Path("./lc_manifest.csv"),
         help="Output file path (.csv or .parquet). Default: %(default)s",
     )
     parser.add_argument(

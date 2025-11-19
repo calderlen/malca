@@ -211,22 +211,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-format", choices=("csv", "parquet"), default="csv")
     parser.add_argument("--n-workers", type=int, default=10, help="ProcessPool worker count for naive_dip_finder")
     parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per chunk flush for CSV output")
-    parser.add_argument(
-        "--metrics-dip-threshold",
-        type=float,
-        default=0.3,
-        help="Dip threshold for run_metrics",
-    )
-    parser.add_argument(
-        "--manifest",
-        default=None,
-        help="Path to lc_manifest CSV/Parquet for targeted reproduction",
-    )
-    parser.add_argument(
-        "--baseline-func",
-        default=None,
-        help="Baseline function import path (e.g. module:func)",
-    )
+    parser.add_argument("--metrics-dip-threshold", type=float, default=0.3, help="Dip threshold for run_metrics",)
+    parser.add_argument("--manifest", default=None, help="Path to lc_manifest CSV/Parquet for targeted reproduction",)
+    parser.add_argument("--baseline-func", default=None,help="Baseline function import path (e.g. module:func)",)
     return parser
 
 

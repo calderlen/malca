@@ -2,6 +2,19 @@ import numpy as np
 import pandas as pd
 import scipy
 
+def year_to_jd(year):
+    jd_epoch = 2449718.5 - (2.458 * 10 **6)
+    year_epoch = 1995
+    days_in_year = 365.25
+    return (year-year_epoch)*days_in_year + jd_epoch-2450000
+
+
+def jd_to_year(jd):
+    jd_epoch = 2449718.5 - (2.458 * 10 **6)
+    year_epoch = 1995
+    days_in_year = 365.25
+    return year_epoch + (jd - jd_epoch) / days_in_year
+
 
 def naive_peak_search(
     df,
