@@ -7,6 +7,7 @@ import scipy.signal
 from pathlib import Path
 from astropy.time import Time
 from df_utils import jd_to_year, year_to_jd
+from lc_baseline import per_camera_trend_baseline
 
 # these are all of the non-derived columns we have to work with -- consider joining them together here as necessary
 
@@ -331,3 +332,245 @@ def plot_many_lc(
         if saved: outputs.append(saved)
 
     return outputs
+
+
+def _plot_lc_with_residuals_df(
+    df,
+    *,
+    out_path,
+    out_format="pdf",
+    title=None,
+    source_name=None,
+    figsize=(12, 8),
+    show=False,
+    metadata=None,
+):
+    required_cols = {"JD", "mag", "error", "v_g_band", "camera#", "resid"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"plot_lc_with_residuals requires columns: {missing}")
+
+    data = df.copy()
+    data = data[np.isfinite(data["JD"]) & np.isfinite(data["mag"])]
+    if data.empty:
+        raise ValueError("No finite JD/mag values available for plotting.")
+
+    bands = [band for band in (0, 1) if (data["v_g_band"] == band).any()]
+    if not bands:
+        bands = sorted(data["v_g_band"].dropna().unique())
+    if not bands:
+        raise ValueError("No band information available (v_g_band missing).")
+
+    n_cols = len(bands)
+    fig, axes = pl.subplots(
+        2,
+        n_cols,
+        figsize=figsize,
+        constrained_layout=True,
+        sharex="col",
+    )
+    if n_cols == 1:
+        axes = np.array(axes).reshape(2, 1)
+
+    camera_ids = sorted(data["camera#"].dropna().unique())
+    cmap = pl.get_cmap("tab20", max(len(camera_ids), 1))
+    camera_colors = {cam: cmap(i % cmap.N) for i, cam in enumerate(camera_ids)}
+    band_labels = {0: "g band", 1: "V band"}
+    band_markers = {0: "o", 1: "s"}
+
+    for col_idx, band in enumerate(bands):
+        band_mask = data["v_g_band"] == band
+        band_df = data[band_mask]
+        if band_df.empty:
+            continue
+
+        raw_ax = axes[0, col_idx]
+        resid_ax = axes[1, col_idx]
+
+        raw_ax.invert_yaxis()
+        raw_ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        resid_ax.grid(True, which="both", linestyle="--", alpha=0.3)
+        resid_ax.axhline(0.0, color="black", linestyle="--", alpha=0.4)
+
+        legend_handles = {}
+        for cam in camera_ids:
+            cam_subset = band_df[band_df["camera#"] == cam]
+            if cam_subset.empty:
+                continue
+            color = camera_colors[cam]
+            marker = band_markers.get(band, "o")
+            raw_ax.errorbar(
+                cam_subset["JD"],
+                cam_subset["mag"],
+                yerr=cam_subset["error"],
+                fmt=marker,
+                ms=4,
+                color=color,
+                alpha=0.8,
+                ecolor=color,
+                elinewidth=0.8,
+                capsize=2,
+                markeredgecolor="black",
+                markeredgewidth=0.5,
+            )
+            resid_ax.scatter(
+                cam_subset["JD"],
+                cam_subset["resid"],
+                s=10,
+                color=color,
+                alpha=0.8,
+                edgecolor="black",
+                linewidth=0.3,
+                marker=marker,
+            )
+            if cam not in legend_handles:
+                legend_handles[cam] = Line2D(
+                    [],
+                    [],
+                    color=color,
+                    marker="o",
+                    linestyle="",
+                    markeredgecolor="black",
+                    markeredgewidth=0.5,
+                    label=f"Camera {cam}",
+                )
+
+        raw_ax.set_ylabel(f"{band_labels.get(band, f'band {band}')} mag")
+        resid_ax.set_ylabel("Residual mag")
+        resid_ax.set_xlabel("JD (raw)")
+        if legend_handles:
+            raw_ax.legend(
+                handles=list(legend_handles.values()),
+                title="Cameras",
+                loc="best",
+                fontsize="small",
+            )
+
+    source_id = metadata.get("source_id") if metadata else None
+    category = metadata.get("category") if metadata else None
+    src_name = source_name or (metadata.get("source") if metadata else None)
+    label = f"{src_name} ({source_id})" if (src_name and source_id) else (src_name or source_id or "")
+    jd_start = float(data["JD"].min())
+    jd_end = float(data["JD"].max())
+    jd_label = f"JD {jd_start:.0f}-{jd_end:.0f}"
+    title_parts = [label] if label else []
+    if category:
+        title_parts.append(category)
+    title_parts.append(jd_label)
+    fig.suptitle(title or " – ".join(title_parts), fontsize="large")
+
+    if out_path is None:
+        base = source_id or src_name or "lc"
+        ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
+        out_path = PLOT_OUTPUT_DIR / f"{base}_residuals{ext}"
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if out_path.suffix.lower() == ".png":
+        fig.savefig(out_path, dpi=400)
+    else:
+        fig.savefig(out_path)
+
+    if show:
+        pl.show()
+    else:
+        pl.close(fig)
+
+    return str(out_path)
+
+
+def plot_lc_with_residuals(
+    df=None,
+    *,
+    dat_paths=None,
+    baseline_func=per_camera_trend_baseline,
+    baseline_kwargs=None,
+    out_path=None,
+    out_format="pdf",
+    title=None,
+    source_name=None,
+    figsize=(12, 8),
+    show=False,
+    metadata=None,
+):
+    """
+    Plot raw light curves and residuals either from a provided DataFrame or by
+    computing baselines for one or more .dat files.
+    """
+    baseline_kwargs = baseline_kwargs or {}
+    results: list[str] = []
+
+    if df is not None:
+        return _plot_lc_with_residuals_df(
+            df,
+            out_path=out_path,
+            out_format=out_format,
+            title=title,
+            source_name=source_name,
+            figsize=figsize,
+            show=show,
+            metadata=metadata,
+        )
+
+    if dat_paths is None:
+        dat_paths = DEFAULT_DAT_PATHS
+    dat_paths = list(dat_paths)
+
+    multi = len(dat_paths) > 1
+    out_dir = None
+    if multi:
+        if out_path is not None:
+            out_dir = Path(out_path)
+        else:
+            out_dir = PLOT_OUTPUT_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    for path in dat_paths:
+        path = Path(path)
+        try:
+            df_raw = read_asassn_dat(path)
+        except Exception as exc:
+            print(f"[warn] Failed to read {path}: {exc}")
+            continue
+
+        if baseline_func is not None:
+            try:
+                df_base = baseline_func(df_raw, **baseline_kwargs)
+            except Exception as exc:
+                print(f"[warn] baseline_func failed for {path}: {exc}")
+                continue
+        else:
+            df_base = df_raw
+
+        if "resid" not in df_base.columns:
+            print(f"[warn] No 'resid' column for {path}; skipping.")
+            continue
+
+        meta = metadata
+        if meta is None:
+            try:
+                meta = lookup_source_metadata(asassn_id=path.stem, dat_path=str(path))
+            except FileNotFoundError:
+                meta = None
+
+        if multi:
+            ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
+            dest = (out_dir / f"{path.stem}_residuals{ext}") if out_dir else None
+        else:
+            dest = out_path
+
+        result = _plot_lc_with_residuals_df(
+            df_base,
+            out_path=dest,
+            out_format=out_format,
+            title=title,
+            source_name=source_name,
+            figsize=figsize,
+            show=show,
+            metadata=meta,
+        )
+        results.append(result)
+
+    if not results:
+        return None
+    return results if multi else results[0]
