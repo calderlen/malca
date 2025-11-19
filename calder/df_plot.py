@@ -442,10 +442,27 @@ def _plot_lc_with_residuals_df(
         if col_idx == 0:
             raw_ax.xaxis.set_label_position("top")
             raw_ax.set_xlabel("JD (raw)")
-        resid_ax.axhline(0.3, color="black", linestyle="-", linewidth=0.8)
-        resid_ax.axhline(-0.3, color="black", linestyle="-", linewidth=0.8)
-        resid_ax.axhspan(0.3, resid_ax.get_ylim()[1], color="lightgrey", alpha=0.3)
-        resid_ax.axhspan(resid_ax.get_ylim()[0], -0.3, color="lightgrey", alpha=0.3)
+        resid_ax.axhline(0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        resid_ax.axhline(-0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+        ymin, ymax = resid_ax.get_ylim()
+        resid_ax.fill_between(
+            [band_df["JD"].min(), band_df["JD"].max()],
+            0.3,
+            ymax,
+            color="lightgrey",
+            alpha=0.5,
+            zorder=0,
+        )
+        resid_ax.fill_between(
+            [band_df["JD"].min(), band_df["JD"].max()],
+            ymin,
+            -0.3,
+            color="lightgrey",
+            alpha=0.45,
+            zorder=0,
+        )
+        for collection in resid_ax.collections:
+            collection.set_zorder(2)
         if legend_handles:
             raw_ax.legend(
                 handles=list(legend_handles.values()),
