@@ -226,7 +226,7 @@ def plot_one_lc(
     out_format="pdf",
     title=None,
     source_name=None,
-    jd_offset=0.0,
+    jd_offset=2458000,
     figsize=(10, 6),
     show=False,
 ):
@@ -275,6 +275,9 @@ def plot_one_lc(
         raise ValueError(f"No valid rows found in {dat_path}")
 
     df["JD_plot"] = df["JD"] - float(jd_offset)
+    df = df[df["JD_plot"] >= -2000].copy()
+    if df.empty:
+        raise ValueError(f"No data points at JD >= {jd_offset - 2000} in {dat_path}")
 
     fig, ax = pl.subplots(figsize=figsize, constrained_layout=True)
     ax.invert_yaxis()  # magnitudes: brighter lower
@@ -322,6 +325,7 @@ def plot_one_lc(
     ax.set_xlabel(f"JD - {jd_offset:g}" if jd_offset else "JD")
     ax.set_ylabel("Magnitude")
     ax.grid(True, which="both", linestyle="--", alpha=0.3)
+    ax.set_xlim(left=-2000)
     if camera_handles:
         ax.legend(
             handles=list(camera_handles.values()),
@@ -371,7 +375,7 @@ def plot_many_lc(
     out_dir=None,
     out_format="pdf",
     source_names=None,
-    jd_offset=0.0,
+    jd_offset=2458000,
     figsize=(10, 6),
     show=False,
 ):
