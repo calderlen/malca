@@ -375,9 +375,10 @@ def per_camera_trend_baseline(
         df_out.loc[idx, "sigma_resid"] = sigma_resid
 
     return df_out
+
 def global_rolling_median_baseline(
     df,
-    days=300.0,
+    days=1000.,
     min_points=10,
     t_col="JD",
     mag_col="mag",
@@ -427,7 +428,7 @@ def global_rolling_median_baseline(
 
 def global_rolling_mean_baseline(
     df,
-    days=300.0,
+    days=1000.,
     min_points=10,
     t_col="JD",
     mag_col="mag",

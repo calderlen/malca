@@ -4,6 +4,7 @@ from matplotlib.lines import Line2D
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import time
 
 from lc_baseline import (
     global_mean_baseline,
@@ -535,6 +536,8 @@ def plot_lc_with_residuals(
     figsize=(12, 8),
     show=False,
     metadata=None,
+    baseline_tag=None,
+    timestamp_output=False,
 ):
     """
     Wrapper to handle either a DataFrame or a list of file paths.
@@ -543,13 +546,20 @@ def plot_lc_with_residuals(
         baseline_func = global_rolling_mean_baseline
         
     baseline_kwargs = baseline_kwargs or {}
+    if baseline_tag is None and baseline_func is not None:
+        baseline_tag = getattr(baseline_func, "__name__", "baseline")
     results: list[str] = []
 
     # Case 1: DF provided
     if df is not None:
+        dest = out_path
+        if timestamp_output and dest is not None:
+            dest = Path(dest)
+            stamp = Path(time.strftime("%Y%m%d_%H%M%S"))
+            dest = dest.with_name(f"{dest.stem}_{stamp}{dest.suffix}")
         return _plot_lc_with_residuals_df(
             df,
-            out_path=out_path,
+            out_path=dest,
             out_format=out_format,
             title=title,
             source_name=source_name,
@@ -605,9 +615,22 @@ def plot_lc_with_residuals(
         # determine output filename
         if multi:
             ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
-            dest = (out_dir / f"{path.stem}_residuals{ext}") if out_dir else None
+            base_name = f"{path.stem}_{baseline_tag}" if baseline_tag else f"{path.stem}"
+            if timestamp_output:
+                stamp = time.strftime("%Y%m%d_%H%M%S")
+                base_name = f"{base_name}_{stamp}"
+            dest = (out_dir / f"{base_name}_residuals{ext}") if out_dir else None
         else:
             dest = out_path
+            if dest is not None:
+                dest = Path(dest)
+                base_name = dest.stem
+                if baseline_tag:
+                    base_name = f"{base_name}_{baseline_tag}"
+                if timestamp_output:
+                    stamp = time.strftime("%Y%m%d_%H%M%S")
+                    base_name = f"{base_name}_{stamp}"
+                dest = dest.with_name(f"{base_name}{dest.suffix}")
 
         result = _plot_lc_with_residuals_df(
             df_base,
