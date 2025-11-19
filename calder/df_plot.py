@@ -5,6 +5,16 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+from lc_baseline import (
+    global_mean_baseline,
+    global_median_baseline,
+    global_rolling_mean_baseline,
+    global_rolling_median_baseline,
+    per_camera_mean_baseline,
+    per_camera_median_baseline,
+    per_camera_trend_baseline,
+)
+
 # --- CONFIG ---
 
 asassn_columns=["JD",
@@ -529,11 +539,8 @@ def plot_lc_with_residuals(
     """
     Wrapper to handle either a DataFrame or a list of file paths.
     """
-    # Fallback import if not passed
-    from lc_baseline import global_median_baseline
-    
     if baseline_func is None:
-        baseline_func = global_median_baseline
+        baseline_func = global_rolling_mean_baseline
         
     baseline_kwargs = baseline_kwargs or {}
     results: list[str] = []
