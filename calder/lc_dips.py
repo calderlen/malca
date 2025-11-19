@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse  # <--- Added this
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -7,6 +8,7 @@ import os
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
+# Assuming these imports are available in your environment
 from lc_baseline import per_camera_trend_baseline, per_camera_median_baseline, per_camera_mean_baseline, global_mean_baseline
 from lc_utils import read_lc_dat, read_lc_raw, match_index_to_lc
 from df_utils import naive_peak_search
@@ -190,12 +192,19 @@ def process_record_naive(
         row["raw_median_max"] = raw_median_max
         row["raw_median_max_camera"] = int(raw_df.loc[raw_df["median"].idxmax(), "camera#"])
         row["raw_median_range"] = raw_median_max - raw_median_min
+        
+        # --- ADDED OPTIMIZATION FROM PREVIOUS DISCUSSION ---
+        # Calculating raw scatter here to avoid I/O bottlenecks during filtering later
+        scatter_vals = (raw_df["sig1_high"] - raw_df["sig1_low"]).to_numpy(dtype=float)
+        finite_scatter = scatter_vals[np.isfinite(scatter_vals)]
+        row["raw_robust_scatter"] = float(np.nanmedian(finite_scatter)) if finite_scatter.size > 0 else np.nan
     else:
         row["raw_median_min"] = np.nan
         row["raw_median_min_camera"] = np.nan
         row["raw_median_max"] = np.nan
         row["raw_median_max_camera"] = np.nan
         row["raw_median_range"] = np.nan
+        row["raw_robust_scatter"] = np.nan
 
     return row
 
@@ -373,3 +382,64 @@ def naive_dip_finder(
     if collected_rows is not None:
         return pd.DataFrame(collected_rows)
     return None
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run naive_dip_finder across bins.")
+    parser.add_argument(
+        "--mag-bin",
+        dest="mag_bins",
+        action="append",
+        choices=MAG_BINS,
+        help="Specify bins to run; omit to process all.",
+    )
+    parser.add_argument("--out-dir", default="./results_peaks")
+    parser.add_argument("--format", choices=("parquet", "csv"), default="csv")
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=10,
+        help="Parallel processes",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=250000,
+        help="Rows per CSV flush",
+    )
+    parser.add_argument(
+        "--metrics-baseline",
+        dest="metrics_baseline",
+        default=None,
+        help="Baseline function import path (e.g. 'lc_baseline:per_camera_trend_baseline')",
+    )
+    parser.add_argument(
+        "--metrics-dip-threshold",
+        dest="metrics_dip_threshold",
+        type=float,
+        default=0.3,
+        help="Dip threshold used by run_metrics / run_metrics_pcb.",
+    )
+
+    args = parser.parse_args()
+    bins = args.mag_bins or MAG_BINS
+
+    metrics_baseline_func = None
+    if args.metrics_baseline:
+        try:
+            module_path, func_name = args.metrics_baseline.split(":")
+            module = __import__(module_path, fromlist=[func_name])
+            metrics_baseline_func = getattr(module, func_name)
+            print(f"[CLI] Loaded metrics_baseline_func: {func_name} from {module_path}")
+        except Exception as e:
+            print(f"[CLI] Error loading --metrics-baseline '{args.metrics_baseline}': {e}")
+            exit(1)
+
+    naive_dip_finder(
+        mag_bins=bins,
+        out_dir=args.out_dir,
+        out_format=args.format,
+        n_workers=args.n_workers,
+        chunk_size=args.chunk_size,
+        metrics_baseline_func=metrics_baseline_func,
+        metrics_dip_threshold=args.metrics_dip_threshold,
+    )
