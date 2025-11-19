@@ -178,7 +178,19 @@ def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"detection_results file not found: {csv_path}")
-    return pd.read_csv(csv_path)
+    df = pd.read_csv(
+        csv_path,
+        dtype={
+            "Source_ID": "string",
+            "Source": "string",
+            "DAT_Path": "string",
+            "Category": "string",
+        },
+        keep_default_na=False,
+    )
+    df["Source_ID"] = df["Source_ID"].astype(str).str.strip()
+    df["Source"] = df["Source"].astype(str).str.strip()
+    return df
 
 
 def lookup_source_metadata(asassn_id=None, *, source_name=None, csv_path=DETECTION_RESULTS_FILE):
@@ -314,10 +326,17 @@ def plot_one_lc(
 
     asassn_id = dat_path.stem
     category = metadata.get("category") if metadata else None
+    jd_start = float(df["JD"].min())
+    jd_end = float(df["JD"].max())
+    jd_label = f"JD {jd_start:.0f}-{jd_end:.0f}"
     if source_name is None and metadata:
         source_name = metadata.get("source")
     label = f"{source_name} ({asassn_id})" if source_name else asassn_id
-    auto_title = f"{label} – {category}" if category else f"{label}"
+    parts = [label]
+    if category:
+        parts.append(category)
+    parts.append(jd_label)
+    auto_title = " – ".join(parts)
     fig_title = title or f"{auto_title} light curve"
     ax.set_title(fig_title)
 
