@@ -188,12 +188,14 @@ def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
         },
         keep_default_na=False,
     )
-    df["Source_ID"] = df["Source_ID"].astype(str).str.strip()
+    df["DAT_Path"] = df["DAT_Path"].astype(str).str.strip()
+    df["Source_ID"] = df["DAT_Path"].apply(lambda p: Path(p).stem if p else "")
     df["Source"] = df["Source"].astype(str).str.strip()
+    df["Category"] = df["Category"].astype(str).str.strip()
     return df
 
 
-def lookup_source_metadata(asassn_id=None, *, source_name=None, csv_path=DETECTION_RESULTS_FILE):
+def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, csv_path=DETECTION_RESULTS_FILE):
     """
     Fetch DAT_Path, Source, and Source_ID for a given ASAS-SN ID or J-name.
     """
@@ -203,6 +205,8 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, csv_path=DETECTI
         mask &= df["Source_ID"].astype(str).str.strip() == str(asassn_id).strip()
     if source_name is not None:
         mask &= df["Source"].astype(str).str.strip().str.lower() == str(source_name).strip().lower()
+    if dat_path is not None:
+        mask &= df["DAT_Path"].astype(str).str.strip() == str(dat_path).strip()
     matches = df.loc[mask]
     if matches.empty:
         return None
@@ -252,7 +256,10 @@ def plot_one_lc(
     dat_path = Path(dat_path)
     metadata = None
     try:
-        metadata = lookup_source_metadata(asassn_id=dat_path.stem)
+        metadata = lookup_source_metadata(
+            asassn_id=dat_path.stem,
+            dat_path=str(dat_path),
+        )
     except FileNotFoundError:
         metadata = None
 
