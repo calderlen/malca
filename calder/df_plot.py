@@ -7,7 +7,7 @@ import scipy.signal
 from pathlib import Path
 from astropy.time import Time
 from df_utils import jd_to_year, year_to_jd
-from lc_baseline import per_camera_trend_baseline
+from lc_baseline import global_mean_baseline, global_median_baseline, rolling_time_median, rolling_time_mad, per_camera_mean_baseline, per_camera_median_baseline, per_camera_trend_baseline
 
 # these are all of the non-derived columns we have to work with -- consider joining them together here as necessary
 
@@ -508,7 +508,7 @@ def plot_lc_with_residuals(
     df=None,
     *,
     dat_paths=None,
-    baseline_func=per_camera_trend_baseline,
+    baseline_func=global_median_baseline,
     baseline_kwargs=None,
     out_path=None,
     out_format="pdf",
