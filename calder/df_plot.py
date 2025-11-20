@@ -70,6 +70,37 @@ DEFAULT_DAT_PATHS = [
     "/data/poohbah/1/assassin/rowan.90/lcsv2/13_13.5/lc6_cal/317827964025.dat",
 ]
 
+SKYPATROL_CSV_PATHS = [
+    "calder/lc_data_skypatrol/120259184943-light-curves.csv",
+    "calder/lc_data_skypatrol/223339338105-light-curves.csv",
+    "calder/lc_data_skypatrol/231929175915-light-curves.csv",
+    "calder/lc_data_skypatrol/25770019815-light-curves.csv",
+    "calder/lc_data_skypatrol/266288137752-light-curves.csv",
+    "calder/lc_data_skypatrol/317827964025-light-curves.csv",
+    "calder/lc_data_skypatrol/326417831663-light-curves.csv",
+    "calder/lc_data_skypatrol/335007754417-light-curves.csv",
+    "calder/lc_data_skypatrol/352187470767-light-curves.csv",
+    "calder/lc_data_skypatrol/360777377116-light-curves.csv",
+    "calder/lc_data_skypatrol/377957522430-light-curves.csv",
+    "calder/lc_data_skypatrol/377958261591-light-curves.csv",
+    "calder/lc_data_skypatrol/412317159120-light-curves.csv",
+    "calder/lc_data_skypatrol/438086901547-light-curves.csv",
+    "calder/lc_data_skypatrol/438086977939-light-curves.csv",
+    "calder/lc_data_skypatrol/455267102087-light-curves.csv",
+    "calder/lc_data_skypatrol/463856535113-light-curves.csv",
+    "calder/lc_data_skypatrol/472447294641-light-curves.csv",
+    "calder/lc_data_skypatrol/515396514761-light-curves.csv",
+    "calder/lc_data_skypatrol/515397118400-light-curves.csv",
+    "calder/lc_data_skypatrol/532576686103-light-curves.csv",
+    "calder/lc_data_skypatrol/601296043597-light-curves.csv",
+    "calder/lc_data_skypatrol/60130040391-light-curves.csv",
+    "calder/lc_data_skypatrol/609886184506-light-curves.csv",
+    "calder/lc_data_skypatrol/635655234580-light-curves.csv",
+    "calder/lc_data_skypatrol/644245387906-light-curves.csv",
+    "calder/lc_data_skypatrol/661425129485-light-curves.csv",
+    "calder/lc_data_skypatrol/68720274411-light-curves.csv",
+]
+
 asassn_index_columns = ['asassn_id',
                         'ra_deg',
                         'dec_deg',
@@ -136,6 +167,68 @@ def read_asassn_dat(dat_path):
     )
     return df
 
+def read_skypatrol_csv(csv_path):
+    """
+    Read a SkyPatrol CSV, remapping columns to the ASAS-SN schema.
+    """
+    csv_path = Path(csv_path)
+    df = pd.read_csv(
+        csv_path,
+        comment="#",
+        dtype={
+            "JD": float,
+            "Flux": float,
+            "Flux Error": float,
+            "Mag": float,
+            "Mag Error": float,
+            "Limit": float,
+            "FWHM": float,
+            "Filter": "string",
+            "Quality": "string",
+            "Camera": "string",
+        },
+    )
+    rename_map = {
+        "Flux": "flux",
+        "Flux Error": "flux_error",
+        "Mag": "mag",
+        "Mag Error": "error",
+        "Limit": "limit",
+        "FWHM": "fwhm",
+        "Filter": "filter_band",
+        "Quality": "quality_flag",
+        "Camera": "camera",
+    }
+    df = df.rename(columns=rename_map)
+    df["JD"] = pd.to_numeric(df["JD"], errors="coerce")
+    df["mag"] = pd.to_numeric(df["mag"], errors="coerce")
+    df["error"] = pd.to_numeric(df["error"], errors="coerce")
+    df["flux"] = pd.to_numeric(df.get("flux"), errors="coerce")
+    df["flux_error"] = pd.to_numeric(df.get("flux_error"), errors="coerce")
+    df["camera"] = df["camera"].astype(str).str.strip()
+    df["camera#"] = df["camera"]
+    df["cam_field"] = df["camera#"]
+    df["quality_flag"] = df["quality_flag"].astype(str).str.strip().str.upper()
+    df["good_bad"] = (df["quality_flag"] == "G").astype(int)
+    df["saturated"] = 0
+
+    filt = df["filter_band"].astype(str).str.strip().str.lower()
+    band_map = {"v": 1, "g": 0}
+    df["v_g_band"] = filt.map(band_map)
+    df = df[df["v_g_band"].notna()].copy()
+    df["v_g_band"] = df["v_g_band"].astype(int)
+
+    df = df[pd.notna(df["JD"]) & pd.notna(df["mag"])]
+    df = df.sort_values("JD").reset_index(drop=True)
+    return df
+
+def _load_lightcurve_df(path):
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return read_skypatrol_csv(path)
+    return read_asassn_dat(path)
+
 def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
     csv_path = Path(csv_path)
     if not csv_path.exists():
@@ -171,6 +264,28 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, c
         "category": row.get("Category"),
     }
 
+def _lookup_metadata_for_path(path: Path):
+    """
+    Try to resolve metadata for a given light curve path, falling back to ID stems.
+    """
+    metadata = None
+    stem = path.stem
+    try:
+        metadata = lookup_source_metadata(asassn_id=stem, dat_path=str(path))
+    except FileNotFoundError:
+        metadata = None
+
+    if metadata:
+        return metadata
+
+    base_id = stem.split("-", 1)[0]
+    if base_id and base_id != stem:
+        try:
+            metadata = lookup_source_metadata(asassn_id=base_id)
+        except FileNotFoundError:
+            metadata = None
+    return metadata
+
 # --- STANDARD PLOTTING FUNCTIONS ---
 
 def plot_one_lc(
@@ -185,13 +300,9 @@ def plot_one_lc(
     **kwargs
 ):
     dat_path = Path(dat_path)
-    metadata = None
-    try:
-        metadata = lookup_source_metadata(asassn_id=dat_path.stem, dat_path=str(dat_path))
-    except FileNotFoundError:
-        metadata = None
+    metadata = _lookup_metadata_for_path(dat_path)
 
-    df = read_asassn_dat(dat_path)
+    df = _load_lightcurve_df(dat_path)
 
     # Cleaning
     mask = df["JD"].notna() & df["mag"].notna()
@@ -552,7 +663,7 @@ def plot_lc_with_residuals(
     Wrapper to handle either a DataFrame or a list of file paths.
     """
     if baseline_func is None:
-        baseline_func = global_rolling_mean_baseline
+        baseline_func = per_camera_trend_baseline
         
     baseline_kwargs = baseline_kwargs or {}
     if baseline_tag is None and baseline_func is not None:
@@ -594,7 +705,7 @@ def plot_lc_with_residuals(
     for path in dat_paths:
         path = Path(path)
         try:
-            df_raw = read_asassn_dat(path)
+            df_raw = _load_lightcurve_df(path)
         except Exception as exc:
             print(f"[warn] Failed to read {path}: {exc}")
             continue
@@ -616,10 +727,7 @@ def plot_lc_with_residuals(
         # Get Metadata
         meta = metadata
         if meta is None:
-            try:
-                meta = lookup_source_metadata(asassn_id=path.stem, dat_path=str(path))
-            except FileNotFoundError:
-                meta = None
+            meta = _lookup_metadata_for_path(path)
 
         # determine output filename
         if multi:

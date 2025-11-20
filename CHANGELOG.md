@@ -1,5 +1,9 @@
 # Changelog
 
+## 21-11-2025
+- Added SkyPatrol CSV defaults to `df_plot` and taught the plotting/residual helpers to auto-detect and load the SkyPatrol format so `SKYPATROL_CSV_PATHS` can be plotted directly.
+- Extended `reproduce_candidates.py` so the `--candidates` flag can point at built-in lists (e.g., `skypatrol_lightcurve_files`) or files while keeping detection summaries resilient when no peaks are returned.
+- Cleaned up the `README.md` dependency list to match the current pure-Python baseline implementations.
 
 ## 19-11-2025
 -  switched from Boolean masks to binary search w/ `np.searchsorted` in `lc_baseline.rolling_time_median` and `lc_baseline.rolling_time_mad`

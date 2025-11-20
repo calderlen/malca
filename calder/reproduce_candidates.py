@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
+import numpy as np
 import pandas as pd
 
 from lc_dips import naive_dip_finder
@@ -39,6 +40,17 @@ brayden_candidates: list[dict[str, object]] = [
     {"source": "J073234-200049", "source_id": "335007754417", "category": "Single Eclipse Binaries", "mag_bin": "14.5_15", "search_method": "Known", "expected_detected": True},
     {"source": "J223332+565552", "source_id": "60130040391", "category": "Single Eclipse Binaries", "mag_bin": "12.5_13", "search_method": "Known", "expected_detected": True},
     {"source": "J183210-173432", "source_id": "317827964025", "category": "Single Eclipse Binaries", "mag_bin": "12.5_13", "search_method": "Pipeline", "expected_detected": False},
+]
+
+skypatrol_lightcurve_files = [
+    "calder/lc_data_skypatrol/231929175915-light-curves.csv",
+    "calder/lc_data_skypatrol/266288137752-light-curves.csv",
+    "calder/lc_data_skypatrol/352187470767-light-curves.csv",
+    "calder/lc_data_skypatrol/438086977939-light-curves.csv",
+    "calder/lc_data_skypatrol/455267102087-light-curves.csv",
+    "calder/lc_data_skypatrol/463856535113-light-curves.csv",
+    "calder/lc_data_skypatrol/532576686103-light-curves.csv",
+    "calder/lc_data_skypatrol/609886184506-light-curves.csv",
 ]
 
 
@@ -92,6 +104,77 @@ def _records_from_manifest(df: pd.DataFrame) -> dict[str, list[dict[str, object]
     return records
 
 
+def _coerce_candidate_records(data) -> list[dict[str, object]]:
+    if data is None:
+        return list(brayden_candidates)
+
+    if isinstance(data, pd.DataFrame):
+        records = data.to_dict("records")
+    else:
+        records = list(data)
+
+    if not records:
+        return []
+
+    first = records[0]
+    if isinstance(first, Mapping):
+        coerced: list[dict[str, object]] = []
+        for rec in records:
+            if not isinstance(rec, Mapping):
+                continue
+            new = dict(rec)
+            source_id = str(new.get("source_id", new.get("Source_ID", ""))).strip()
+            if not source_id:
+                continue
+            new["source_id"] = source_id
+            new.setdefault("source", new.get("source", source_id))
+            coerced.append(new)
+        return coerced
+
+    # assume list of file paths or source ids, try to match known candidates
+    ids = []
+    for entry in records:
+        entry_str = str(entry)
+        entry_path = Path(entry_str)
+        stem = entry_path.stem
+        source_id = stem.split("-")[0] if stem else entry_str
+        ids.append(source_id)
+
+    lookup = {c["source_id"]: c for c in brayden_candidates}
+    coerced = []
+    seen = set()
+    for source_id in ids:
+        if source_id in seen:
+            continue
+        seen.add(source_id)
+        if source_id in lookup:
+            coerced.append(lookup[source_id])
+        else:
+            coerced.append({"source": source_id, "source_id": source_id, "mag_bin": None})
+    return coerced
+
+
+def _resolve_candidates(spec: str | None):
+    if spec is None:
+        return list(brayden_candidates)
+
+    env = globals()
+    if spec in env:
+        return _coerce_candidate_records(env[spec])
+
+    cand_path = Path(spec)
+    if cand_path.exists():
+        if cand_path.suffix.lower() in {".csv", ".tsv"}:
+            df = pd.read_csv(cand_path)
+        elif cand_path.suffix.lower() in {".parquet", ".pq"}:
+            df = pd.read_parquet(cand_path)
+        else:
+            raise SystemExit(f"Unsupported candidates file format: {cand_path}")
+        return _coerce_candidate_records(df)
+
+    raise SystemExit(f"Unknown candidates spec '{spec}'. Provide a built-in name or a valid file path.")
+
+
 def build_reproduction_report(
     candidates: Sequence[Mapping[str, object]] | None = None,
     *,
@@ -107,7 +190,7 @@ def build_reproduction_report(
 ) -> pd.DataFrame:
     manifest_df = _load_manifest_df(manifest_path) if manifest_path is not None else None
 
-    baseline_candidates = candidates or brayden_candidates
+    baseline_candidates = candidates if candidates is not None else brayden_candidates
     df_targets = _dataframe_from_candidates(baseline_candidates)
 
     manifest_subset = None
@@ -142,15 +225,23 @@ def build_reproduction_report(
     )
 
     rows_df = rows.copy() if rows is not None else pd.DataFrame()
-    if not rows_df.empty:
+    if rows_df.empty:
+        rows_df = pd.DataFrame(columns=["source_id", "mag_bin"])
+    else:
         rows_df = rows_df.copy()
-        rows_df["source_id"] = rows_df["asas_sn_id"].astype(str)
-        rows_df = rows_df.drop(columns=["asas_sn_id"], errors="ignore")
+    if "source_id" not in rows_df.columns:
+        if "asas_sn_id" in rows_df.columns:
+            rows_df["source_id"] = rows_df["asas_sn_id"].astype(str)
+        else:
+            rows_df["source_id"] = ""
+    rows_df = rows_df.drop(columns=["asas_sn_id"], errors="ignore")
+    if "mag_bin" not in rows_df.columns:
+        rows_df["mag_bin"] = ""
 
     merged = df_targets.merge(rows_df, on=["source_id", "mag_bin"], how="left", suffixes=("", "_det"))
 
-    g_peaks = merged.get("g_n_peaks")
-    v_peaks = merged.get("v_n_peaks")
+    g_peaks = merged["g_n_peaks"] if "g_n_peaks" in merged.columns else pd.Series(np.nan, index=merged.index)
+    v_peaks = merged["v_n_peaks"] if "v_n_peaks" in merged.columns else pd.Series(np.nan, index=merged.index)
     merged["detected"] = (
         (g_peaks.fillna(0).astype(float) > 0) | (v_peaks.fillna(0).astype(float) > 0)
     )
@@ -200,6 +291,7 @@ def build_reproduction_report(
 
 __all__ = [
     "brayden_candidates",
+    "skypatrol_lightcurve_files",
     "build_reproduction_report",
 ]
 
@@ -211,22 +303,29 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-format", choices=("csv", "parquet"), default="csv")
     parser.add_argument("--n-workers", type=int, default=10, help="ProcessPool worker count for naive_dip_finder")
     parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per chunk flush for CSV output")
-    parser.add_argument("--metrics-dip-threshold", type=float, default=0.3, help="Dip threshold for run_metrics",)
-    parser.add_argument("--manifest", default=None, help="Path to lc_manifest CSV/Parquet for targeted reproduction",)
-    parser.add_argument("--baseline-func", default=None,help="Baseline function import path (e.g. module:func)",)
+    parser.add_argument("--metrics-dip-threshold", type=float, default=0.3, help="Dip threshold for run_metrics")
+    parser.add_argument("--manifest", default=None, help="Path to lc_manifest CSV/Parquet for targeted reproduction")
+    parser.add_argument("--baseline-func", default=None, help="Baseline function import path (e.g. module:func)")
+    parser.add_argument("--candidates", default=None, help="Candidate spec (built-in list name or path to CSV/Parquet file).",
+    )
     return parser
-
 
 def main(argv: Iterable[str] | None = None) -> None:
     args = _build_parser().parse_args(argv)
-    
+
     kwargs = {}
     if args.baseline_func:
-        mod_name, func_name = args.baseline_func.split(":")
+        if ":" in args.baseline_func:
+            mod_name, func_name = args.baseline_func.split(":", 1)
+        else:
+            mod_name, func_name = "lc_baseline", args.baseline_func
         mod = __import__(mod_name, fromlist=[func_name])
         kwargs["baseline_func"] = getattr(mod, func_name)
 
+    candidate_data = _resolve_candidates(args.candidates)
+
     report = build_reproduction_report(
+        candidates=candidate_data,
         out_dir=args.out_dir,
         out_format=args.out_format,
         n_workers=args.n_workers,

@@ -16,6 +16,5 @@ Follow changes in the [`CHANGELOG.md`](CHANGELOG.md)
 
 ## Dependencies
 - numpy, pandas, scipy, astropy
-- numba
 - tqdm
 - pyarrow
