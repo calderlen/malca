@@ -283,10 +283,10 @@ def _lookup_metadata_for_path(path: Path):
     meta = dict(meta)
     meta["data_source"] = source_type
     return meta
-
 def _plot_lc_with_residuals_df(
     df,
     *,
+    max_error=5.0,
     out_path,
     out_format="pdf",
     title=None,
@@ -296,19 +296,16 @@ def _plot_lc_with_residuals_df(
     metadata=None,
 ):
     data = df.copy()
+    
+    if "error" in data.columns:
+        data = data[data["error"] < max_error]
+
     data = data[np.isfinite(data["JD"]) & np.isfinite(data["mag"])]
     
-    # --- AUTO-DETECT JD FORMAT ---
     median_jd = data["JD"].median()
-    
     if median_jd > 2000000:
-        # Case 1: Full Julian Date (e.g., 2,458,000)
-        # We want 0 at 2458000, so we subtract 2,458,000.
-        data["JD_plot"] = data["JD"] - JD_OFFSET 
+        data["JD_plot"] = data["JD"] - JD_OFFSET
     else:
-        # Case 2: Reduced Julian Date (e.g., 8,000)
-        # These are likely (JD - 2,450,000). 
-        # To align 8000 (which represents 2458000) to 0, we subtract 8000.
         data["JD_plot"] = data["JD"] - 8000.0
 
     preferred_order = [1, 0]
@@ -341,8 +338,6 @@ def _plot_lc_with_residuals_df(
         raw_ax.invert_yaxis()
         raw_ax.grid(True, which="both", linestyle="--", alpha=0.3)
         raw_ax.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
-        
-        # Consistent X-axis label for both file types
         raw_ax.set_xlabel(f"JD - {int(JD_OFFSET)} [d]")
         raw_ax.xaxis.set_label_position("top")
         
@@ -382,7 +377,6 @@ def _plot_lc_with_residuals_df(
         resid_ax.set_ylabel(f"Residual {band_name}")
         resid_ax.set_xlabel("JD")
         
-        # Dynamic Y-limits for residuals
         resid_min, resid_max = band_df["resid"].min(), band_df["resid"].max()
         pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
         resid_ax.set_ylim(max(resid_max + pad, 0.35), min(resid_min - pad, -0.35))
@@ -390,11 +384,9 @@ def _plot_lc_with_residuals_df(
         if legend_handles:
             raw_ax.legend(handles=list(legend_handles.values()), title="Cameras", loc="best", fontsize="small")
             
-    # Title Logic (using metadata from the previous fix)
     src_name = source_name or (metadata.get("source") if metadata else None)
     source_id = metadata.get("source_id") if metadata else None
     category = metadata.get("category") if metadata else None
-    source_type = metadata.get("data_source") if metadata else None
     
     if src_name and source_id:
         label = f"{src_name} ({source_id})"
@@ -405,14 +397,12 @@ def _plot_lc_with_residuals_df(
     else:
         label = "Source"
 
-    # Label using the original JD range for clarity
     jd_start = float(data["JD"].min())
     jd_end = float(data["JD"].max())
     jd_label = f"JD {jd_start:.0f}-{jd_end:.0f}"
     
     title_parts = [label]
     if category: title_parts.append(category)
-    if source_type: title_parts.append(f"{source_type} LC")
     title_parts.append(jd_label)
     
     fig.suptitle(title or " – ".join(title_parts), fontsize="large")
@@ -433,6 +423,104 @@ def _plot_lc_with_residuals_df(
     if show: pl.show()
     else: pl.close(fig)
     return str(out_path)
+
+
+def plot_lc_with_residuals(
+    df=None,
+    *,
+    dat_paths=tuple(SKYPATROL_CSV_PATHS),
+    baseline_func=per_camera_trend_baseline,
+    baseline_kwargs=None,
+    max_error=5.0,
+    out_path=None,
+    out_format="pdf",
+    title=None,
+    source_name=None,
+    figsize=(12, 8),
+    show=False,
+    metadata=None,
+    baseline_tag=None,
+    timestamp_output=False,
+):
+    baseline_kwargs = baseline_kwargs or {}
+    baseline_tag = baseline_tag or getattr(baseline_func, "__name__", "baseline")
+    results: list[str] = []
+
+    if df is not None:
+        dest = out_path
+        if timestamp_output and dest is not None:
+            dest = Path(dest)
+            stamp = Path(time.strftime("%Y%m%d_%H%M%S"))
+            dest = dest.with_name(f"{dest.stem}_{stamp}{dest.suffix}")
+        return _plot_lc_with_residuals_df(
+            df,
+            max_error=max_error,
+            out_path=dest,
+            out_format=out_format,
+            title=title,
+            source_name=source_name,
+            figsize=figsize,
+            show=show,
+            metadata=metadata,
+        )
+
+    dat_paths = list(dat_paths)
+
+    multi = len(dat_paths) > 1
+    out_dir = None
+    if multi:
+        if out_path is not None:
+            out_dir = Path(out_path)
+        else:
+            out_dir = PLOT_OUTPUT_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    for path in dat_paths:
+        path = Path(path)
+        df_raw = _load_lightcurve_df(path)
+
+        if baseline_func is not None:
+            df_base = baseline_func(df_raw, **baseline_kwargs)
+        else:
+            df_base = df_raw
+
+        meta = metadata or _lookup_metadata_for_path(path)
+
+        if multi:
+            ext = f".{out_format.lstrip('.')}" if out_format else ".pdf"
+            base_name = f"{path.stem}_{baseline_tag}" if baseline_tag else f"{path.stem}"
+            if timestamp_output:
+                stamp = time.strftime("%Y%m%d_%H%M%S")
+                base_name = f"{base_name}_{stamp}"
+            dest = (out_dir / f"{base_name}_residuals{ext}") if out_dir else None
+        else:
+            dest = out_path
+            if dest is not None:
+                dest = Path(dest)
+                base_name = dest.stem
+                if baseline_tag:
+                    base_name = f"{base_name}_{baseline_tag}"
+                if timestamp_output:
+                    stamp = time.strftime("%Y%m%d_%H%M%S")
+                    base_name = f"{base_name}_{stamp}"
+                dest = dest.with_name(f"{base_name}{dest.suffix}")
+
+        result = _plot_lc_with_residuals_df(
+            df_base,
+            max_error=max_error,
+            out_path=dest,
+            out_format=out_format,
+            title=title,
+            source_name=source_name,
+            figsize=figsize,
+            show=show,
+            metadata=meta,
+        )
+        results.append(result)
+
+    if not results:
+        return None
+    return results if multi else results[0]
 
 def plot_one_lc(
     dat_path,
