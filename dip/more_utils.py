@@ -562,7 +562,7 @@ def plot_multiband(dfv, dfg, ra, dec, peak_option=False):
     ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
     """
     cust_id = custom_id(ra,dec)
-    peak, meanmag, length = naive_peak_search(dfg)
+    peak, meanmag, length = peak_search_baseline_residual(dfg)
 
     fig, ax = pl.subplots(1, 1, figsize=(8, 4))
 
@@ -657,7 +657,7 @@ def plot_light_curve(df, ra, dec, peak_option=False):
     ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
     """
     cust_id = custom_id(ra,dec)
-    peak, meanmag, length = naive_peak_search(df)
+    peak, meanmag, length = peak_search_baseline_residual(df)
 
     fig, ax = pl.subplots(1, 1, figsize=(8, 4))
 
@@ -726,7 +726,7 @@ def plot_zoom(df, ra, dec, zoom_range=[-300,3000], peak_option=False):
     ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
     """
     cust_id = custom_id(ra,dec)
-    peak, meanmag, length = naive_peak_search(df)
+    peak, meanmag, length = peak_search_baseline_residual(df)
 
     fig, ax = pl.subplots(1, 1, figsize=(10, 4))
     ax = plotparams(ax)

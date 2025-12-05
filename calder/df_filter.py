@@ -152,6 +152,26 @@ def candidates_with_peaks_naive(
     return out
 
 
+def candidates_with_peaks_biweight(
+    csv_path,
+    out_csv_path=None,
+    write_csv: bool = True,
+    index: bool = False,
+    band: str = "either",
+    *,
+    n_workers: int = 1,
+) -> pd.DataFrame:
+    # Same selection logic as naive; operates on biweight peak CSVs.
+    return candidates_with_peaks_naive(
+        csv_path,
+        out_csv_path=out_csv_path,
+        write_csv=write_csv,
+        index=index,
+        band=band,
+        n_workers=n_workers,
+    )
+
+
 def filter_bns(
     df: pd.DataFrame,
     asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
@@ -515,6 +535,7 @@ def filter_csv(
     csv_path: str | Path,
     out_csv_path: str | Path | None = None,
     band: str = "either",
+    peak_mode: str = "naive",
     asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
     vsx_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.csv",
     min_dip_fraction: float = 0.66,
@@ -543,12 +564,20 @@ def filter_csv(
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
 
-    df_filtered = candidates_with_peaks_naive(
-        csv_path,
-        write_csv=False,
-        band=band,
-        n_workers=seed_workers,
-    )
+    if peak_mode == "biweight":
+        df_filtered = candidates_with_peaks_biweight(
+            csv_path,
+            write_csv=False,
+            band=band,
+            n_workers=seed_workers,
+        )
+    else:
+        df_filtered = candidates_with_peaks_naive(
+            csv_path,
+            write_csv=False,
+            band=band,
+            n_workers=seed_workers,
+        )
 
 
     plan: list[tuple[str, str, dict]] = []
@@ -668,13 +697,14 @@ def gather_files(
     includes: list[str] | None,
     excludes: list[str] | None,
     keep_latest: bool,
+    pattern: str = "peaks_*.csv",
 ) -> list[Path]:
     candidates: set[Path] = set()
     if files:
         for pat in files:
             candidates.update(directory.glob(pat))
     else:
-        candidates.update(directory.glob("peaks_*.csv"))
+        candidates.update(directory.glob(pattern))
 
     if includes:
         filtered = set()
@@ -713,6 +743,7 @@ def _run_one_file(
         csv_path=file_path,
         out_csv_path=out_csv_path,
         band=args.band,
+        peak_mode="biweight" if args.biweight else "naive",
         asassn_csv=args.asassn_csv,
         vsx_csv=args.vsx_csv,
         min_dip_fraction=args.min_dip_fraction,
@@ -750,6 +781,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=None, help="Destination CSV path when processing a single file.")
     parser.add_argument("--output-dir", type=Path, default=None, help="Directory to place output CSVs (per-file and combined).")
     parser.add_argument("--no-combined", action="store_true", help="Do not write a combined CSV when processing a directory.")
+    parser.add_argument("--biweight", action="store_true", help="Use biweight peak CSVs (peaks_biweight_*) and biweight filtering.")
     parser.add_argument("--band", default="either", choices=["g", "v", "both", "either"])
     parser.add_argument("--seed-workers", type=int, default=1, help="Worker processes for the initial candidates_with_peaks_naive stage.")
     parser.add_argument("--asassn-csv", default="results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv")
@@ -791,6 +823,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             includes=args.include,
             excludes=args.exclude,
             keep_latest=args.latest_per_bin,
+            pattern="peaks_biweight_*.csv" if args.biweight else "peaks_*.csv",
         )
         if not files:
             parser.error(f"No matching files in {in_path}")

@@ -46,6 +46,12 @@ Single Eclipse Binaries      6     13
 
 
 
+- ok so we are switching to significance based detection relative to a (global or per-camera?) GP baseline
+    - decide what significance you're going to require?
+        - from the literature, something physically motivated?
+        - 0.3 mag threshold seems arbitrary
+
+
 
 
 

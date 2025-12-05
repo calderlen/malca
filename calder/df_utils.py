@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import scipy
+from astropy.stats.biweight import biweight_location, biweight_scale
 
 def year_to_jd(year):
     jd_epoch = 2449718.5 - (2.458 * 10 **6)
@@ -16,7 +17,7 @@ def jd_to_year(jd):
     return year_epoch + (jd - jd_epoch) / days_in_year
 
 
-def naive_peak_search(
+def peak_search_residual_baseline(
     df,
     prominence=0.17,
     distance=25,
@@ -68,12 +69,89 @@ def naive_peak_search(
     return pd.Series(peak, name="peaks"), meanmag, n_peaks
 
 
-
-def peak_search(
-    df
+def peak_search_biweight_delta(
+    df,
+    sigma_threshold=3.0,
+    distance=25,
+    width=1,
+    prominence=0.0,
+    apply_box_filter=False,
+    max_dips=10,
+    max_peaks_per_time=0.015,
+    max_std_sigma=2.5,
+    *,
+    mag_col="mag",
+    t_col="JD",
+    err_col="error",
+    biweight_c=6.0,
+    eps=1e-6,
 ):
     """
-    need to create GP baseline first before starting on this
+    Tzanidakis et al. (2025)-style biweight magnitude deviation.
+
+    Computes:
+        delta_i = (m_i - R) / sqrt(err_i^2 + S^2)
+
+    where:
+        R = biweight location of the light curve
+        S = biweight scale of the light curve (optional)
+
+    Returns:
+        (peaks_series, R, n_peaks)
     """
 
-    pass
+    mag = np.asarray(df[mag_col], float) if mag_col in df.columns else np.array([], float)
+    jd = np.asarray(df[t_col], float) if t_col in df.columns else np.array([], float)
+
+    if err_col in df.columns:
+        err = np.asarray(df[err_col], float)
+    else:
+        err = np.full_like(mag, np.nan, dtype=float)
+
+    finite_m = np.isfinite(mag)
+
+    # Biweight location (robust center)
+    if finite_m.any():
+        R = float(biweight_location(mag[finite_m], c=biweight_c))
+        S = float(biweight_scale(mag[finite_m], c=biweight_c))
+    else:
+        R = np.nan
+        S = 0.0
+
+    if not np.isfinite(S) or S < 0:
+        S = 0.0
+
+    # Build denominator sqrt(err^2 + S^2)
+    err2 = np.where(np.isfinite(err), err**2, 0.0)
+    denom = np.sqrt(err2 + S**2)
+    denom = np.where(denom > 0, denom, eps)
+
+    # delta series used for peak detection
+    delta = (mag - R) / denom
+    values = np.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0)
+
+    peak, _ = scipy.signal.find_peaks(
+        values,
+        height=sigma_threshold,
+        distance=distance,
+        width=width,
+        prominence=prominence,
+    )
+
+    n_peaks = len(peak)
+
+    if apply_box_filter:
+        # guard against huge event rates / garbage LCs
+        jd_span = float(jd[-1] - jd[0]) if jd.size > 1 else 0.0
+        peaks_per_time = (n_peaks / jd_span) if jd_span > 0 else np.inf
+        std_sig = float(np.nanstd(values))
+
+        if (
+            n_peaks == 0
+            or n_peaks >= max_dips
+            or peaks_per_time > max_peaks_per_time
+            or std_sig > max_std_sigma
+        ):
+            return pd.Series(dtype=int, name="peaks"), R, 0
+
+    return pd.Series(peak, name="peaks"), R, n_peaks
