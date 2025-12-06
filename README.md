@@ -1,20 +1,41 @@
 # ASAS-SN Variability Tools
 
-Collection of utilities, scripts, and notebooks I built to automate the ASAS-SN dipper/variable search pipeline.  Modules under `calder/` implement the light-curve peak search, candidate filtering, manifest generation, and reproduction harnesses used to validate survey data products.
+Pipeline to search for peaks and dips in ASAS-SN light curves
 
-Follow changes in the [`CHANGELOG.md`](CHANGELOG.md) 
 
 ## Modules
-
 - `calder/`
-  - `lc_dips.py` – peak-search engine (`naive_dip_finder`) that walks the ASAS-SN light-curve archive and writes `peaks_<mag_bin>_<timestamp>.{csv,parquet}`.
-  - `df_filter.py` – end-to-end filtering pipeline (`filter_csv`) plus individual filter helpers (dip fraction, multi-camera, VSX class enrichment, periodicity checks, etc.).
-  - `reproduce_candidates.py` – targeted reproduction harness that reads `lc_manifest` outputs and verifies historical candidates.
-  - `build_manifest.py` – utility that maps `source_id → (mag_bin, index_csv, lc_dir, dat_path)` so reproduction runs can skip directory scans.
-  - `script_search_naive.py` – thin CLI wrapper around `naive_dip_finder` for full-bin searches.
-  - Other helpers (`df_utils.py`, `lc_baseline.py`, `lc_metrics.py`, `vsx_crossmatch.py`, etc.) that provide baselines, metrics, plotting, and catalog crossmatching
+  - `lc_dips` - searches for dips 
+    - `clean_lc`
+      - removes saturated light curves
+      - mask any NaN's in JD and mag, may be unnecessary?
+      - sort light curves by JD, may be unnecessary ?
+    - `empty_metrics`
+      - creates empty dict for dip metrics for a single band
+    - `process_record_naive`
+      - optionally computes baseline of a single light curve
+      - finds peaks in baseline residuals for a single light curve
+      - computes dip metrics for a single light curve
+    - `_biweight_gaussian_metrics`
+    - `_compute_biweight_delta` 
+    - `_compute_biweight_delta_peaks`
+    - `process_record_biweight`
+    - `naive_dip_finder`
+    - `biweight_dip_finder`
+
+  - `lc_peaks`
+    - `fit_paczynski_peaks`
+    - `_compute_biweight_delta_peaks`
+    - `process_record_microlensing`
+    - `microlensing_peak_finder`
+
 
 ## Dependencies
-- numpy, pandas, scipy, astropy
-- tqdm
-- pyarrow
+  - numpy
+  - pandas
+  - scipy
+  - astropy
+  - tqdm
+  - pyarrow (optional; required for Parquet outputs)
+
+
