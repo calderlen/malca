@@ -10,7 +10,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 from lc_baseline import per_camera_trend_baseline, per_camera_median_baseline
 from lc_utils import read_lc_dat, read_lc_raw, match_index_to_lc
-from df_utils import peak_search_baseline_residual
+from df_utils import peak_search_residual_baseline
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from astropy.stats import biweight_location, biweight_scale
@@ -111,7 +111,7 @@ def lc_proc_naive(
             .sort_values("JD")
             .reset_index(drop=True)
         )
-        peaks_g, mean_g, n_g = peak_search_baseline_residual(dfg_baseline)
+        peaks_g, mean_g, n_g = peak_search_residual_baseline(dfg_baseline)
         jd_first = float(dfg_baseline["JD"].iloc[0])
         jd_last = float(dfg_baseline["JD"].iloc[-1])
         g_stats = run_metrics(
@@ -139,7 +139,7 @@ def lc_proc_naive(
             .sort_values("JD")
             .reset_index(drop=True)
         )
-        peaks_v, mean_v, n_v = peak_search_baseline_residual(dfv_baseline)
+        peaks_v, mean_v, n_v = peak_search_residual_baseline(dfv_baseline)
         if np.isnan(jd_first):
             jd_first = float(dfv_baseline["JD"].iloc[0])
         if np.isnan(jd_last):
