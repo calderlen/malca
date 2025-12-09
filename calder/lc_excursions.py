@@ -697,13 +697,17 @@ def excursion_finder(
             return
         if len(rows_buffer) < chunk_size and not force:
             return
-        if out_format == "parquet":
-            pd.DataFrame(rows_buffer).to_parquet(out_path, index=False)
-        else:
-            mode = "a" if os.path.exists(out_path) else "w"
-            header = not os.path.exists(out_path)
-            pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
-        rows_buffer.clear()
+        try:
+            if out_format == "parquet":
+                pd.DataFrame(rows_buffer).to_parquet(out_path, index=False)
+            else:
+                mode = "a" if os.path.exists(out_path) else "w"
+                header = not os.path.exists(out_path)
+                pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
+            rows_buffer.clear()
+        except Exception as e:
+            print(f"ERROR: Failed to flush rows to {out_path}: {e}", flush=True)
+            raise
 
     def _process_bin(
         bin_key: str,
@@ -720,13 +724,17 @@ def excursion_finder(
             done_now = 0
             done = [fut for fut in all_pending if fut.done()]
             for fut in done:
-                row = fut.result()
-                rows_buffer.append(row)
-                if collected_rows_list is not None:
-                    collected_rows_list.append(row)
-                all_pending.remove(fut)
-                done_now += 1
-                _flush_rows(rows_buffer)
+                try:
+                    row = fut.result()
+                    rows_buffer.append(row)
+                    if collected_rows_list is not None:
+                        collected_rows_list.append(row)
+                    done_now += 1
+                    _flush_rows(rows_buffer)
+                except Exception as e:
+                    print(f"WARNING: Task failed: {type(e).__name__}: {e}", flush=True)
+                finally:
+                    all_pending.remove(fut)
             return done_now
 
         for rec in record_iter:
