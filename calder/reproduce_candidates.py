@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from lc_excursions_naive import naive_dip_finder
+from lc_excursions import excursion_finder
 
 
 brayden_candidates: list[dict[str, object]] = [
@@ -186,6 +187,7 @@ def build_reproduction_report(
     metrics_dip_threshold: float = 0.3,
     extra_columns: Iterable[str] | None = None,
     manifest_path: Path | str | None = None,
+    method: str = "naive",
     **baseline_kwargs,
 ) -> pd.DataFrame:
     manifest_df = _load_manifest_df(manifest_path) if manifest_path is not None else None
@@ -210,19 +212,34 @@ def build_reproduction_report(
     target_map = _target_map(df_targets)
     records_map = _records_from_manifest(manifest_subset) if manifest_subset is not None else None
 
-    rows = naive_dip_finder(
-        mag_bins=sorted(target_map),
-        out_dir=out_dir,
-        out_format=out_format,
-        n_workers=n_workers,
-        chunk_size=chunk_size,
-        metrics_baseline_func=metrics_baseline_func,
-        metrics_dip_threshold=metrics_dip_threshold,
-        target_ids_by_bin=target_map,
-        records_by_bin=records_map,
-        return_rows=True,
-        **baseline_kwargs,
-    )
+    if method == "naive":
+        rows = naive_dip_finder(
+            mag_bins=sorted(target_map),
+            out_dir=out_dir,
+            out_format=out_format,
+            n_workers=n_workers,
+            chunk_size=chunk_size,
+            metrics_baseline_func=metrics_baseline_func,
+            metrics_dip_threshold=metrics_dip_threshold,
+            target_ids_by_bin=target_map,
+            records_by_bin=records_map,
+            return_rows=True,
+            **baseline_kwargs,
+        )
+    elif method == "biweight":
+        # Use the new biweight/fit-based dip finder (excursion_finder in dip mode).
+        rows = excursion_finder(
+            mode="dips",
+            mag_bins=sorted(target_map),
+            out_dir=out_dir,
+            out_format=out_format,
+            n_workers=n_workers,
+            chunk_size=chunk_size,
+            target_ids_by_bin=target_map,
+            records_by_bin=records_map,
+            return_rows=True,
+            peak_kwargs={"sigma_threshold": metrics_dip_threshold},
+        )
 
     rows_df = rows.copy() if rows is not None else pd.DataFrame()
     if rows_df.empty:
@@ -308,6 +325,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline-func", default=None, help="Baseline function import path (e.g. module:func)")
     parser.add_argument("--candidates", default=None, help="Candidate spec (built-in list name or path to CSV/Parquet file).",
     )
+    parser.add_argument(
+        "--method",
+        choices=("naive", "biweight"),
+        default="naive",
+        help="Dip finder to use: baseline-residual (naive) or biweight/fit-based (biweight).",
+    )
     return parser
 
 def main(argv: Iterable[str] | None = None) -> None:
@@ -332,6 +355,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         chunk_size=args.chunk_size,
         metrics_dip_threshold=args.metrics_dip_threshold,
         manifest_path=args.manifest,
+        method=args.method,
         **kwargs,
     )
 

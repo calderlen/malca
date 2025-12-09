@@ -80,6 +80,41 @@ def empty_metrics(prefix):
         out[f"{prefix}_is_dip_dominated"] = False
         return out
 
+def gaussian(t, amp, mu, sig):
+    return amp * np.exp(-0.5 * ((t - mu) / sig) ** 2)
+
+def mag_to_delta_space(
+    df,
+    *,
+    mag_col="mag",
+    t_col="JD",
+    err_col="error",
+    biweight_c=6.0,
+    eps=1e-6,
+    sign: float = 1.0,
+):
+    """
+    Biweight delta computation; `sign=+1` for dimmings (mag-R), `sign=-1` for brightenings (R-mag).
+    """
+    mag = np.asarray(df[mag_col], float) if mag_col in df.columns else np.array([], float)
+    jd = np.asarray(df[t_col], float) if t_col in df.columns else np.array([], float)
+    if err_col in df.columns:
+        err = np.asarray(df[err_col], float)
+    else:
+        err = np.full_like(mag, np.nan, dtype=float)
+
+    finite_m = np.isfinite(mag)
+    R = float(biweight_location(mag[finite_m], c=biweight_c)) if finite_m.any() else np.nan
+    S = float(biweight_scale(mag[finite_m], c=biweight_c)) if finite_m.any() else 0.0
+    if not np.isfinite(S) or S < 0:
+        S = 0.0
+
+    err2 = np.where(np.isfinite(err), err**2, 0.0)
+    denom = np.sqrt(err2 + S**2)
+    denom = np.where(denom > 0, denom, eps)
+    delta = sign * (mag - R) / denom
+    return delta, jd, R
+
 def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
     """
     Fit simple Gaussians to biweight-delta peaks and compute a heuristic score.
@@ -95,14 +130,11 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
     }
 
     if len(peak_idx) == 0 or delta.size == 0:
-        return outl
+        return out
 
     delta = np.asarray(delta, float)
     jd = np.asarray(jd, float)
     err = np.asarray(err, float) if err is not None else np.full_like(delta, np.nan)
-
-    def gaussian(t, amp, mu, sig):
-        return amp * np.exp(-0.5 * ((t - mu) / sig) ** 2)
 
     scores = []
     fwhm_list = []
@@ -190,7 +222,13 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
             "chi2_red": chi2_list,
         }
     )
-    return outdef score_peaks_paczynski(delta, jd, err, peak_idx, sigma_threshold):
+    return out
+    
+def paczynski(t, amp, t0, tE):
+    tE = np.maximum(tE, 1e-6)  # enforce positive timescale
+    return amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
+
+def score_peaks_paczynski(delta, jd, err, peak_idx, sigma_threshold):
     """
     Fit Paczynski-like microlensing curves to biweight-delta peaks and compute a heuristic score.
 
@@ -213,10 +251,6 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
     delta = np.asarray(delta, float)
     jd = np.asarray(jd, float)
     err = np.asarray(err, float) if err is not None else np.full_like(delta, np.nan)
-
-    def paczynski(t, amp, t0, tE):
-        tE = np.maximum(tE, 1e-6)  # enforce positive timescale
-        return amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
 
     scores = []
     fwhm_list = []
@@ -313,54 +347,121 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
     )
     return out
 
-def compute_significance_dips(df, *, mag_col="mag", t_col="JD", err_col="error", biweight_c=6.0, eps=1e-6):
+def lc_band_proc(
+    df_band,
+    *,
+    mode: str,
+    peak_kwargs: dict,
+    sigma_threshold: float,
+    metrics_dip_threshold: float,
+):
     """
-    Compute biweight delta series (global location/scale) for a light curve.
+    Analyze a single band: clean, delta-transform, peak find, fit/score, metrics.
     """
-    mag = np.asarray(df[mag_col], float) if mag_col in df.columns else np.array([], float)
-    jd = np.asarray(df[t_col], float) if t_col in df.columns else np.array([], float)
-    if err_col in df.columns:
-        err = np.asarray(df[err_col], float)
+    if df_band.empty or len(df_band) < 30:
+        return {
+            "n": 0,
+            "R": np.nan,
+            "peaks_idx": [],
+            "peaks_jd": [],
+            "fit": {
+                "total_score": 0.0,
+                "best_score": 0.0,
+                "scores": [],
+                "fwhm": [],
+                "delta_peak": [],
+                "n_det": [],
+                "chi2_red": [],
+            },
+            "metrics": empty_metrics("x"),
+        }
+
+    df_band = clean_lc(df_band).sort_values("JD").reset_index(drop=True)
+    if mode == "peaks":
+        delta, jd, R = mag_to_delta_space(
+            df_band,
+            mag_col=peak_kwargs.get("mag_col", "mag"),
+            t_col=peak_kwargs.get("t_col", "JD"),
+            err_col=peak_kwargs.get("err_col", "error"),
+            biweight_c=peak_kwargs.get("biweight_c", 6.0),
+            eps=peak_kwargs.get("eps", 1e-6),
+            sign=-1.0,
+        )
+        fit = score_peaks_paczynski(
+            delta,
+            jd,
+            df_band["error"].to_numpy(float) if "error" in df_band.columns else None,
+            find_peaks(
+                np.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0),
+                height=sigma_threshold,
+                distance=int(peak_kwargs.get("distance", 50)),
+            )[0],
+            sigma_threshold,
+        )
+        peaks_idx = np.asarray(
+            find_peaks(
+                np.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0),
+                height=sigma_threshold,
+                distance=int(peak_kwargs.get("distance", 50)),
+            )[0],
+            dtype=int,
+        )
+        metrics = empty_metrics("x")
     else:
-        err = np.full_like(mag, np.nan, dtype=float)
+        delta, jd, R = mag_to_delta_space(
+            df_band,
+            mag_col=peak_kwargs.get("mag_col", "mag"),
+            t_col=peak_kwargs.get("t_col", "JD"),
+            err_col=peak_kwargs.get("err_col", "error"),
+            biweight_c=peak_kwargs.get("biweight_c", 6.0),
+            eps=peak_kwargs.get("eps", 1e-6),
+            sign=1.0,
+        )
+        peaks_idx, _ = find_peaks(
+            np.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0),
+            height=sigma_threshold,
+            distance=int(peak_kwargs.get("distance", 50)),
+        )
+        fit = score_dips_gaussian(
+            delta,
+            jd,
+            df_band["error"].to_numpy(float) if "error" in df_band.columns else None,
+            peaks_idx,
+            sigma_threshold,
+        )
+        stats = run_metrics(
+            df_band,
+            baseline_func=None,
+            dip_threshold=metrics_dip_threshold,
+        )
+        metrics = {f"x_{k}": v for k, v in stats.items()}
+        metrics["x_is_dip_dominated"] = bool(is_dip_dominated(stats))
 
-    finite_m = np.isfinite(mag)
-    R = float(biweight_location(mag[finite_m], c=biweight_c)) if finite_m.any() else np.nan
-    S = float(biweight_scale(mag[finite_m], c=biweight_c)) if finite_m.any() else 0.0
-    if not np.isfinite(S) or S < 0:
-        S = 0.0
+    return {
+        "n": len(peaks_idx),
+        "R": R,
+        "peaks_idx": peaks_idx.tolist(),
+        "peaks_jd": df_band["JD"].values[peaks_idx].tolist() if len(peaks_idx) else [],
+        "fit": fit,
+        "metrics": metrics,
+    }
 
-    err2 = np.where(np.isfinite(err), err**2, 0.0)
-    denom = np.sqrt(err2 + S**2)
-    denom = np.where(denom > 0, denom, eps)
-    delta = (mag - R) / denom
-    return delta, jd, R
 
-def compute_significance_peaks(df, *, mag_col="mag", t_col="JD", err_col="error", biweight_c=6.0, eps=1e-6):
+def prefix_metrics(prefix: str, metrics_dict: dict | None):
     """
-    Peak-oriented version of biweight delta where brightenings are positive.
-
-    Uses (R - mag) so that microlensing-like peaks (smaller magnitudes) produce
-    positive delta values suitable for peak finding.
+    Rename metrics keys from x_ -> <prefix>_ and ensure a filled dict when missing.
     """
-    mag = np.asarray(df[mag_col], float) if mag_col in df.columns else np.array([], float)
-    jd = np.asarray(df[t_col], float) if t_col in df.columns else np.array([], float)
-    if err_col in df.columns:
-        err = np.asarray(df[err_col], float)
-    else:
-        err = np.full_like(mag, np.nan, dtype=float)
-
-    finite_m = np.isfinite(mag)
-    R = float(biweight_location(mag[finite_m], c=biweight_c)) if finite_m.any() else np.nan
-    S = float(biweight_scale(mag[finite_m], c=biweight_c)) if finite_m.any() else 0.0
-    if not np.isfinite(S) or S < 0:
-        S = 0.0
-
-    err2 = np.where(np.isfinite(err), err**2, 0.0)
-    denom = np.sqrt(err2 + S**2)
-    denom = np.where(denom > 0, denom, eps)
-    delta = (R - mag) / denom
-    return delta, jd, R
+    if not metrics_dict:
+        return empty_metrics(prefix)
+    if "x_is_dip_dominated" in metrics_dict:
+        out = {}
+        for k, v in metrics_dict.items():
+            if k.startswith("x_"):
+                out[f"{prefix}_{k[2:]}"] = v
+            else:
+                out[f"{prefix}_{k}"] = v
+        return out
+    return empty_metrics(prefix)
 
 def lc_proc(
     record: dict,
@@ -369,7 +470,7 @@ def lc_proc(
     peak_kwargs: dict | None = None,
     ) -> dict:
     """
-    Process a single light curve record.
+    processes a single light curve
 
     mode="dips": use (mag-R) biweight delta, Gaussian fits, and dip metrics.
     mode="peaks": use (R-mag) biweight delta, Paczynski fits, no dip metrics.
@@ -385,74 +486,20 @@ def lc_proc(
     jd_first = np.nan
     jd_last = np.nan
 
-    def _analyze_band(df_band):
-        if df_band.empty or len(df_band) < 30:
-            return {
-                "n": 0,
-                "R": np.nan,
-                "peaks_idx": [],
-                "peaks_jd": [],
-                "fit": {
-                    "total_score": 0.0,
-                    "best_score": 0.0,
-                    "scores": [],
-                    "fwhm": [],
-                    "delta_peak": [],
-                    "n_det": [],
-                    "chi2_red": [],
-                },
-                "metrics": empty_metrics("x"),
-            }
-
-        df_band = clean_lc(df_band).sort_values("JD").reset_index(drop=True)
-        if mode == "peaks":
-            delta, jd, R = compute_significance_peaks(df_band, **peak_kwargs)
-            fit = score_peaks_paczynski(
-                delta,
-                jd,
-                df_band["error"].to_numpy(float) if "error" in df_band.columns else None,
-                find_peaks(
-                    np.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0),
-                    height=sigma_threshold,
-                    distance=int(peak_kwargs.get("distance", 50)),
-                )[0],
-                sigma_threshold,
-            )
-            peaks_idx = np.asarray(find_peaks(np.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0), height=sigma_threshold, distance=int(peak_kwargs.get("distance", 50)))[0], dtype=int)
-            metrics = empty_metrics("x")
-        else:
-            delta, jd, R = compute_significance_dips(df_band, **peak_kwargs)
-            peaks_idx, _ = find_peaks(
-                np.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0),
-                height=sigma_threshold,
-                distance=int(peak_kwargs.get("distance", 50)),
-            )
-            fit = score_dips_gaussian(
-                delta,
-                jd,
-                df_band["error"].to_numpy(float) if "error" in df_band.columns else None,
-                peaks_idx,
-                sigma_threshold,
-            )
-            stats = run_metrics(
-                df_band,
-                baseline_func=None,
-                dip_threshold=metrics_dip_threshold,
-            )
-            metrics = {f"x_{k}": v for k, v in stats.items()}
-            metrics["x_is_dip_dominated"] = bool(is_dip_dominated(stats))
-
-        return {
-            "n": len(peaks_idx),
-            "R": R,
-            "peaks_idx": peaks_idx.tolist(),
-            "peaks_jd": df_band["JD"].values[peaks_idx].tolist() if len(peaks_idx) else [],
-            "fit": fit,
-            "metrics": metrics,
-        }
-
-    g_res = _analyze_band(dfg)
-    v_res = _analyze_band(dfv)
+    g_res = lc_band_proc(
+        dfg,
+        mode=mode,
+        peak_kwargs=peak_kwargs,
+        sigma_threshold=sigma_threshold,
+        metrics_dip_threshold=metrics_dip_threshold,
+    )
+    v_res = lc_band_proc(
+        dfv,
+        mode=mode,
+        peak_kwargs=peak_kwargs,
+        sigma_threshold=sigma_threshold,
+        metrics_dip_threshold=metrics_dip_threshold,
+    )
 
     if not dfg.empty:
         jd_first = float(dfg["JD"].iloc[0])
@@ -464,22 +511,8 @@ def lc_proc(
             jd_last = float(dfv["JD"].iloc[-1])
 
     # Map metrics prefixes
-    def _prefix_metrics(prefix, metrics_dict):
-        if not metrics_dict:
-            return empty_metrics(prefix)
-        if "x_is_dip_dominated" in metrics_dict:
-            # rename x_ -> prefix_
-            out = {}
-            for k, v in metrics_dict.items():
-                if k.startswith("x_"):
-                    out[f"{prefix}_{k[2:]}"] = v
-                else:
-                    out[f"{prefix}_{k}"] = v
-            return out
-        return empty_metrics(prefix)
-
-    g_metrics = _prefix_metrics("g", g_res["metrics"])
-    v_metrics = _prefix_metrics("v", v_res["metrics"])
+    g_metrics = prefix_metrics("g", g_res["metrics"])
+    v_metrics = prefix_metrics("v", v_res["metrics"])
 
     row = {
         "mag_bin": record["mag_bin"],
@@ -548,6 +581,127 @@ def excursion_finder(
     """
     Combined excursion finder (dips or peaks) using efficient process pool.
     """
+
+    def _normalize_target_ids(target_ids_by_bin: dict[str, set[str]] | None):
+        if not target_ids_by_bin:
+            return None
+        return {
+            str(bin_key): {str(asas_id) for asas_id in ids if asas_id is not None}
+            for bin_key, ids in target_ids_by_bin.items()
+            if ids
+        }
+
+    def _build_record_map(records_by_bin: dict[str, list[dict[str, object]]] | None):
+        if not records_by_bin:
+            return None
+        record_map: dict[str, list[dict[str, object]]] = {}
+        for bin_key, records in records_by_bin.items():
+            norm_key = str(bin_key)
+            if not records:
+                continue
+            record_map[norm_key] = []
+            for rec in records:
+                if rec is None:
+                    continue
+                norm = dict(rec)
+                norm["mag_bin"] = str(norm.get("mag_bin", norm_key))
+                norm["asas_sn_id"] = str(norm.get("asas_sn_id"))
+                if not norm["asas_sn_id"]:
+                    continue
+                norm.setdefault("lc_dir", "")
+                norm.setdefault("index_num", None)
+                norm.setdefault("index_csv", None)
+                norm.setdefault("dat_path", os.path.join(norm["lc_dir"], f"{norm['asas_sn_id']}.dat"))
+                norm.setdefault("found", True)
+                record_map[norm_key].append(norm)
+        return record_map
+
+    def _iter_records_for_bin(
+        bin_key: str,
+        record_map: dict[str, list[dict[str, object]]] | None,
+        target_ids_norm: dict[str, set[str]] | None,
+    ):
+        if record_map and bin_key in record_map:
+            record_iter = record_map[bin_key]
+        else:
+            record_iter = match_index_to_lc(
+                index_path=index_path,
+                lc_path=lc_path,
+                mag_bins=[bin_key],
+                id_column=id_column,
+            )
+
+        for rec in record_iter:
+            if target_ids_norm is not None:
+                allowed = target_ids_norm.get(str(rec.get("mag_bin", bin_key)))
+                if allowed is None or str(rec.get("asas_sn_id")) not in allowed:
+                    continue
+            if not rec.get("found", False):
+                continue
+            yield rec
+
+    def _flush_rows(rows_buffer, *, force: bool = False):
+        if not rows_buffer:
+            return
+        if len(rows_buffer) < chunk_size and not force:
+            return
+        if out_format == "parquet":
+            pd.DataFrame(rows_buffer).to_parquet(out_path, index=False)
+        else:
+            mode = "a" if os.path.exists(out_path) else "w"
+            header = not os.path.exists(out_path)
+            pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
+        rows_buffer.clear()
+
+    def _process_bin(
+        bin_key: str,
+        record_iter,
+        ex,
+        rows_buffer,
+        collected_rows_list,
+    ):
+        pending = set()
+        scheduled = 0
+        pbar = tqdm(desc=f"{bin_key}", unit="obj", leave=False)
+
+        def drain_some(all_pending):
+            done_now = 0
+            done = []
+            for fut in as_completed(all_pending, timeout=0.1):
+                done.append(fut)
+            for fut in done:
+                row = fut.result()
+                rows_buffer.append(row)
+                if collected_rows_list is not None:
+                    collected_rows_list.append(row)
+                all_pending.remove(fut)
+                done_now += 1
+                _flush_rows(rows_buffer)
+            return done_now
+
+        for rec in record_iter:
+            pending.add(
+                ex.submit(
+                    lc_proc,
+                    rec,
+                    mode=mode,
+                    peak_kwargs=peak_kwargs,
+                )
+            )
+            scheduled += 1
+            pbar.total = scheduled
+            pbar.refresh()
+            if len(pending) >= max_inflight:
+                done_n = drain_some(pending)
+                pbar.update(done_n)
+
+        while pending:
+            done_n = drain_some(pending)
+            pbar.update(done_n)
+
+        pbar.close()
+        _flush_rows(rows_buffer, force=True)
+
     peak_kwargs = dict(peak_kwargs or {})
     if out_dir is None:
         out_dir = f"./results_{mode}"
@@ -569,36 +723,9 @@ def excursion_finder(
     out_path = os.path.join(out_dir, f"excursions_{mode}.{out_format}")
     
     # Logic for target_ids and records_map (from dip_finder)
-    target_ids_norm: dict[str, set[str]] | None = None
-    if target_ids_by_bin:
-        target_ids_norm = {
-            str(bin_key): {str(asas_id) for asas_id in ids if asas_id is not None}
-            for bin_key, ids in target_ids_by_bin.items()
-            if ids
-        }
+    target_ids_norm = _normalize_target_ids(target_ids_by_bin)
 
-    record_map: dict[str, list[dict[str, object]]] | None = None
-    if records_by_bin:
-        record_map = {}
-        for bin_key, records in records_by_bin.items():
-            norm_key = str(bin_key)
-            if not records:
-                continue
-            record_map[norm_key] = []
-            for rec in records:
-                if rec is None:
-                    continue
-                norm = dict(rec)
-                norm["mag_bin"] = str(norm.get("mag_bin", norm_key))
-                norm["asas_sn_id"] = str(norm.get("asas_sn_id"))
-                if not norm["asas_sn_id"]:
-                    continue
-                norm.setdefault("lc_dir", "")
-                norm.setdefault("index_num", None)
-                norm.setdefault("index_csv", None)
-                norm.setdefault("dat_path", os.path.join(norm["lc_dir"], f"{norm['asas_sn_id']}.dat"))
-                norm.setdefault("found", True)
-                record_map[norm_key].append(norm)
+    record_map = _build_record_map(records_by_bin)
 
     # Determine bins to iterate
     if record_map:
@@ -614,81 +741,9 @@ def excursion_finder(
     
     # Process Pool
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
-        # We write to one file, so we define flush_if_needed here
-        def flush_if_needed(force: bool = False):
-            if not rows_buffer:
-                return
-            if len(rows_buffer) >= chunk_size or force:
-                if out_format == "parquet":
-                    pd.DataFrame(rows_buffer).to_parquet(out_path, index=False) 
-                else:
-                    mode = "a" if os.path.exists(out_path) else "w"
-                    header = not os.path.exists(out_path)
-                    pd.DataFrame(rows_buffer).to_csv(out_path, index=False, mode=mode, header=header)
-                rows_buffer.clear()
-
-        # Draining helper
-        def drain_some(all_pending):
-            done_now = 0
-            done = []
-            for fut in as_completed(all_pending, timeout=0.1):
-                done.append(fut)
-            for fut in done:
-                row = fut.result()
-                rows_buffer.append(row)
-                if collected_rows_list is not None:
-                    collected_rows_list.append(row)
-                all_pending.remove(fut)
-                done_now += 1
-                flush_if_needed()
-            return done_now
-
         for b in tqdm(bins_iter, desc=f"Bins ({mode})", unit="bin"):
-            pending = set()
-            scheduled = 0
-            pbar = tqdm(desc=f"{b}", unit="obj", leave=False)
-
-            if record_map and b in record_map:
-                record_iter = record_map[b]
-            else:
-                record_iter = match_index_to_lc(
-                    index_path=index_path,
-                    lc_path=lc_path,
-                    mag_bins=[b],
-                    id_column=id_column,
-                )
-
-            for rec in record_iter:
-                if target_ids_norm is not None:
-                    allowed = target_ids_norm.get(str(rec.get("mag_bin", b)))
-                    if allowed is None or str(rec.get("asas_sn_id")) not in allowed:
-                        continue
-                if not rec.get("found", False):
-                    continue
-                
-                pending.add(
-                    ex.submit(
-                        lc_proc,
-                        rec,
-                        mode=mode,
-                        peak_kwargs=peak_kwargs,
-                    )
-                )
-                scheduled += 1
-                pbar.total = scheduled
-                pbar.refresh()
-                if len(pending) >= max_inflight:
-                    done_n = drain_some(pending)
-                    pbar.update(done_n)
-
-            # Drain remainder of bin
-            while pending:
-                done_n = drain_some(pending)
-                pbar.update(done_n)
-            
-            pbar.close()
-            # Flush at end of bin to be safe
-            flush_if_needed(force=True)
+            record_iter = _iter_records_for_bin(b, record_map, target_ids_norm)
+            _process_bin(b, record_iter, ex, rows_buffer, collected_rows_list)
 
     if collected_rows_list is not None:
         return pd.DataFrame(collected_rows_list)
@@ -698,34 +753,12 @@ __all__ = ["MAG_BINS", "lc_proc", "excursion_finder"]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run dip or microlensing finder across bins.")
-    parser.add_argument(
-        "--mode",
-        choices=("dips", "peaks"),
-        default="dips",
-        help="Select dips (biweight delta + Gaussian fits) or peaks (microlensing Paczynski fits).",
-    )
-    parser.add_argument(
-        "--mag-bin",
-        dest="mag_bins",
-        action="append",
-        choices=MAG_BINS,
-        help="Specify bins to run; omit to process all.",
-    )
+    parser.add_argument("--mode", choices=("dips", "peaks"), default="dips", help="Select dips (biweight delta + Gaussian fits) or peaks (microlensing Paczynski fits).")
+    parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Specify bins to run; omit to process all.",)
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--format", choices=("parquet", "csv"), default="csv")
-    parser.add_argument(
-        "--n-workers",
-        type=int,
-        default=10,
-        help="Parallel processes",
-    )
-    parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=250000,
-        help="Rows per CSV flush",
-    )
-
+    parser.add_argument("--n-workers", type=int, default=10, help="Parallel processes",)
+    parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per CSV flush",)
     args = parser.parse_args()
     bins = args.mag_bins or MAG_BINS
 
