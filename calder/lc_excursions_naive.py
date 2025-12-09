@@ -43,7 +43,7 @@ def clean_lc(df):
     mask &= df["JD"].notna() & df["mag"].notna()
     if "error" in df.columns:
         mask &= df["error"].notna() & (df["error"] > 0.) & (df["error"] < 1.)
-    df = df.loc[mask].copy()
+    df = df.loc[mask]
 
     df = df.sort_values("JD").reset_index(drop=True)
     return df
@@ -108,7 +108,6 @@ def lc_proc_naive(
         dfg = clean_lc(dfg)
         dfg_baseline = (
             baseline_func(dfg, **baseline_kwargs)
-            .sort_values("JD")
             .reset_index(drop=True)
         )
         peaks_g, mean_g, n_g = peak_search_residual_baseline(dfg_baseline)
@@ -136,7 +135,6 @@ def lc_proc_naive(
         dfv = clean_lc(dfv)
         dfv_baseline = (
             baseline_func(dfv, **baseline_kwargs)
-            .sort_values("JD")
             .reset_index(drop=True)
         )
         peaks_v, mean_v, n_v = peak_search_residual_baseline(dfv_baseline)
@@ -212,7 +210,7 @@ def lc_proc_naive(
 
 
 # naive dip finder that works one bin at a time
-def naive_dip_finder(
+def dip_finder_naive(
     index_path="/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked/",
     lc_path="/data/poohbah/1/assassin/rowan.90/lcsv2",
     mag_bins=('12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15'),

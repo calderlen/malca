@@ -109,7 +109,6 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
             "camera_name",
             "field"]
     
-    df = df.copy()
     df.columns = cols[:len(df.columns)] + [f"extra_{i}" for i in range(len(df.columns)-len(cols))]
 
     for c in ["JD","mag","error","good_bad","camera#","v_g_band","saturated"]:

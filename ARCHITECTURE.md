@@ -33,7 +33,7 @@
     - optionally computes baseline of a single light curve
     - finds peaks in baseline residuals for a single light curve
     - computes dip metrics for a single light curve
-  - `naive_dip_finder`
+  - `dip_finder_naive`
 - `calder/lc_baseline.py`
   - `global_mean_baseline`
   - `global_median_baseline`

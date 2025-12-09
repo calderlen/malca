@@ -42,7 +42,7 @@ def clean_lc(df):
     mask &= df["JD"].notna() & df["mag"].notna()
     if "error" in df.columns:
         mask &= df["error"].notna() & (df["error"] > 0.) & (df["error"] < 1.)
-    df = df.loc[mask].copy()
+    df = df.loc[mask]
 
     df = df.sort_values("JD").reset_index(drop=True)
     return df

@@ -7,7 +7,7 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from lc_excursions_naive import naive_dip_finder
+from lc_excursions_naive import dip_finder_naive
 from lc_excursions import excursion_finder
 
 
@@ -213,7 +213,7 @@ def build_reproduction_report(
     records_map = _records_from_manifest(manifest_subset) if manifest_subset is not None else None
 
     if method == "naive":
-        rows = naive_dip_finder(
+        rows = dip_finder_naive(
             mag_bins=sorted(target_map),
             out_dir=out_dir,
             out_format=out_format,
@@ -320,7 +320,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out-dir", default="./results_test", help="Directory for peak_results output")
     parser.add_argument("--out-format", choices=("csv", "parquet"), default="csv")
-    parser.add_argument("--n-workers", type=int, default=10, help="ProcessPool worker count for naive_dip_finder")
+    parser.add_argument("--n-workers", type=int, default=10, help="ProcessPool worker count for dip_finder_naive")
     parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per chunk flush for CSV output")
     parser.add_argument("--metrics-dip-threshold", type=float, default=0.3, help="Dip threshold for run_metrics")
     parser.add_argument("--manifest", default=None, help="Path to lc_manifest CSV/Parquet for targeted reproduction")
