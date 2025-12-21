@@ -97,6 +97,17 @@ def default_mag_grid(baseline, mags, kind, n=50):
     return np.linspace(start, stop, n)
 
 
+def logit_spaced_grid(p_min=1e-4, p_max=1 - 1e-4, n=80):
+
+    p_min = float(np.clip(p_min, 1e-12, 1 - 1e-12))
+    p_max = float(np.clip(p_max, 1e-12, 1 - 1e-12))
+
+    q_min = np.log(p_min / (1.0 - p_min))
+    q_max = np.log(p_max / (1.0 - p_max))
+    q = np.linspace(q_min, q_max, int(n))
+    return 1.0 / (1.0 + np.exp(-q))
+
+
 def bayesian_excursion_significance(
     df,
     *,
@@ -105,99 +116,84 @@ def bayesian_excursion_significance(
     err_col="error",
     baseline_func=None,
     baseline_kwargs=None,
-    use_per_point_baseline=True,
-    p_grid=None,
+    p_min=None,
+    p_max=None,
+    p_points=80,
     mag_grid=None,
     significance_threshold=0.99,
-    eps=1e-6,
 ):
     """
-    kind:
-        "dip"  -> excursion component is faint; baseline is bright median.
-        "jump" -> excursion component is bright; baseline is median (faint).
+    kind: "dip" or "jump"
 
-    Returns a dict with per-point excursion probabilities, best-fit grid values,
-    and a Bayes factor vs. the baseline-only (no excursion) model.
+    returns dict with (1) per-point excursion probabilities, (2) best-fit grid values, (3) a Bayes factor vs. the baseline-only (no excursion) model.
     """
-    if df is None or len(df) == 0:
-        return {
-            "kind": kind,
-            "event_probability": np.array([]),
-            "event_indices": np.array([], dtype=int),
-            "significant": False,
-            "baseline_mag": np.nan,
-            "best_mag_event": np.nan,
-            "best_p": np.nan,
-            "bayes_factor": -np.inf,
-            "log_evidence_mixture": -np.inf,
-            "log_evidence_baseline": -np.inf,
-            "p_grid": np.asarray([]),
-            "mag_grid": np.asarray([]),
-        }
 
     df = clean_lc(df)
+
     baseline_kwargs = baseline_kwargs or {}
+
     mags = np.asarray(df[mag_col], float)
-    errs = (
-        np.asarray(df[err_col], float)
-        if err_col in df.columns
-        else np.full_like(mags, np.nan)
-    )
-    if not np.isfinite(errs).any():
+
+    if err_col in df.columns:
+        errs = np.asarray(df[err_col], float)
+    else:
         errs = np.full_like(mags, 0.05)
-    errs = np.where(np.isfinite(errs) & (errs > eps), errs, np.nanmedian(errs))
 
     if baseline_func is None:
-        baseline_vals = np.full_like(mags, np.nanmedian(mags))
+        baseline_mags = np.full_like(mags, np.nanmedian(mags))
+
     else:
         df_base = baseline_func(df, **baseline_kwargs)
         if "baseline" in df_base.columns:
-            baseline_vals = np.asarray(df_base["baseline"], float)
+            baseline_mags = np.asarray(df_base["baseline"], float)
         else:
-            baseline_vals = np.asarray(df_base[mag_col], float)
-    baseline_mag = float(np.nanmedian(baseline_vals))
-    if not use_per_point_baseline or not np.isfinite(baseline_vals).any():
-        baseline_vals = np.full_like(mags, baseline_mag)
+            baseline_mags = np.asarray(df_base[mag_col], float)
+            
+    baseline_mag = float(np.nanmedian(baseline_mags))
 
-    if p_grid is None:
-        p_grid = np.linspace(0.01, 0.9, 60)
-    else:
-        p_grid = np.asarray(p_grid, float)
+    if p_min is None and p_max is None:
+        if kind == "dip":
+            p_min, p_max = 0.5, 1 - 1e-4  # rare dips => 1 - p small
+        elif kind == "jump":
+            p_min, p_max = 1e-4, 0.5      # rare jumps => p small
+
+    p_grid = logit_spaced_grid(p_min=p_min, p_max=p_max, n=p_points)
 
     if mag_grid is None:
         mag_grid = default_mag_grid(baseline_mag, mags, kind, n=60)
     else:
         mag_grid = np.asarray(mag_grid, float)
 
-    M = len(mag_grid)
-    P = len(p_grid)
-    N = len(mags)
+    mag_grid_len = len(mag_grid)
+    p_grid_len = len(p_grid)
+    mag_num = len(mags)
 
-    # Component means
+    # creating log-likelihoods of baseline-only (null) model to later compare to the mixture model and calculate Bayes factor
     if kind == "dip":
         # Pb: baseline (bright, fixed at median), Pf: excursion (faint, grid)
-        log_pb_vec = log_gaussian(mags, baseline_vals, errs, eps=eps)
-        log_pb_grid = np.broadcast_to(log_pb_vec, (M, N))
-        log_pf_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs, eps=eps)
+        log_Pb_vec = log_gaussian(mags, baseline_mags, errs)
+        log_Pb_grid = np.broadcast_to(log_Pb_vec, (mag_grid_len, mag_num))
+        log_Pf_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)
         excursion_component = "faint"
-        loglik_baseline_only = np.sum(log_pb_vec)
-    else:
+        loglik_baseline_only = np.sum(log_Pb_vec)
+    elif kind == "jump":
         # Pb: excursion (bright, grid), Pf: baseline (faint, fixed at median)
-        log_pb_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs, eps=eps)
-        log_pf_vec = log_gaussian(mags, baseline_vals, errs, eps=eps)
-        log_pf_grid = np.broadcast_to(log_pf_vec, (M, N))
+        log_Pb_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)
+        log_Pf_vec = log_gaussian(mags, baseline_mags, errs)
+        log_Pf_grid = np.broadcast_to(log_Pf_vec, (mag_grid_len, mag_num))
         excursion_component = "bright"
-        loglik_baseline_only = np.sum(log_pf_vec)
+        loglik_baseline_only = np.sum(log_Pf_vec)
 
     log_p = np.log(p_grid)
     log_1mp = np.log1p(-p_grid)
 
-    # log_mix shape: (M, P, N)
-    log_mix = np.logaddexp(
-        log_p[None, :, None] + log_pb_grid[:, None, :],
-        log_1mp[None, :, None] + log_pf_grid[:, None, :],
-    )
-    loglik = np.sum(log_mix, axis=2)  # (M, P)
+    log_Pb_weighted = log_p[None, :, None] + log_Pb_grid[:, None, :]
+    log_Pf_weighted = log_1mp[None, :, None] + log_Pf_grid[:, None, :]
+
+    # log_mix shape: (p_grid_len, mag_grid_len, mag_num)
+    
+    log_mix = np.logaddexp(log_Pb_weighted, log_Pf_weighted)
+    loglik = np.sum(log_mix, axis=2)  # (mag_grid_len, p_grid_len)
 
     # Posterior on the grid (uniform priors)
     log_post_norm = loglik - logsumexp(loglik)
@@ -210,13 +206,13 @@ def bayesian_excursion_significance(
     bayes_factor = log_evidence_mixture - loglik_baseline_only
 
     # Per-point excursion probability via marginalization over p, mag_grid
-    event_prob = np.zeros(N, dtype=float)
+    event_prob = np.zeros(mag_num, dtype=float)
     log_mix_den = logsumexp(loglik)  # shared denominator (evidence)
 
-    for j in range(N):
+    for j in range(mag_num):
         loglik_noj = loglik - log_mix[:, :, j]
-        bright_num = loglik_noj + log_p[None, :] + log_pb_grid[:, None, j]
-        faint_num = loglik_noj + log_1mp[None, :] + log_pf_grid[:, None, j]
+        bright_num = loglik_noj + log_p[None, :] + log_Pb_grid[:, None, j]
+        faint_num = loglik_noj + log_1mp[None, :] + log_Pf_grid[:, None, j]
 
         log_bright = logsumexp(bright_num)
         log_faint = logsumexp(faint_num)
@@ -253,12 +249,14 @@ def run_bayesian_significance(
     err_col="error",
     baseline_func=None,
     baseline_kwargs=None,
-    use_per_point_baseline=True,
-    p_grid=None,
+    p_min_dip=None,
+    p_max_dip=None,
+    p_min_jump=None,
+    p_max_jump=None,
+    p_points=80,
     mag_grid_dip=None,
     mag_grid_jump=None,
     significance_threshold=0.99,
-    eps=1e-6,
 ):
     """
     Convenience wrapper to evaluate both dips and jumps with the same inputs
@@ -271,11 +269,11 @@ def run_bayesian_significance(
         err_col=err_col,
         baseline_func=baseline_func,
         baseline_kwargs=baseline_kwargs,
-        use_per_point_baseline=use_per_point_baseline,
-        p_grid=p_grid,
+        p_min=p_min_dip,
+        p_max=p_max_dip,
+        p_points=p_points,
         mag_grid=mag_grid_dip,
         significance_threshold=significance_threshold,
-        eps=eps,
     )
     jump = bayesian_excursion_significance(
         df,
@@ -284,10 +282,10 @@ def run_bayesian_significance(
         err_col=err_col,
         baseline_func=baseline_func,
         baseline_kwargs=baseline_kwargs,
-        use_per_point_baseline=use_per_point_baseline,
-        p_grid=p_grid,
+        p_min=p_min_jump,
+        p_max=p_max_jump,
+        p_points=p_points,
         mag_grid=mag_grid_jump,
         significance_threshold=significance_threshold,
-        eps=eps,
     )
     return {"dip": dip, "jump": jump}

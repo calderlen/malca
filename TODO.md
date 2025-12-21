@@ -4,7 +4,7 @@ todo
 - need to collect camera# for each peak detected
 - vsx_class_extract doesn't make sense to be placed in df_filter_naive
 - crossmatch w/ VSX earlier inthe pipeline so you can filter out known types earlier -- can also grab data such as period (when available) to reduce LSP calls; make sure code is aware when period is detected and when it isn't
-
+- need to update read_lc_dat to accept the new dat2 files
 
 
 
