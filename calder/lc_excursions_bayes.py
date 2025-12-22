@@ -2,6 +2,7 @@ import os
 import argparse
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from calder.lc_baseline import per_camera_gp_baseline
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
@@ -119,13 +120,13 @@ def bayesian_excursion_significance(
     kind="dip",
     mag_col="mag",
     err_col="error",
-    baseline_func=None,
-    baseline_kwargs=None,
+    baseline_func=per_camera_gp_baseline,
+    baseline_kwargs={"sigma": 0.05, "rho": 200.0, "q": 0.7, "jitter": 0.006},
     p_min=None,
     p_max=None,
     p_points=80,
     mag_grid=None,
-    significance_threshold=0.99,
+    significance_threshold=0.9545, #2-sigma
 ):
     """
     kind: "dip" or "jump"

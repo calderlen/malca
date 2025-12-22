@@ -15,5 +15,7 @@ dependencies:
   - ipython
   - ipykernel
   - jupyterlab
-  - celerite2 
+  - pip
+  - pip:
+      - celerite2
 

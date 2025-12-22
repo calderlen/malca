@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import warnings
-# from celerite2 import GaussianProcess, terms  # Commented out - celerite2 not available
+from celerite2 import GaussianProcess, terms
 
 def global_mean_baseline(
     df,
@@ -498,72 +498,78 @@ def per_camera_trend_baseline(
 
     return df_out
 
-# def per_camera_gp_baseline(
-#     df,
-#     *,
-#     sigma=0.2,
-#     rho=200.0,
-#     q=1.0,
-#     jitter=1e-3,
-#     t_col="JD",
-#     mag_col="mag",
-#     err_col="error",
-#     cam_col="camera#",
-# ):
-#     """
-#     per-camera GP baseline (fixed SHO kernel)
-#     """
-#     df_out = df.copy()
-#     for col in ("baseline", "resid", "sigma_resid"):
-#         if col not in df_out.columns:
-#             df_out[col] = np.nan
-#
-#     for _, sub in df_out.groupby(cam_col, group_keys=False):
-#         idx = sub.sort_values(t_col).index
-#         t = df_out.loc[idx, t_col].to_numpy(dtype=float)
-#         y = df_out.loc[idx, mag_col].to_numpy(dtype=float)
-#         if err_col in df_out.columns:
-#             yerr = df_out.loc[idx, err_col].to_numpy(dtype=float)
-#         else:
-#             yerr = np.full_like(y, np.nan, dtype=float)
-#
-#         finite = np.isfinite(t) & np.isfinite(y)
-#         if finite.sum() < 5:
-#             continue
-#
-#         finite_idx = np.flatnonzero(finite)
-#         t_fit = t[finite_idx]
-#         y_fit = y[finite_idx]
-#         yerr_fit = yerr[finite_idx]
-#         if not np.isfinite(yerr_fit).any():
-#             yerr_fit = np.full_like(y_fit, jitter, dtype=float)
-#         else:
-#             yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, np.nanmedian(yerr_fit))
-#             yerr_fit = np.nan_to_num(yerr_fit, nan=jitter, posinf=jitter, neginf=jitter)
-#
-#         # Build kernel
-#         k = terms.SHOTerm(sigma=sigma, rho=rho, Q=q)
-#
-#         try:
-#             gp = GaussianProcess(k)
-#             gp.compute(t_fit, yerr_fit)
-#             mu, var = gp.predict(y_fit, t, return_var=True)
-#         except Exception as exc:  # pragma: no cover - defensive
-#             warnings.warn(f"GP fit failed for camera group; leaving NaNs. Error: {exc}")
-#             continue
-#
-#         baseline = np.asarray(mu, dtype=float)
-#         resid = y - baseline
-#
-#         # Use predicted variance + median error to get a scale for sigma_resid.
-#         var = np.asarray(var, dtype=float)
-#         med_err = float(np.nanmedian(yerr_fit)) if np.isfinite(yerr_fit).any() else 0.0
-#         scale = np.sqrt(np.maximum(var, 0.0) + med_err**2)
-#         scale = np.where(np.isfinite(scale) & (scale > 0), scale, med_err)
-#         sigma_resid = resid / scale
-#
-#         df_out.loc[idx, "baseline"] = baseline
-#         df_out.loc[idx, "resid"] = resid
-#         df_out.loc[idx, "sigma_resid"] = sigma_resid
-#
-#     return df_out
+def per_camera_gp_baseline(
+    df,
+    *,
+    sigma=0.05,
+    rho=200.0,
+    q=0.7,
+    jitter=0.006,
+    t_col="JD",
+    mag_col="mag",
+    err_col="error",
+    cam_col="camera#",
+):
+    """
+    per-camera GP baseline (fixed SHO kernel)
+    """
+    df_out = df.copy()
+    for col in ("baseline", "resid", "sigma_resid"):
+        if col not in df_out.columns:
+            df_out[col] = np.nan
+
+    for _, sub in df_out.groupby(cam_col, group_keys=False):
+        idx = sub.sort_values(t_col).index
+        t = df_out.loc[idx, t_col].to_numpy(dtype=float)
+        y = df_out.loc[idx, mag_col].to_numpy(dtype=float)
+        if err_col in df_out.columns:
+            yerr = df_out.loc[idx, err_col].to_numpy(dtype=float)
+        else:
+            yerr = np.full_like(y, np.nan, dtype=float)
+
+        finite = np.isfinite(t) & np.isfinite(y)
+        if finite.sum() < 5:
+            continue
+
+        finite_idx = np.flatnonzero(finite)
+        t_fit = t[finite_idx]
+        y_fit = y[finite_idx]
+        y_mean = np.mean(y_fit)
+        y_centered = y_fit - y_mean
+        yerr_fit = yerr[finite_idx]
+        if not np.isfinite(yerr_fit).any():
+            yerr_fit = np.full_like(y_fit, jitter, dtype=float)
+        else:
+            yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, np.nanmedian(yerr_fit))
+            yerr_fit = np.nan_to_num(yerr_fit, nan=jitter, posinf=jitter, neginf=jitter)
+
+        # Build kernel
+        k = terms.SHOTerm(sigma=sigma, rho=rho, Q=q)
+
+        try:
+            gp = GaussianProcess(k)
+            try:
+                gp.compute(t_fit, diag=yerr_fit**2)
+            except TypeError:
+                # Fallback for celerite2 versions expecting keyword-only diag/yerr
+                gp.compute(t_fit, diag=yerr_fit**2)
+            mu, var = gp.predict(y_centered, t, return_var=True)
+        except Exception as exc:  # pragma: no cover - defensive
+            warnings.warn(f"GP fit failed for camera group; leaving NaNs. Error: {exc}")
+            continue
+
+        baseline = np.asarray(mu, dtype=float) + y_mean
+        resid = y - baseline
+
+        # Use predicted variance + median error to get a scale for sigma_resid.
+        var = np.asarray(var, dtype=float)
+        med_err = float(np.nanmedian(yerr_fit)) if np.isfinite(yerr_fit).any() else 0.0
+        scale = np.sqrt(np.maximum(var, 0.0) + med_err**2)
+        scale = np.where(np.isfinite(scale) & (scale > 0), scale, med_err)
+        sigma_resid = resid / scale
+
+        df_out.loc[idx, "baseline"] = baseline
+        df_out.loc[idx, "resid"] = resid
+        df_out.loc[idx, "sigma_resid"] = sigma_resid
+
+    return df_out

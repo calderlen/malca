@@ -13,6 +13,7 @@ from lc_baseline import (
     per_camera_mean_baseline,
     per_camera_median_baseline,
     per_camera_trend_baseline,
+    per_camera_gp_baseline,
 )
 
 asassn_columns=["JD",
@@ -365,6 +366,18 @@ def _plot_lc_with_residuals_df(
                 fmt=marker, ms=4, color=color, alpha=0.8, ecolor=color,
                 elinewidth=0.8, capsize=2, markeredgecolor="black", markeredgewidth=0.5,
             )
+            # Draw baseline line if available and finite
+            if "baseline" in cam_subset.columns:
+                base_vals = cam_subset[["JD_plot", "baseline"]].dropna()
+                if not base_vals.empty:
+                    raw_ax.plot(
+                        base_vals["JD_plot"],
+                        base_vals["baseline"],
+                        color=color,
+                        linewidth=1.0,
+                        alpha=0.8,
+                        zorder=2,
+                    )
             
             resid_ax.scatter(
                 cam_subset["JD_plot"], cam_subset["resid"], s=10, color=color,
@@ -379,7 +392,14 @@ def _plot_lc_with_residuals_df(
         resid_ax.set_ylabel(f"Residual {band_name}")
         resid_ax.set_xlabel("JD")
         
-        resid_min, resid_max = band_df["resid"].min(), band_df["resid"].max()
+        # Be robust to NaNs coming from failed baselines (e.g., GP fit issues)
+        resid_vals = band_df["resid"].to_numpy()
+        finite_resid = resid_vals[np.isfinite(resid_vals)]
+        if finite_resid.size == 0:
+            # Fallback range if no finite residuals
+            resid_min, resid_max = -0.3, 0.3
+        else:
+            resid_min, resid_max = float(finite_resid.min()), float(finite_resid.max())
         pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
         resid_ax.set_ylim(max(resid_max + pad, 0.35), min(resid_min - pad, -0.35))
         
@@ -435,7 +455,7 @@ def plot_lc_with_residuals(
     df=None,
     *,
     dat_paths=tuple(SKYPATROL_CSV_PATHS),
-    baseline_func=per_camera_trend_baseline,
+    baseline_func=per_camera_gp_baseline,
     baseline_kwargs=None,
     max_error=5.0,
     out_path=None,
