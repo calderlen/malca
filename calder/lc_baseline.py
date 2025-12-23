@@ -579,15 +579,15 @@ def per_camera_gp_baseline(
 def per_camera_gp_baseline_masked(
     df,
     *,
-    dip_sigma_thresh=-4.0,
-    pad_days=5.0,
+    dip_sigma_thresh=-2.5,
+    pad_days=50.0,
 
     a1=0.02**2,
     rho1=1000.0,
     a2=0.01**2,
     rho2=3000.0,
 
-    jitter=0.006,
+    jitter=0.1,
     use_yerr=True,
 
     t_col="JD",

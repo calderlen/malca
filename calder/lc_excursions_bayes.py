@@ -8,6 +8,7 @@ from scipy.special import logsumexp
 from tqdm import tqdm
 
 from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+from lc_baseline import per_camera_gp_baseline_masked
 
 lc_dir_masked = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked"
 MAG_BINS = ['12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15']

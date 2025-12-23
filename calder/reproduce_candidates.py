@@ -108,6 +108,32 @@ def _records_from_manifest(df: pd.DataFrame) -> dict[str, list[dict[str, object]
     return records
 
 
+def _records_from_skypatrol_dir(df_targets: pd.DataFrame, skypatrol_dir: Path) -> dict[str, list[dict[str, object]]]:
+    """Build records_map from SkyPatrol CSV files in a directory."""
+    base = Path(skypatrol_dir)
+    if not base.exists():
+        return {}
+
+    records: dict[str, list[dict[str, object]]] = {}
+    for _, row in df_targets.iterrows():
+        source_id = str(row.get("source_id"))
+        mag_bin = str(row.get("mag_bin"))
+        csv_path = base / f"{source_id}-light-curves.csv"
+        if not csv_path.exists():
+            continue
+        rec = {
+            "mag_bin": mag_bin,
+            "index_num": None,
+            "index_csv": None,
+            "lc_dir": str(base),
+            "asas_sn_id": source_id,
+            "dat_path": str(csv_path),
+            "found": True,
+        }
+        records.setdefault(mag_bin, []).append(rec)
+    return records
+
+
 def _coerce_candidate_records(data) -> list[dict[str, object]]:
     if data is None:
         return list(brayden_candidates)
@@ -190,9 +216,11 @@ def build_reproduction_report(
     metrics_dip_threshold: float = 0.3,
     bayes_significance_threshold: float = 0.9973,
     bayes_p_points: int = 80,
+    skypatrol_dir: Path | str | None = None,
     extra_columns: Iterable[str] | None = None,
     manifest_path: Path | str | None = None,
     method: str = "naive",
+    verbose: bool = False,
     **baseline_kwargs,
 ) -> pd.DataFrame:
     manifest_df = _load_manifest_df(manifest_path) if manifest_path is not None else None
@@ -216,6 +244,13 @@ def build_reproduction_report(
 
     target_map = _target_map(df_targets)
     records_map = _records_from_manifest(manifest_subset) if manifest_subset is not None else None
+
+    # Fallback to SkyPatrol CSVs if no manifest provided
+    if (records_map is None or not records_map) and skypatrol_dir is not None:
+        records_map = _records_from_skypatrol_dir(df_targets, Path(skypatrol_dir))
+        if verbose:
+            n_found = sum(len(v) for v in records_map.values())
+            print(f"[DEBUG] Built records_map from skypatrol_dir: {n_found} light curves found")
 
     if method == "naive":
         rows = dip_finder_naive(
@@ -246,9 +281,9 @@ def build_reproduction_report(
             peak_kwargs={"sigma_threshold": metrics_dip_threshold},
         )
     elif method == "bayes":
-        if records_map is None:
+        if records_map is None or not records_map:
             raise SystemExit(
-                "Bayesian method requires a manifest_path with lc_dir/dat_path entries."
+                "Bayesian method requires light-curve paths. Provide --manifest or --skypatrol-dir."
             )
 
         rows = []
@@ -265,29 +300,49 @@ def build_reproduction_report(
                         if asn and lc_dir and has_path
                         else (pd.DataFrame(), pd.DataFrame())
                     )
-                except Exception:
+                except Exception as e:
+                    if verbose:
+                        print(f"[DEBUG] {asn}: read_lc_dat2 failed: {e}")
                     dfg, dfv = pd.DataFrame(), pd.DataFrame()
 
-                def _bayes(df: pd.DataFrame):
+                if verbose:
+                    print(f"[DEBUG] {asn}: loaded g={len(dfg)} rows, v={len(dfv)} rows from {dat_path}")
+
+                def _bayes(df: pd.DataFrame, band_name: str):
                     if df is None or df.empty:
                         return {
-                            "dip": {"significant": False, "bayes_factor": np.nan},
-                            "jump": {"significant": False, "bayes_factor": np.nan},
+                            "dip": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan},
+                            "jump": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan},
                         }
                     try:
-                        return run_bayesian_significance(
+                        result = run_bayesian_significance(
                             df,
                             significance_threshold=bayes_significance_threshold,
                             p_points=bayes_p_points,
                         )
-                    except Exception:
+                        # Add max_event_prob for debugging
+                        for kind in ["dip", "jump"]:
+                            event_prob = result[kind].get("event_probability", np.array([]))
+                            max_prob = float(np.nanmax(event_prob)) if len(event_prob) > 0 else np.nan
+                            result[kind]["max_event_prob"] = max_prob
+                        if verbose:
+                            dip_max = result["dip"]["max_event_prob"]
+                            jump_max = result["jump"]["max_event_prob"]
+                            dip_bf = result["dip"].get("bayes_factor", np.nan)
+                            jump_bf = result["jump"].get("bayes_factor", np.nan)
+                            print(f"[DEBUG] {asn} {band_name}: dip_max_prob={dip_max:.4f}, dip_bf={dip_bf:.2f}, "
+                                  f"jump_max_prob={jump_max:.4f}, jump_bf={jump_bf:.2f}")
+                        return result
+                    except Exception as e:
+                        if verbose:
+                            print(f"[DEBUG] {asn} {band_name}: run_bayesian_significance failed: {e}")
                         return {
-                            "dip": {"significant": False, "bayes_factor": np.nan},
-                            "jump": {"significant": False, "bayes_factor": np.nan},
+                            "dip": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan},
+                            "jump": {"significant": False, "bayes_factor": np.nan, "max_event_prob": np.nan},
                         }
 
-                res_g = _bayes(dfg)
-                res_v = _bayes(dfv)
+                res_g = _bayes(dfg, "g")
+                res_v = _bayes(dfv, "V")
 
                 rows.append(
                     {
@@ -301,6 +356,8 @@ def build_reproduction_report(
                         "v_bayes_dip_significant": bool(res_v["dip"].get("significant", False)),
                         "g_bayes_jump_significant": bool(res_g["jump"].get("significant", False)),
                         "v_bayes_jump_significant": bool(res_v["jump"].get("significant", False)),
+                        "g_bayes_dip_max_prob": float(res_g["dip"].get("max_event_prob", np.nan)),
+                        "v_bayes_dip_max_prob": float(res_v["dip"].get("max_event_prob", np.nan)),
                         "g_bayes_dip_bayes_factor": float(res_g["dip"].get("bayes_factor", np.nan)),
                         "v_bayes_dip_bayes_factor": float(res_v["dip"].get("bayes_factor", np.nan)),
                         "g_bayes_jump_bayes_factor": float(res_g["jump"].get("bayes_factor", np.nan)),
@@ -310,11 +367,15 @@ def build_reproduction_report(
     else:
         rows = None
 
-    rows_df = rows.copy() if rows is not None else pd.DataFrame()
-    if rows_df.empty:
+    # Convert to DataFrame if rows is a list (bayes method returns list of dicts)
+    if rows is None:
         rows_df = pd.DataFrame(columns=["source_id", "mag_bin"])
+    elif isinstance(rows, list):
+        rows_df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["source_id", "mag_bin"])
+    elif isinstance(rows, pd.DataFrame):
+        rows_df = rows.copy() if not rows.empty else pd.DataFrame(columns=["source_id", "mag_bin"])
     else:
-        rows_df = rows_df.copy()
+        rows_df = pd.DataFrame(columns=["source_id", "mag_bin"])
     if "source_id" not in rows_df.columns:
         if "asas_sn_id" in rows_df.columns:
             rows_df["source_id"] = rows_df["asas_sn_id"].astype(str)
@@ -388,6 +449,8 @@ def build_reproduction_report(
         "v_n_peaks",
         "g_bayes_dip_significant",
         "v_bayes_dip_significant",
+        "g_bayes_dip_max_prob",
+        "v_bayes_dip_max_prob",
         "g_bayes_jump_significant",
         "v_bayes_jump_significant",
         "g_bayes_dip_bayes_factor",
@@ -428,6 +491,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metrics-dip-threshold", type=float, default=0.3, help="Dip threshold for run_metrics")
     parser.add_argument("--bayes-significance-threshold", type=float, default=0.9973, help="Per-point significance threshold for Bayesian dip finder")
     parser.add_argument("--bayes-p-points", type=int, default=80, help="Number of logit-spaced probability grid points for Bayesian dip finder")
+    parser.add_argument("--skypatrol-dir", default=None, help="Directory with SkyPatrol CSV files (<source_id>-light-curves.csv)")
     parser.add_argument("--manifest", default=None, help="Path to lc_manifest CSV/Parquet for targeted reproduction")
     parser.add_argument("--baseline-func", default=None, help="Baseline function import path (e.g. module:func)")
     parser.add_argument("--candidates", default=None, help="Candidate spec (built-in list name or path to CSV/Parquet file).",
@@ -438,6 +502,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="naive",
         help="Dip finder to use: baseline-residual (naive), biweight/fit-based (biweight), or Bayesian significance (bayes).",
     )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Print debug info for Bayesian method")
     return parser
 
 def main(argv: Iterable[str] | None = None) -> None:
@@ -463,8 +528,10 @@ def main(argv: Iterable[str] | None = None) -> None:
         metrics_dip_threshold=args.metrics_dip_threshold,
         bayes_significance_threshold=args.bayes_significance_threshold,
         bayes_p_points=args.bayes_p_points,
+        skypatrol_dir=args.skypatrol_dir,
         manifest_path=args.manifest,
         method=args.method,
+        verbose=args.verbose,
         **kwargs,
     )
 
@@ -478,6 +545,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         "v_n_peaks",
         "g_bayes_dip_significant",
         "v_bayes_dip_significant",
+        "g_bayes_dip_max_prob",
+        "v_bayes_dip_max_prob",
         "g_bayes_dip_bayes_factor",
         "v_bayes_dip_bayes_factor",
         "matches_expected",

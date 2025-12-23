@@ -83,13 +83,15 @@ def read_lc_dat2(asassn_id, path):
     ]
     csv_path = next((p for p in csv_candidates if os.path.exists(p)), None)
     if csv_path:
-        df = pd.read_csv(csv_path)
+        # SkyPatrol CSVs have comment lines starting with # and blank lines before header
+        df = pd.read_csv(csv_path, comment='#', skip_blank_lines=True)
         # Normalize column names we care about
         rename_map = {
             "Mag": "mag",
             "Mag Error": "error",
             "JD": "JD",
             "Filter": "filter",
+            "Camera": "camera_name",
         }
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
         # Provide minimal columns expected downstream
