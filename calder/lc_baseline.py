@@ -498,6 +498,7 @@ def per_camera_trend_baseline(
 
     return df_out
 
+
 def per_camera_gp_baseline(
     df,
     *,
@@ -566,6 +567,128 @@ def per_camera_gp_baseline(
         med_err = float(np.nanmedian(yerr_fit)) if np.isfinite(yerr_fit).any() else 0.0
         scale = np.sqrt(np.maximum(var, 0.0) + med_err**2)
         scale = np.where(np.isfinite(scale) & (scale > 0), scale, med_err)
+        sigma_resid = resid / scale
+
+        df_out.loc[idx, "baseline"] = baseline
+        df_out.loc[idx, "resid"] = resid
+        df_out.loc[idx, "sigma_resid"] = sigma_resid
+
+    return df_out
+
+
+def per_camera_gp_baseline_masked(
+    df,
+    *,
+    dip_sigma_thresh=-4.0,
+    pad_days=5.0,
+
+    a1=0.02**2,
+    rho1=1000.0,
+    a2=0.01**2,
+    rho2=3000.0,
+
+    jitter=0.006,
+    use_yerr=True,
+
+    t_col="JD",
+    mag_col="mag",
+    err_col="error",
+    cam_col="camera#",
+
+    min_gp_points=10,
+):
+    df_out = df.copy()
+    for col in ("baseline", "resid", "sigma_resid"):
+        if col not in df_out.columns:
+            df_out[col] = np.nan
+
+    for _, sub in df_out.groupby(cam_col, group_keys=False):
+        idx = sub.sort_values(t_col).index
+        t = df_out.loc[idx, t_col].to_numpy(float)
+        y = df_out.loc[idx, mag_col].to_numpy(float)
+
+        if use_yerr and err_col in df_out.columns:
+            yerr = df_out.loc[idx, err_col].to_numpy(float)
+        else:
+            yerr = np.full_like(y, np.nan, dtype=float)
+
+        finite = np.isfinite(t) & np.isfinite(y)
+
+        # --- 1) Cheap baseline: per-camera median
+        y_med = float(np.nanmedian(y[finite]))
+        r0 = y - y_med
+
+        # --- 2) Robust global scale for masking
+        r0_f = r0[finite]
+        med_r = float(np.nanmedian(r0_f))
+        mad_r = 1.4826 * float(np.nanmedian(np.abs(r0_f - med_r)))
+
+        if use_yerr and np.isfinite(yerr).any():
+            e_med = float(np.nanmedian(yerr[finite & np.isfinite(yerr)]))
+        else:
+            e_med = float(jitter)
+
+        s0 = float(np.sqrt(max(mad_r, 0.0)**2 + max(e_med, 0.0)**2))
+        s0 = max(s0, 1e-6)
+
+        sig0 = r0 / s0
+        dip_flag = finite & np.isfinite(sig0) & (sig0 < float(dip_sigma_thresh))
+
+        # --- 3) Pad mask in time around dip candidates
+        keep = finite.copy()
+        if dip_flag.any():
+            t_dip = t[dip_flag]
+            bad = np.zeros_like(keep, dtype=bool)
+            for td in t_dip:
+                bad |= (np.abs(t - td) <= float(pad_days))
+            keep &= ~bad
+
+        if keep.sum() < min_gp_points:
+            baseline = np.full_like(y, y_med, dtype=float)
+            resid = y - baseline
+            df_out.loc[idx, "baseline"] = baseline
+            df_out.loc[idx, "resid"] = resid
+            df_out.loc[idx, "sigma_resid"] = resid / s0
+            continue
+
+        t_fit = t[keep]
+        y_fit = y[keep]
+
+        if use_yerr and np.isfinite(yerr[keep]).any():
+            yerr_fit = yerr[keep]
+            med = float(np.nanmedian(yerr_fit[np.isfinite(yerr_fit)]))
+            yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, med)
+            yerr_fit = np.nan_to_num(yerr_fit, nan=jitter, posinf=jitter, neginf=jitter)
+        else:
+            yerr_fit = np.full_like(y_fit, float(jitter), dtype=float)
+
+        y_mean = float(np.mean(y_fit))
+        y_fit0 = y_fit - y_mean
+
+        k = (
+            terms.RealTerm(a=float(a1), c=1.0 / float(rho1)) +
+            terms.RealTerm(a=float(a2), c=1.0 / float(rho2))
+        )
+
+        try:
+            gp = GaussianProcess(k)
+            gp.compute(t_fit, diag=yerr_fit**2)
+            mu, var = gp.predict(y_fit0, t, return_var=True)
+        except Exception:
+            baseline = np.full_like(y, y_med, dtype=float)
+            resid = y - baseline
+            df_out.loc[idx, "baseline"] = baseline
+            df_out.loc[idx, "resid"] = resid
+            df_out.loc[idx, "sigma_resid"] = resid / s0
+            continue
+
+        baseline = np.asarray(mu, float) + y_mean
+        resid = y - baseline
+
+        var = np.asarray(var, float)
+        med_err = float(np.nanmedian(yerr_fit)) if np.isfinite(yerr_fit).any() else float(jitter)
+        scale = np.sqrt(np.maximum(var, 0.0) + med_err**2)
+        scale = np.where(np.isfinite(scale) & (scale > 0), scale, max(med_err, 1e-6))
         sigma_resid = resid / scale
 
         df_out.loc[idx, "baseline"] = baseline

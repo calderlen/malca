@@ -9,6 +9,10 @@ import pandas as pd
 
 from lc_excursions_naive import dip_finder_naive
 from lc_excursions import excursion_finder
+from lc_excursions_bayes import run_bayesian_significance
+from lc_utils import read_lc_dat2
+
+
 
 
 brayden_candidates: list[dict[str, object]] = [
@@ -185,6 +189,8 @@ def build_reproduction_report(
     chunk_size: int = 250000,
     metrics_baseline_func=None,
     metrics_dip_threshold: float = 0.3,
+    bayes_significance_threshold: float = 0.9973,
+    bayes_p_points: int = 80,
     extra_columns: Iterable[str] | None = None,
     manifest_path: Path | str | None = None,
     method: str = "naive",
@@ -240,6 +246,70 @@ def build_reproduction_report(
             return_rows=True,
             peak_kwargs={"sigma_threshold": metrics_dip_threshold},
         )
+    elif method == "bayes":
+        if records_map is None:
+            raise SystemExit(
+                "Bayesian method requires a manifest_path with lc_dir/dat_path entries."
+            )
+
+        rows = []
+        for mag_bin in sorted(records_map):
+            for rec in records_map[mag_bin]:
+                asn = rec.get("asas_sn_id")
+                lc_dir = rec.get("lc_dir")
+                dat_path = rec.get("dat_path")
+                has_path = dat_path and Path(dat_path).exists()
+
+                try:
+                    dfg, dfv = (
+                        read_lc_dat2(asn, lc_dir)
+                        if asn and lc_dir and has_path
+                        else (pd.DataFrame(), pd.DataFrame())
+                    )
+                except Exception:
+                    dfg, dfv = pd.DataFrame(), pd.DataFrame()
+
+                def _bayes(df: pd.DataFrame):
+                    if df is None or df.empty:
+                        return {
+                            "dip": {"significant": False, "bayes_factor": np.nan},
+                            "jump": {"significant": False, "bayes_factor": np.nan},
+                        }
+                    try:
+                        return run_bayesian_significance(
+                            df,
+                            significance_threshold=bayes_significance_threshold,
+                            p_points=bayes_p_points,
+                        )
+                    except Exception:
+                        return {
+                            "dip": {"significant": False, "bayes_factor": np.nan},
+                            "jump": {"significant": False, "bayes_factor": np.nan},
+                        }
+
+                res_g = _bayes(dfg)
+                res_v = _bayes(dfv)
+
+                rows.append(
+                    {
+                        "mag_bin": str(rec.get("mag_bin")),
+                        "asas_sn_id": asn,
+                        "index_num": rec.get("index_num"),
+                        "index_csv": rec.get("index_csv"),
+                        "lc_dir": lc_dir,
+                        "dat_path": dat_path,
+                        "g_bayes_dip_significant": bool(res_g["dip"].get("significant", False)),
+                        "v_bayes_dip_significant": bool(res_v["dip"].get("significant", False)),
+                        "g_bayes_jump_significant": bool(res_g["jump"].get("significant", False)),
+                        "v_bayes_jump_significant": bool(res_v["jump"].get("significant", False)),
+                        "g_bayes_dip_bayes_factor": float(res_g["dip"].get("bayes_factor", np.nan)),
+                        "v_bayes_dip_bayes_factor": float(res_v["dip"].get("bayes_factor", np.nan)),
+                        "g_bayes_jump_bayes_factor": float(res_g["jump"].get("bayes_factor", np.nan)),
+                        "v_bayes_jump_bayes_factor": float(res_v["jump"].get("bayes_factor", np.nan)),
+                    }
+                )
+    else:
+        rows = None
 
     rows_df = rows.copy() if rows is not None else pd.DataFrame()
     if rows_df.empty:
@@ -259,17 +329,43 @@ def build_reproduction_report(
 
     g_peaks = merged["g_n_peaks"] if "g_n_peaks" in merged.columns else pd.Series(np.nan, index=merged.index)
     v_peaks = merged["v_n_peaks"] if "v_n_peaks" in merged.columns else pd.Series(np.nan, index=merged.index)
+    g_bayes = (
+        merged["g_bayes_dip_significant"].fillna(False).astype(bool)
+        if "g_bayes_dip_significant" in merged.columns
+        else pd.Series(False, index=merged.index)
+    )
+    v_bayes = (
+        merged["v_bayes_dip_significant"].fillna(False).astype(bool)
+        if "v_bayes_dip_significant" in merged.columns
+        else pd.Series(False, index=merged.index)
+    )
+
     merged["detected"] = (
-        (g_peaks.fillna(0).astype(float) > 0) | (v_peaks.fillna(0).astype(float) > 0)
+        (g_peaks.fillna(0).astype(float) > 0)
+        | (v_peaks.fillna(0).astype(float) > 0)
+        | g_bayes
+        | v_bayes
     )
-    merged["detection_details"] = merged.apply(
-        lambda row: (
-            f"mag_bin={row['mag_bin']}; g_peaks={int(row['g_n_peaks'])}; v_peaks={int(row['v_n_peaks'])}"
-            if row["detected"]
-            else "—"
-        ),
-        axis=1,
-    )
+
+    def _format_detection(row: pd.Series) -> str:
+        if not row.get("detected", False):
+            return "—"
+        parts = [f"mag_bin={row.get('mag_bin', '')}"]
+        if "g_n_peaks" in row and pd.notna(row["g_n_peaks"]):
+            parts.append(f"g_peaks={int(row['g_n_peaks'])}")
+        if "v_n_peaks" in row and pd.notna(row["v_n_peaks"]):
+            parts.append(f"v_peaks={int(row['v_n_peaks'])}")
+        if row.get("g_bayes_dip_significant"):
+            bf = row.get("g_bayes_dip_bayes_factor")
+            bf_str = f"{float(bf):.3f}" if pd.notna(bf) else "nan"
+            parts.append(f"g_bayes_dip (bf={bf_str})")
+        if row.get("v_bayes_dip_significant"):
+            bf = row.get("v_bayes_dip_bayes_factor")
+            bf_str = f"{float(bf):.3f}" if pd.notna(bf) else "nan"
+            parts.append(f"v_bayes_dip (bf={bf_str})")
+        return "; ".join(parts)
+
+    merged["detection_details"] = merged.apply(_format_detection, axis=1)
     if "expected_detected" in merged.columns:
         merged["matches_expected"] = merged["detected"] == merged["expected_detected"].astype(bool)
 
@@ -291,6 +387,14 @@ def build_reproduction_report(
         "matches_expected",
         "g_n_peaks",
         "v_n_peaks",
+        "g_bayes_dip_significant",
+        "v_bayes_dip_significant",
+        "g_bayes_jump_significant",
+        "v_bayes_jump_significant",
+        "g_bayes_dip_bayes_factor",
+        "v_bayes_dip_bayes_factor",
+        "g_bayes_jump_bayes_factor",
+        "v_bayes_jump_bayes_factor",
         "g_max_depth",
         "v_max_depth",
         "jd_first",
@@ -323,15 +427,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-workers", type=int, default=10, help="ProcessPool worker count for dip_finder_naive")
     parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per chunk flush for CSV output")
     parser.add_argument("--metrics-dip-threshold", type=float, default=0.3, help="Dip threshold for run_metrics")
+    parser.add_argument("--bayes-significance-threshold", type=float, default=0.9973, help="Per-point significance threshold for Bayesian dip finder")
+    parser.add_argument("--bayes-p-points", type=int, default=80, help="Number of logit-spaced probability grid points for Bayesian dip finder")
     parser.add_argument("--manifest", default=None, help="Path to lc_manifest CSV/Parquet for targeted reproduction")
     parser.add_argument("--baseline-func", default=None, help="Baseline function import path (e.g. module:func)")
     parser.add_argument("--candidates", default=None, help="Candidate spec (built-in list name or path to CSV/Parquet file).",
     )
     parser.add_argument(
         "--method",
-        choices=("naive", "biweight"),
+        choices=("naive", "biweight", "bayes"),
         default="naive",
-        help="Dip finder to use: baseline-residual (naive) or biweight/fit-based (biweight).",
+        help="Dip finder to use: baseline-residual (naive), biweight/fit-based (biweight), or Bayesian significance (bayes).",
     )
     return parser
 
@@ -356,6 +462,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         n_workers=args.n_workers,
         chunk_size=args.chunk_size,
         metrics_dip_threshold=args.metrics_dip_threshold,
+        bayes_significance_threshold=args.bayes_significance_threshold,
+        bayes_p_points=args.bayes_p_points,
         manifest_path=args.manifest,
         method=args.method,
         **kwargs,
@@ -369,6 +477,10 @@ def main(argv: Iterable[str] | None = None) -> None:
         "detection_details",
         "g_n_peaks",
         "v_n_peaks",
+        "g_bayes_dip_significant",
+        "v_bayes_dip_significant",
+        "g_bayes_dip_bayes_factor",
+        "v_bayes_dip_bayes_factor",
         "matches_expected",
     ]
     existing = [c for c in columns if c in report.columns]

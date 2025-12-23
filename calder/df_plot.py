@@ -13,7 +13,7 @@ from lc_baseline import (
     per_camera_mean_baseline,
     per_camera_median_baseline,
     per_camera_trend_baseline,
-    per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
 )
 
 asassn_columns=["JD",
@@ -455,7 +455,7 @@ def plot_lc_with_residuals(
     df=None,
     *,
     dat_paths=tuple(SKYPATROL_CSV_PATHS),
-    baseline_func=per_camera_gp_baseline,
+    baseline_func=per_camera_gp_baseline_masked,
     baseline_kwargs=None,
     max_error=5.0,
     out_path=None,

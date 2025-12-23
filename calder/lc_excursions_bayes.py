@@ -2,7 +2,7 @@ import os
 import argparse
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from calder.lc_baseline import per_camera_gp_baseline
+from calder.lc_baseline import per_camera_gp_baseline_masked
 import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
@@ -120,13 +120,13 @@ def bayesian_excursion_significance(
     kind="dip",
     mag_col="mag",
     err_col="error",
-    baseline_func=per_camera_gp_baseline,
+    baseline_func=per_camera_gp_baseline_masked,
     baseline_kwargs={"sigma": 0.05, "rho": 200.0, "q": 0.7, "jitter": 0.006},
     p_min=None,
     p_max=None,
     p_points=80,
     mag_grid=None,
-    significance_threshold=0.9545, #2-sigma
+    significance_threshold=0.9973, #3-sigma
 ):
     """
     kind: "dip" or "jump"
@@ -264,7 +264,7 @@ def run_bayesian_significance(
     p_points=80,
     mag_grid_dip=None,
     mag_grid_jump=None,
-    significance_threshold=0.9545, #2-sigma
+    significance_threshold=0.9973, #3-sigma
 ):
     """
     Convenience wrapper to evaluate both dips and jumps with the same inputs
@@ -310,7 +310,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 
-def _process_one(path, *, significance_threshold=0.9545, p_points=80):
+def _process_one(path, *, significance_threshold=0.9973, p_points=80):
     df = read_lc_dat2(path)
     res = run_bayesian_significance(
         df,
@@ -344,8 +344,8 @@ def main():
     parser.add_argument(
         "--significance-threshold",
         type=float,
-        default=0.9545,
-        help="Per-point significance threshold (default: 0.9545 ~ 2-sigma)",
+        default=0.9973,
+        help="Per-point significance threshold (default: 0.9973 ~ 3-sigma)",
     )
     parser.add_argument(
         "--p-points",
