@@ -498,7 +498,7 @@ def per_camera_trend_baseline(
 
     return df_out
 
-
+    
 def per_camera_gp_baseline(
     df,
     *,
@@ -512,23 +512,73 @@ def per_camera_gp_baseline(
     mag_col="mag",
     err_col="error",
     cam_col="camera#",
+    # --- new: effective-noise (sigma_eff) control ---
+    sigma_floor=None,          # if None: estimate per-camera from quiescent residuals
+    floor_clip=3.0,            # robust clip threshold (in MAD-sigma units) for "quiet" selection
+    floor_iters=3,             # iterations for quiet-point selection
+    min_floor_points=30,       # need at least this many quiet points to estimate a floor
+    add_sigma_eff_col=True,    # optionally store sigma_eff in df_out
 ):
     """
     per-camera GP baseline (fixed SHO kernel)
-    
+
     Supports two parameterizations:
     - sigma, rho, Q (default)
     - S0, w0, Q (alternative)
+
+    Implements (physics convention):
+        sigma_eff,j^2 = sigma_j^2 + sigma_floor^2 + sigma_model,j^2
+    where:
+        sigma_j         = reported photometric error (yerr) per point (filled robustly if missing),
+        sigma_model,j^2 = GP predictive variance (var) at t_j,
+        sigma_floor     = extra jitter ("noise floor"), either user-specified or estimated from quiescent residuals.
+
+    Outputs:
+        baseline, resid, sigma_resid  (and optionally sigma_eff)
     """
     df_out = df.copy()
-    for col in ("baseline", "resid", "sigma_resid"):
+    out_cols = ("baseline", "resid", "sigma_resid") + (("sigma_eff",) if add_sigma_eff_col else ())
+    for col in out_cols:
         if col not in df_out.columns:
             df_out[col] = np.nan
+
+    def _robust_sigma_floor(resid, yerr_here, var_here):
+        """Estimate sigma_floor from quiescent residuals via iterative MAD clipping."""
+        finite0 = np.isfinite(resid) & np.isfinite(yerr_here) & np.isfinite(var_here)
+        if finite0.sum() < max(10, min_floor_points):
+            return 0.0
+
+        r = resid[finite0].copy()
+
+        # iterative quiet selection in residual-space (not normalized), robust to dips/jumps
+        keep = np.ones_like(r, dtype=bool)
+        for _ in range(int(max(floor_iters, 1))):
+            rr = r[keep]
+            if rr.size < max(10, min_floor_points):
+                break
+            med = float(np.median(rr))
+            mad = 1.4826 * float(np.median(np.abs(rr - med)))
+            mad = max(mad, 1e-12)
+            keep = np.abs(r - med) <= float(floor_clip) * mad
+
+        rr = r[keep]
+        if rr.size < max(10, min_floor_points):
+            rr = r  # fallback: use all finite residuals
+
+        s_quiet = 1.4826 * float(np.median(np.abs(rr - float(np.median(rr)))))
+        s_quiet = max(s_quiet, 1e-12)
+
+        yerr2_med = float(np.median((yerr_here[finite0][keep] if keep.size == yerr_here[finite0].size else yerr_here[finite0])**2))
+        var_med = float(np.median((var_here[finite0][keep] if keep.size == var_here[finite0].size else var_here[finite0])))
+
+        floor2 = max(s_quiet**2 - yerr2_med - var_med, 0.0)
+        return float(np.sqrt(floor2))
 
     for _, sub in df_out.groupby(cam_col, group_keys=False):
         idx = sub.sort_values(t_col).index
         t = df_out.loc[idx, t_col].to_numpy(dtype=float)
         y = df_out.loc[idx, mag_col].to_numpy(dtype=float)
+
         if err_col in df_out.columns:
             yerr = df_out.loc[idx, err_col].to_numpy(dtype=float)
         else:
@@ -541,53 +591,78 @@ def per_camera_gp_baseline(
         finite_idx = np.flatnonzero(finite)
         t_fit = t[finite_idx]
         y_fit = y[finite_idx]
-        y_mean = np.mean(y_fit)
+        y_mean = float(np.mean(y_fit))
         y_centered = y_fit - y_mean
+
+        # per-point measurement errors for the fit (and later sigma_eff)
         yerr_fit = yerr[finite_idx]
         if not np.isfinite(yerr_fit).any():
-            yerr_fit = np.full_like(y_fit, jitter, dtype=float)
+            yerr_fit = np.full_like(y_fit, float(jitter), dtype=float)
         else:
-            yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, np.nanmedian(yerr_fit))
-            yerr_fit = np.nan_to_num(yerr_fit, nan=jitter, posinf=jitter, neginf=jitter)
+            med_yerr = float(np.nanmedian(yerr_fit[np.isfinite(yerr_fit)]))
+            med_yerr = float(med_yerr) if np.isfinite(med_yerr) else float(jitter)
+            yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, med_yerr)
+            yerr_fit = np.nan_to_num(yerr_fit, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
 
         # Build kernel - use S0, w0 if provided, otherwise use sigma, rho
         if S0 is not None and w0 is not None:
-            k = terms.SHOTerm(S0=S0, w0=w0, Q=q)
+            k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(q))
         else:
-            # Default to sigma, rho if not provided
             if sigma is None:
                 sigma = 0.05
             if rho is None:
                 rho = 200.0
-            k = terms.SHOTerm(sigma=sigma, rho=rho, Q=q)
+            k = terms.SHOTerm(sigma=float(sigma), rho=float(rho), Q=float(q))
+
+        # defaults in case GP fails
+        baseline = np.full_like(y, np.nan, dtype=float)
+        var = np.zeros_like(y, dtype=float)
 
         try:
             gp = GaussianProcess(k)
-            try:
-                gp.compute(t_fit, diag=yerr_fit**2)
-            except TypeError:
-                # Fallback for celerite2 versions expecting keyword-only diag/yerr
-                gp.compute(t_fit, diag=yerr_fit**2)
-            mu, var = gp.predict(y_centered, t, return_var=True)
+            gp.compute(t_fit, diag=yerr_fit**2)
+            mu, var_pred = gp.predict(y_centered, t, return_var=True)
+            baseline = np.asarray(mu, dtype=float) + y_mean
+            var = np.asarray(var_pred, dtype=float)
+            var = np.where(np.isfinite(var) & (var >= 0.0), var, 0.0)
         except Exception as exc:  # pragma: no cover - defensive
-            warnings.warn(f"GP fit failed for camera group; leaving NaNs. Error: {exc}")
-            continue
+            warnings.warn(f"GP fit failed for camera group; falling back to median baseline. Error: {exc}")
+            # fallback baseline: per-camera median on finite points
+            y_med = float(np.nanmedian(y[finite]))
+            baseline = np.full_like(y, y_med, dtype=float)
+            var = np.zeros_like(y, dtype=float)
 
-        baseline = np.asarray(mu, dtype=float) + y_mean
         resid = y - baseline
 
-        # Use predicted variance + median error to get a scale for sigma_resid.
-        var = np.asarray(var, dtype=float)
-        med_err = float(np.nanmedian(yerr_fit)) if np.isfinite(yerr_fit).any() else 0.0
-        scale = np.sqrt(np.maximum(var, 0.0) + med_err**2)
-        scale = np.where(np.isfinite(scale) & (scale > 0), scale, med_err)
-        sigma_resid = resid / scale
+        # Build per-point measurement error array (full length), fill missing with a robust median
+        if np.isfinite(yerr).any():
+            med_yerr_all = float(np.nanmedian(yerr[np.isfinite(yerr)]))
+            med_yerr_all = med_yerr_all if np.isfinite(med_yerr_all) else float(jitter)
+        else:
+            med_yerr_all = float(jitter)
+        yerr_full = np.where(np.isfinite(yerr), yerr, med_yerr_all)
+        yerr_full = np.nan_to_num(yerr_full, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
+        yerr_full = np.maximum(yerr_full, 0.0)
+
+        # Estimate / apply sigma_floor (per camera)
+        if sigma_floor is None:
+            floor_here = _robust_sigma_floor(resid, yerr_full, var)
+        else:
+            floor_here = float(max(sigma_floor, 0.0))
+
+        # sigma_eff,j^2 = sigma_j^2 + sigma_floor^2 + sigma_model,j^2  (physics convention)
+        sigma_eff2 = yerr_full**2 + floor_here**2 + var
+        sigma_eff = np.sqrt(np.maximum(sigma_eff2, 1e-12))
+        sigma_resid = resid / sigma_eff
 
         df_out.loc[idx, "baseline"] = baseline
         df_out.loc[idx, "resid"] = resid
         df_out.loc[idx, "sigma_resid"] = sigma_resid
+        if add_sigma_eff_col:
+            df_out.loc[idx, "sigma_eff"] = sigma_eff
 
     return df_out
+
 
 
 def per_camera_gp_baseline_masked(
