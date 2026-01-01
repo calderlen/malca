@@ -1384,13 +1384,12 @@ def main():
     else:
         chunk_size = None  # Disabled
     total_written = 0
-    write_header = True
 
     def _write_chunk(chunk_results, is_final=False):
         """Write a chunk of results to CSV."""
         if not chunk_results or not args.output:
             return
-        nonlocal write_header, total_written
+        nonlocal total_written
         df_chunk = pd.DataFrame(chunk_results)
         
         # Ensure output directory exists
@@ -1399,11 +1398,10 @@ def main():
         
         file_exists = output_path.exists()
         mode = "a" if file_exists else "w"
-        header = write_header and not file_exists
-        df_chunk.to_csv(args.output, index=False, mode=mode, header=header)
+        header = not file_exists
+        df_chunk.to_csv(output_path, index=False, mode=mode, header=header)
 
         total_written += len(chunk_results)
-        write_header = False
         if is_final:
             print(f"Wrote {total_written} total rows to {args.output}", flush=True)
         else:
