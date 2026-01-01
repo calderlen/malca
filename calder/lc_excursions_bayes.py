@@ -1384,22 +1384,29 @@ def main():
     else:
         chunk_size = None  # Disabled
     total_written = 0
+    out_fh = None
 
     def _write_chunk(chunk_results, is_final=False):
         """Write a chunk of results to CSV."""
         if not chunk_results or not args.output:
             return
-        nonlocal total_written
+        nonlocal total_written, out_fh
         df_chunk = pd.DataFrame(chunk_results)
         
-        # Ensure output directory exists
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        file_exists = output_path.exists()
-        mode = "a" if file_exists else "w"
-        header = not file_exists
-        df_chunk.to_csv(output_path, index=False, mode=mode, header=header)
+
+        # Keep a single file handle open to avoid repeated open/close on networked filesystems
+        if out_fh is None:
+            file_exists = output_path.exists()
+            mode = "a" if file_exists else "w"
+            out_fh = open(output_path, mode, newline="")
+            header = not file_exists
+        else:
+            header = False
+
+        df_chunk.to_csv(out_fh, index=False, header=header)
+        out_fh.flush()
 
         total_written += len(chunk_results)
         if is_final:
@@ -1468,6 +1475,9 @@ def main():
 
     if errors:
         print(f"Completed with {len(errors)} failures.", flush=True)
+
+    if out_fh is not None:
+        out_fh.close()
 
 
 if __name__ == "__main__":
