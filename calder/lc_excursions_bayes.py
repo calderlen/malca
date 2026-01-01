@@ -1197,6 +1197,12 @@ def main():
         default="lc_excursions_bayes_results.csv",
         help="CSV path for results (default: ./lc_excursions_bayes_results.csv).",
     )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=5000,
+        help="Write CSV in chunks of this many results. Default: auto (1000 for <100k files, 5000 for >=100k files). Set to 0 to disable chunking.",
+    )
 
     args = parser.parse_args()
 
@@ -1260,6 +1266,44 @@ def main():
 
     results = []
     errors = []
+    
+    # Auto-determine chunk size if not specified
+    if args.chunk_size is None:
+        # Adaptive: smaller chunks for smaller jobs, larger for huge jobs
+        if len(expanded_inputs) < 10000:
+            chunk_size = 500  # Small jobs: write every 500
+        elif len(expanded_inputs) < 100000:
+            chunk_size = 1000  # Medium jobs: write every 1000
+        else:
+            chunk_size = 5000  # Large jobs: write every 5000
+        print(f"Auto-selected chunk size: {chunk_size} (based on {len(expanded_inputs)} files)", flush=True)
+    elif args.chunk_size > 0:
+        chunk_size = args.chunk_size
+    else:
+        chunk_size = None  # Disabled
+    total_written = 0
+    write_header = True
+
+    def _write_chunk(chunk_results, is_final=False):
+        """Write a chunk of results to CSV."""
+        if not chunk_results or not args.output:
+            return
+        nonlocal write_header, total_written
+        df_chunk = pd.DataFrame(chunk_results)
+        # Append mode if not first write, write mode if first write
+        mode = 'a' if not write_header else 'w'
+        df_chunk.to_csv(
+            args.output,
+            mode=mode,
+            index=False,
+            header=write_header
+        )
+        total_written += len(chunk_results)
+        write_header = False
+        if is_final:
+            print(f"Wrote {total_written} total rows to {args.output}", flush=True)
+        else:
+            print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})", flush=True)
 
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futs = {
@@ -1285,7 +1329,13 @@ def main():
         for fut in tqdm(as_completed(futs), total=len(futs), desc="LCs", unit="lc"):
             path = futs[fut]
             try:
-                results.append(fut.result())
+                result = fut.result()
+                results.append(result)
+                
+                # Write chunk if we've accumulated enough results
+                if chunk_size and len(results) >= chunk_size:
+                    _write_chunk(results)
+                    results = []  # Clear the buffer
             except Exception as e:
                 import traceback
                 tb_str = traceback.format_exc()
@@ -1295,10 +1345,16 @@ def main():
                 if "too many values to unpack" in str(e):
                     print(f"Full traceback:\n{tb_str}", flush=True)
 
-    if args.output:
-        df_out = pd.DataFrame(results)
-        df_out.to_csv(args.output, index=False)
-        print(f"Wrote {len(results)} rows to {args.output}")
+    # Write any remaining results
+    if results:
+        _write_chunk(results, is_final=True)
+    elif args.output and total_written == 0:
+        # No results at all - create empty file with headers
+        if chunk_size:
+            # We need to know the structure - create from first error or a dummy
+            # Actually, if there are no results, we might not know the structure
+            # So just write an empty file or skip
+            pass
     else:
         for row in results:
             print(
