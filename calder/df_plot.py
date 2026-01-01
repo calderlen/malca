@@ -19,9 +19,9 @@ from lc_baseline import (
 asassn_columns=["JD",
                 "mag",
                 'error', 
-                'good_bad', #1=good, 0 =bad
+                'good_bad',                
                 'camera#', 
-                'v_g_band', #1=V, 0=g
+                'v_g_band',          
                 'saturated',
                 'cam_field']
   
@@ -226,6 +226,9 @@ def read_skypatrol_csv(csv_path):
     return df
 
 def _load_lightcurve_df(path):
+    """
+    
+    """
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".csv":
@@ -233,19 +236,25 @@ def _load_lightcurve_df(path):
     return read_asassn_dat(path)
 
 def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
+    """
+    
+    """
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"detection_results file not found: {csv_path}")
     
-    # Read as string to preserve IDs, clean whitespace
+                                                      
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
     df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
     
-    # Derive clean ID from the DAT_Path filename to ignore scientific notation in Source_ID
+                                                                                           
     df["Match_ID"] = df["DAT_Path"].apply(lambda p: Path(p).stem if p else "")
     return df
 
 def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, csv_path=DETECTION_RESULTS_FILE):
+    """
+    
+    """
     df = load_detection_results(csv_path)
     matches = pd.DataFrame()
 
@@ -269,6 +278,9 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, c
     }
 
 def _lookup_metadata_for_path(path: Path):
+    """
+    
+    """
     path = Path(path)
     stem = path.stem
     source_type = "SkyPatrol" if path.suffix.lower() == ".csv" else "Internal"
@@ -300,6 +312,9 @@ def _plot_lc_with_residuals_df(
     show=False,
     metadata=None,
 ):
+    """
+    
+    """
     data = df.copy()
     
     if "error" in data.columns:
@@ -307,7 +322,7 @@ def _plot_lc_with_residuals_df(
 
     data = data[np.isfinite(data["JD"]) & np.isfinite(data["mag"])]
     
-    # Auto-detect JD format
+                           
     median_jd = data["JD"].median()
     if median_jd > 2000000:
         data["JD_plot"] = data["JD"] - JD_OFFSET
@@ -369,13 +384,9 @@ def _plot_lc_with_residuals_df(
                 fmt=marker, ms=4, color=color, alpha=0.8, ecolor=color,
                 elinewidth=0.8, capsize=2, markeredgecolor="black", markeredgewidth=0.5,
             )
-            # Draw baseline line if available and finite
+                                                        
             if "baseline" in cam_subset.columns:
-                # IMPORTANT: many surveys have repeated/near-repeated timestamps.
-                # If we plot a line through duplicate x-values, matplotlib draws
-                # dense vertical "combs" that look like oscillations. To make the
-                # baseline visually interpretable, sort by time and aggregate
-                # duplicate timestamps before plotting.
+                                                                                                                         
                 base_vals = cam_subset[["JD_plot", "baseline"]].dropna()
                 if not base_vals.empty:
                     base_vals = base_vals.sort_values("JD_plot")
@@ -406,11 +417,11 @@ def _plot_lc_with_residuals_df(
         resid_ax.set_ylabel(f"Residual {band_name}")
         resid_ax.set_xlabel("JD")
         
-        # Be robust to NaNs coming from failed baselines (e.g., GP fit issues)
+                                                                              
         resid_vals = band_df["resid"].to_numpy()
         finite_resid = resid_vals[np.isfinite(resid_vals)]
         if finite_resid.size == 0:
-            # Fallback range if no finite residuals
+                                                   
             resid_min, resid_max = -0.3, 0.3
         else:
             resid_min, resid_max = float(finite_resid.min()), float(finite_resid.max())
@@ -423,7 +434,7 @@ def _plot_lc_with_residuals_df(
     src_name = source_name or (metadata.get("source") if metadata else None)
     source_id = metadata.get("source_id") if metadata else None
     category = metadata.get("category") if metadata else None
-    # FIX: Retrieve the data source type (Internal vs SkyPatrol)
+                                                                
     source_type = metadata.get("data_source") if metadata else None
     
     if src_name and source_id:
@@ -441,7 +452,7 @@ def _plot_lc_with_residuals_df(
     
     title_parts = [label]
     if category: title_parts.append(category)
-    # FIX: Append the source type to the title
+                                              
     if source_type: title_parts.append(f"{source_type} LC") 
     title_parts.append(jd_label)
     
@@ -482,6 +493,9 @@ def plot_lc_with_residuals(
     baseline_tag=None,
     timestamp_output=False,
 ):
+    """
+    
+    """
     baseline_kwargs = baseline_kwargs or {}
     baseline_tag = baseline_tag or getattr(baseline_func, "__name__", "baseline")
     results: list[str] = []
@@ -526,7 +540,7 @@ def plot_lc_with_residuals(
 
         meta = metadata or _lookup_metadata_for_path(path)
         
-        # --- MERGED FIX: Ensure Source Type is in metadata ---
+                                                               
         source_type = "SkyPatrol" if path.suffix.lower() == ".csv" else "Internal"
         if meta:
              meta.setdefault("data_source", source_type)
@@ -580,6 +594,9 @@ def plot_one_lc(
     show=False,
     **kwargs
 ):
+    """
+    
+    """
     dat_path = Path(dat_path)
     metadata = _lookup_metadata_for_path(dat_path)
     df = _load_lightcurve_df(dat_path)
@@ -589,7 +606,7 @@ def plot_one_lc(
     mask &= df["good_bad"] == 1
     df = df.loc[mask].copy()
     
-    # --- FIX: Updated Axis Logic ---
+                                     
     if df["JD"].median() > 2000000:
         df["JD_plot"] = df["JD"] - JD_OFFSET
     else:
@@ -678,6 +695,9 @@ def plot_many_lc(
     figsize=(10, 6),
     show=False,
 ):
+    """
+    
+    """
     outputs = []
     if dat_paths is None:
         dat_paths = DEFAULT_LC_PATHS

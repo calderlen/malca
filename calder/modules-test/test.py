@@ -10,7 +10,7 @@ from reproduce_candidates import brayden_candidates
 
 MANIFEST_PATH = Path("lc_manifest.csv")
 
-# First five IDs were manually supplied before; keep them grouped explicitly.
+                                                                             
 PRIMARY_TARGET_IDS = [
     "J183153-284827",
     "J070519+061219",

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+                      
 """
 Test the excursion finder pipeline on SkyPatrol light curves.
 """
@@ -24,21 +24,21 @@ from lc_baseline import (
 
 def process_skypatrol_csv(csv_path: Path, **kwargs) -> dict:
     """Process a single SkyPatrol CSV file through the pipeline."""
-    # Read the CSV
+                  
     df = read_skypatrol_csv(csv_path)
     
     if df.empty:
         asas_sn_id = csv_path.stem.split("-")[0]
         return {"asas_sn_id": asas_sn_id, "error": "empty file"}
     
-    # Extract ID from filename (e.g., "377957522430-light-curves.csv" -> "377957522430")
+                                                                                        
     asas_sn_id = csv_path.stem.split("-")[0]
     
-    # Split into g and v bands
+                              
     df_g = df[df["v_g_band"] == 0].copy()
     df_v = df[df["v_g_band"] == 1].copy()
     
-    # Get parameters
+                    
     peak_kwargs = kwargs.get("peak_kwargs", {})
     sigma_threshold = float(peak_kwargs.get("sigma_threshold", 3.0))
     metrics_dip_threshold = sigma_threshold
@@ -46,7 +46,7 @@ def process_skypatrol_csv(csv_path: Path, **kwargs) -> dict:
     baseline_kwargs = kwargs.get("baseline_kwargs", {})
     mode = kwargs.get("mode", "dips")
     
-    # Process each band
+                       
     g_res = lc_band_proc(
         df_g,
         mode=mode,
@@ -66,7 +66,7 @@ def process_skypatrol_csv(csv_path: Path, **kwargs) -> dict:
         baseline_kwargs=baseline_kwargs,
     )
     
-    # Get JD range
+                  
     jd_first = np.nan
     jd_last = np.nan
     if not df_g.empty:
@@ -78,12 +78,12 @@ def process_skypatrol_csv(csv_path: Path, **kwargs) -> dict:
         if np.isnan(jd_last):
             jd_last = float(df_v["JD"].iloc[-1])
     
-    # Build result row
+                      
     from lc_excursions import prefix_metrics
     g_metrics = prefix_metrics("g", g_res["metrics"])
     v_metrics = prefix_metrics("v", v_res["metrics"])
     
-    # Get peaks_jd from the results (already computed in lc_band_proc)
+                                                                      
     g_peaks_jd = g_res["peaks_jd"]
     v_peaks_jd = v_res["peaks_jd"]
     
@@ -114,7 +114,7 @@ def process_skypatrol_csv(csv_path: Path, **kwargs) -> dict:
 
 
 def main():
-    # Baseline function mapping
+                               
     BASELINE_FUNCTIONS = {
         "global_mean": global_mean_baseline,
         "global_median": global_median_baseline,
@@ -162,13 +162,13 @@ def main():
     )
     args = parser.parse_args()
     
-    # Get baseline function
+                           
     baseline_func = BASELINE_FUNCTIONS[args.baseline]
     
-    # Set up baseline kwargs
+                            
     baseline_kwargs = {}
     
-    # Handle per_camera_trend separately (uses days_short and days_long)
+                                                                        
     if baseline_func == per_camera_trend_baseline:
         if args.baseline_days_short is not None:
             baseline_kwargs["days_short"] = args.baseline_days_short
@@ -177,20 +177,20 @@ def main():
         if args.baseline_min_points is not None:
             baseline_kwargs["min_points"] = args.baseline_min_points
     else:
-        # For other rolling baselines, use days parameter
+                                                         
         if args.baseline_days is not None:
             baseline_kwargs["days"] = args.baseline_days
         if args.baseline_min_points is not None:
             baseline_kwargs["min_points"] = args.baseline_min_points
         
-        # Set default days if not provided
+                                          
         if args.baseline_days is None:
             if baseline_func in (per_camera_median_baseline, per_camera_mean_baseline):
                 baseline_kwargs["days"] = 300.0
             elif baseline_func in (global_rolling_median_baseline, global_rolling_mean_baseline):
                 baseline_kwargs["days"] = 1000.0
     
-    # Collect all CSV files
+                           
     csv_paths = []
     for path_str in args.csv_files:
         path = Path(path_str)
@@ -217,12 +217,12 @@ def main():
         )
         results.append(result)
     
-    # Save results
+                  
     df = pd.DataFrame(results)
     df.to_csv(args.out, index=False)
     print(f"\nResults saved to {args.out}")
     
-    # Print summary
+                   
     detected = df[
         (df["g_n_peaks"].fillna(0) > 0) | (df["v_n_peaks"].fillna(0) > 0)
     ]

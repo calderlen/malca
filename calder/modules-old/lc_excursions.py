@@ -9,14 +9,11 @@ import warnings
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-try:
-    from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
-    from lc_metrics import run_metrics, is_dip_dominated
-    from lc_baseline import per_camera_median_baseline
-except ImportError:
-    from calder.lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
-    from calder.lc_metrics import run_metrics, is_dip_dominated
-    from calder.lc_baseline import per_camera_median_baseline
+from calder.lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+from calder.lc_metrics import run_metrics, is_dip_dominated
+from calder.lc_baseline import per_camera_median_baseline
+from calder.df_utils import clean_lc, empty_metrics
+
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from astropy.stats import biweight_location, biweight_scale
@@ -28,7 +25,7 @@ lc_dir_masked = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked"
 
 MAG_BINS = ['12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15']
 
-# masked index CSVs live here (for index*_masked.csv)
+                                                     
 masked_bins = [f"{lc_dir_masked}/{b}" for b in MAG_BINS]
 
 lc_12_12_5 = lc_dir_masked + '/12_12.5'
@@ -38,23 +35,7 @@ lc_13_5_14 = lc_dir_masked + '/13.5_14'
 lc_14_14_5 = lc_dir_masked + '/14_14.5'
 lc_14_5_15 = lc_dir_masked + '/14.5_15'
 
-def clean_lc(df):
-    
-    mask = np.ones(len(df), dtype=bool)
-
-    #if "good_bad" in df.columns:
-    #    mask &= (df["good_bad"] == 1) #NOT DOING THIS FOR DIPPERS RIGHT NOW UNTIL YOU RECOVER SAME CANDIDATES AS BRAYDEN WITH DIPS ENABLED!
-    if "saturated" in df.columns:
-        mask &= (df["saturated"] == 0)
-    
-    # required fields
-    mask &= df["JD"].notna() & df["mag"].notna()
-    if "error" in df.columns:
-        mask &= df["error"].notna() & (df["error"] > 0.) & (df["error"] < 1.)
-    df = df.loc[mask]
-
-    df = df.sort_values("JD").reset_index(drop=True)
-    return df
+from df_utils import clean_lc
 
 METRIC_NAMES = (
     "n_dip_runs",
@@ -71,26 +52,10 @@ METRIC_NAMES = (
     "jump_fraction",
 )
 
-def empty_metrics(prefix):
-        vals = {
-            "n_dip_runs": 0,
-            "n_jump_runs": 0,
-            "n_dip_points": 0,
-            "n_jump_points": 0,
-            "most_recent_dip": np.nan,
-            "most_recent_jump": np.nan,
-            "max_depth": np.nan,
-            "max_height": np.nan,
-            "max_dip_duration": np.nan,
-            "max_jump_duration": np.nan,
-            "dip_fraction": np.nan,
-            "jump_fraction": np.nan,
-        }
-        out = {f"{prefix}_{k}": vals[k] for k in METRIC_NAMES}
-        out[f"{prefix}_is_dip_dominated"] = False
-        return out
-
 def gaussian(t, amp, mu, sig):
+    """
+    
+    """
     return amp * np.exp(-0.5 * ((t - mu) / sig) ** 2)
 
 def mag_to_delta(
@@ -181,7 +146,7 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
         p = int(p)
         delta_peak = float(delta[p]) if 0 <= p < len(delta) else 0.0
 
-        # find window where delta returns to <= 0.5 sigma_threshold on both sides
+                                                                                 
         left = p
         while left > 0 and delta[left] > 0.5 * sigma_threshold:
             left -= 1
@@ -195,7 +160,7 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
         d_win = delta[window]
         n_det = len(d_win)
         if n_det < 2:
-            # fallback, cannot fit
+                                  
             fwhm = 0.0
             chi2_red = np.inf
             score = 0.0
@@ -209,7 +174,7 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
                     t_win,
                     d_win,
                     p0=[amp0, mu0, sig0],
-                    maxfev=min(2000, len(t_win) * 50),  # Scale maxfev with data size
+                    maxfev=min(2000, len(t_win) * 50),                               
                 )
                 amp, mu, sig = popt
                 model = gaussian(t_win, amp, mu, sig)
@@ -218,7 +183,7 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
                 chi2 = float(np.nansum(resid**2))
                 chi2_red = chi2 / dof
                 fwhm = float(2.3548 * abs(sig))
-                # paper score term: (delta/2) * FWHM * N_det * (1 / chi2_red)
+                                                                             
                 score = float(
                     (max(delta_peak, 0.0) / 2.0)
                     * max(fwhm, 0.0)
@@ -260,7 +225,10 @@ def score_dips_gaussian(delta, jd, err, peak_idx, sigma_threshold):
     return out
     
 def paczynski(t, amp, t0, tE):
-    tE = np.maximum(tE, 1e-6)  # enforce positive timescale
+    """
+    
+    """
+    tE = np.maximum(tE, 1e-6)
     return amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
 
 def score_peaks_paczynski(delta, jd, err, peak_idx, sigma_threshold):
@@ -297,8 +265,8 @@ def score_peaks_paczynski(delta, jd, err, peak_idx, sigma_threshold):
         p = int(p)
         delta_peak = float(delta[p]) if 0 <= p < len(delta) else 0.0
 
-        # find window where delta returns to <= 0.5 sigma_threshold on both sides
-        # Limit window size to prevent excessive iterations
+                                                                                 
+                                                           
         max_window_size = 500
         left = p
         left_steps = 0
@@ -317,7 +285,7 @@ def score_peaks_paczynski(delta, jd, err, peak_idx, sigma_threshold):
         d_win = delta[window]
         n_det = len(d_win)
         if n_det < 3:
-            # fallback, cannot fit
+                                  
             fwhm = 0.0
             chi2_red = np.inf
             score = 0.0
@@ -337,7 +305,7 @@ def score_peaks_paczynski(delta, jd, err, peak_idx, sigma_threshold):
                         [0.0, t_win.min() - half_width, 1e-3],
                         [np.inf, t_win.max() + half_width, np.inf],
                     ),
-                    maxfev=min(4000, len(t_win) * 100),  # Scale maxfev with data size
+                    maxfev=min(4000, len(t_win) * 100),                               
                 )
                 amp, t0_fit, tE = popt
                 tE = abs(tE)
@@ -347,7 +315,7 @@ def score_peaks_paczynski(delta, jd, err, peak_idx, sigma_threshold):
                 chi2 = float(np.nansum(resid**2))
                 chi2_red = chi2 / dof
                 fwhm = float(2.0 * np.sqrt(3.0) * tE)
-                # paper score term: (delta/2) * FWHM * N_det * (1 / chi2_red)
+                                                                             
                 score = float(
                     (max(delta_peak, 0.0) / 2.0)
                     * max(fwhm, 0.0)
@@ -565,7 +533,7 @@ def lc_proc(
         if np.isnan(jd_last):
             jd_last = float(dfv["JD"].iloc[-1])
 
-    # Map metrics prefixes
+                          
     g_metrics = prefix_metrics("g", g_res["metrics"])
     v_metrics = prefix_metrics("v", v_res["metrics"])
 
@@ -640,6 +608,9 @@ def excursion_finder(
     """
 
     def _normalize_target_ids(target_ids_by_bin: dict[str, set[str]] | None):
+        """
+        
+        """
         if not target_ids_by_bin:
             return None
         return {
@@ -649,6 +620,9 @@ def excursion_finder(
         }
 
     def _build_record_map(records_by_bin: dict[str, list[dict[str, object]]] | None):
+        """
+        
+        """
         if not records_by_bin:
             return None
         record_map: dict[str, list[dict[str, object]]] = {}
@@ -678,6 +652,9 @@ def excursion_finder(
         record_map: dict[str, list[dict[str, object]]] | None,
         target_ids_norm: dict[str, set[str]] | None,
     ):
+        """
+        
+        """
         if record_map and bin_key in record_map:
             record_iter = record_map[bin_key]
         else:
@@ -698,6 +675,9 @@ def excursion_finder(
             yield rec
 
     def _flush_rows(rows_buffer, *, force: bool = False):
+        """
+        
+        """
         if not rows_buffer:
             return
         if len(rows_buffer) < chunk_size and not force:
@@ -721,11 +701,17 @@ def excursion_finder(
         rows_buffer,
         collected_rows_list,
     ):
+        """
+        
+        """
         pending = set()
         scheduled = 0
         pbar = tqdm(desc=f"{bin_key}", unit="obj", leave=False)
 
         def drain_some(all_pending):
+            """
+            
+            """
             done_now = 0
             done = [fut for fut in all_pending if fut.done()]
             for fut in done:
@@ -774,7 +760,7 @@ def excursion_finder(
     
     os.makedirs(out_dir, exist_ok=True)
     
-    # Setup workers
+                   
     if n_workers is None:
         try:
             cpu = os.cpu_count() or 1
@@ -785,15 +771,15 @@ def excursion_finder(
     if max_inflight is None:
         max_inflight = max(4, n_workers * 4)
 
-    # Output path
+                 
     out_path = os.path.join(out_dir, f"excursions_{mode}.{out_format}")
     
-    # Logic for target_ids and records_map (from dip_finder)
+                                                            
     target_ids_norm = _normalize_target_ids(target_ids_by_bin)
 
     record_map = _build_record_map(records_by_bin)
 
-    # Determine bins to iterate
+                               
     if record_map:
         bins_iter = [b for b in mag_bins if b in record_map]
         for extra in record_map.keys():
@@ -805,7 +791,7 @@ def excursion_finder(
     collected_rows_list = [] if return_rows else None
     rows_buffer: list[dict] = []
     
-    # Process Pool
+                  
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
         for b in tqdm(bins_iter, desc=f"Bins ({mode})", unit="bin"):
             record_iter = _iter_records_for_bin(b, record_map, target_ids_norm)
@@ -817,7 +803,7 @@ def excursion_finder(
 
 __all__ = ["MAG_BINS", "lc_proc", "excursion_finder"]
 
-# expose to CLI
+               
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run dip or microlensing finder across bins.")
     parser.add_argument("--mode", choices=("dips", "peaks"), default="dips", help="Select dips (biweight delta + Gaussian fits) or peaks (microlensing Paczynski fits).")

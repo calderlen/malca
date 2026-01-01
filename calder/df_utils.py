@@ -3,19 +3,33 @@ import pandas as pd
 import scipy
 from astropy.stats import biweight_location, biweight_scale
 
+def clean_lc(df):
+    mask = np.ones(len(df), dtype=bool)
+
+    if "saturated" in df.columns:
+        mask &= (df["saturated"] == 0)
+
+    mask &= df["JD"].notna() & df["mag"].notna()
+    if "error" in df.columns:
+        mask &= df["error"].notna() & (df["error"] > 0.) & (df["error"] < 1.)
+    df = df.loc[mask]
+
+    df = df.sort_values("JD").reset_index(drop=True)
+    return df
+
 def year_to_jd(year):
-    jd_epoch = 2449718.5  # JD at 1995-01-01 00:00:00 TT
+    jd_epoch = 2449718.5                                
     year_epoch = 1995
     days_in_year = 365.25
-    # Return JD relative to JD-2450000 to match ASAS-SN convention
+                                                                  
     return (year - year_epoch) * days_in_year + (jd_epoch - 2450000.0)
 
 
 def jd_to_year(jd):
-    jd_epoch = 2449718.5  # JD at 1995-01-01 00:00:00 TT
+    jd_epoch = 2449718.5                                
     year_epoch = 1995
     days_in_year = 365.25
-    # Input jd is expected to be JD-2450000; convert back to JD
+                                                               
     return year_epoch + ((jd + 2450000.0) - jd_epoch) / days_in_year
 
 
@@ -102,7 +116,7 @@ def peak_search_biweight_delta(
 
     finite_m = np.isfinite(mag)
 
-    # biweight location
+                       
     if finite_m.any():
         R = float(biweight_location(mag[finite_m], c=biweight_c))
         S = float(biweight_scale(mag[finite_m], c=biweight_c))
@@ -117,7 +131,7 @@ def peak_search_biweight_delta(
     denom = np.sqrt(err2 + S**2)
     denom = np.where(denom > 0, denom, eps)
 
-    # delta series used for peak detection
+                                          
     delta = (mag - R) / denom
     values = np.nan_to_num(delta, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -132,7 +146,7 @@ def peak_search_biweight_delta(
     n_peaks = len(peak)
 
     if apply_box_filter:
-        # guard against huge event rates / garbage LCs
+                                                      
         jd_span = float(jd[-1] - jd[0]) if jd.size > 1 else 0.0
         peaks_per_time = (n_peaks / jd_span) if jd_span > 0 else np.inf
         std_sig = float(np.nanstd(values))
@@ -146,3 +160,21 @@ def peak_search_biweight_delta(
             return pd.Series(dtype=int, name="peaks"), R, 0
 
     return pd.Series(peak, name="peaks"), R, n_peaks
+def empty_metrics(prefix):
+    vals = {
+        'n_dip_runs': 0,
+        'n_jump_runs': 0,
+        'n_dip_points': 0,
+        'n_jump_points': 0,
+        'most_recent_dip': np.nan,
+        'most_recent_jump': np.nan,
+        'max_depth': np.nan,
+        'max_height': np.nan,
+        'max_dip_duration': np.nan,
+        'max_jump_duration': np.nan,
+        'dip_fraction': np.nan,
+        'jump_fraction': np.nan,
+    }
+    out = {f'{prefix}_{k}': vals[k] for k in vals}
+    out[f'{prefix}_is_dip_dominated'] = False
+    return out

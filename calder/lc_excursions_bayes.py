@@ -1,4 +1,3 @@
-# Thread caps (set before numpy/scipy import when possible)
 import os as _os
 _os.environ.setdefault("OMP_NUM_THREADS", "1")
 _os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -20,20 +19,15 @@ from scipy.optimize import curve_fit
 from tqdm import tqdm
 import warnings
 
-# Suppress expected warnings
 warnings.filterwarnings("ignore", message=".*Covariance of the parameters could not be estimated.*")
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
-try:
-    from lc_utils import read_lc_dat2
-    from lc_baseline import per_camera_gp_baseline
-except ImportError:
-    from calder.lc_utils import read_lc_dat2
-    from calder.lc_baseline import per_camera_gp_baseline
+from lc_utils import read_lc_dat2
+from lc_baseline import per_camera_gp_baseline
+from df_utils import clean_lc
 
 
-# constants
 MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
 
 DEFAULT_BASELINE_KWARGS = dict(
@@ -41,32 +35,27 @@ DEFAULT_BASELINE_KWARGS = dict(
     w0=0.0031415926535897933,
     q=0.7,
     jitter=0.006,
-    sigma_floor=None,        # None => estimate per camera
-    add_sigma_eff_col=True,  # ensure sigma_eff exists
+    sigma_floor=None,
+    add_sigma_eff_col=True,
 )
 
+def gaussian(t, amp, t0, sigma, baseline):
+    """
+    gaussian kernel + baseline term
+    """
+    return baseline + amp * np.exp(-0.5 * ((t - t0) / sigma) ** 2)
 
-# utils
-
-def clean_lc(df: pd.DataFrame) -> pd.DataFrame:
-    mask = np.ones(len(df), dtype=bool)
-
-    if "saturated" in df.columns:
-        mask &= (df["saturated"] == 0)
-
-    mask &= df["JD"].notna() & df["mag"].notna()
-    if "error" in df.columns:
-        mask &= df["error"].notna() & (df["error"] > 0.0) & (df["error"] < 1.0)
-
-    df = df.loc[mask]
-    df = df.sort_values("JD").reset_index(drop=True)
-    return df
+def paczynski(t, amp, t0, tE, baseline):
+    """
+    paczynski kernel + baseline term
+    """
+    tE = np.maximum(np.abs(tE), 1e-5)
+    return baseline + amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
 
 
 def log_gaussian(x, mu, sigma):
     """
-    Physics convention (Gaussian log-likelihood):
-        ln p = -1/2 * ((x-mu)/sigma)^2 - ln(sigma) - 1/2 ln(2pi)
+    ln p = -1/2 * ((x-mu)/sigma)^2 - ln(sigma) - 1/2 ln(2pi)
     """
     x = np.asarray(x, float)
     mu = np.asarray(mu, float)
@@ -77,6 +66,9 @@ def log_gaussian(x, mu, sigma):
 
 
 def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=80):
+    """
+    
+    """
     p_min = float(np.clip(p_min, 1e-12, 1 - 1e-12))
     p_max = float(np.clip(p_max, 1e-12, 1 - 1e-12))
     q_min = np.log(p_min / (1.0 - p_min))
@@ -86,13 +78,14 @@ def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=80):
 
 
 def default_mag_grid(baseline_mag: float, mags: np.ndarray, kind: str, n=60):
-    # Check for valid mags
+    """
+    
+    """
     mags_finite = mags[np.isfinite(mags)]
     if len(mags_finite) == 0:
         raise ValueError("No finite magnitude values for grid construction")
     lo, hi = np.nanpercentile(mags, [5, 95])
     if not (np.isfinite(lo) and np.isfinite(hi)):
-        # Fallback to median ± 0.5 mag
         med = np.nanmedian(mags)
         lo, hi = med - 0.5, med + 0.5
     spread = max(hi - lo, 0.05)
@@ -113,6 +106,9 @@ def default_mag_grid(baseline_mag: float, mags: np.ndarray, kind: str, n=60):
 
 
 def robust_median_dt_days(jd: np.ndarray) -> float:
+    """
+    
+    """
     jd = np.asarray(jd, float)
     if jd.size < 2:
         return np.nan
@@ -123,37 +119,24 @@ def robust_median_dt_days(jd: np.ndarray) -> float:
     return float(np.nanmedian(dt))
 
 
-# morphology utils
 
-def gaussian(t, amp, t0, sigma, baseline):
-    return baseline + amp * np.exp(-0.5 * ((t - t0) / sigma) ** 2)
-
-def paczynski(t, amp, t0, tE, baseline):
-    # tE must be positive
-    tE = np.maximum(np.abs(tE), 1e-5) 
-    # Paczynski strictly brightens relative to baseline
-    # Note: amp logic handled in caller (jump vs dip)
-    return baseline + amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
-
-def calc_bic(resid, err, n_params):
+def bic(resid, err, n_params):
     """
-    bic = chi2 + k * ln(n)
+    bayesian information criterion = chi2 + k * ln(n)
     """
-    # Clip error to avoid division by zero
     err = np.clip(err, 1e-9, np.inf)
-    # Robust chi2 to ignore extreme outliers during shape fitting
     chi2 = np.nansum((resid / err) ** 2)
     n_points = len(resid)
     if n_points == 0:
         return np.inf
     return chi2 + n_params * np.log(n_points)
 
+
 def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     """
-    fits Guassian vs Paczynski vs Flat (Noise) to a specific run, returns dictionary with best model name and parameters
+    fits gaussian vs paczynski vs noise kernel to an individual run, returns a dict with kernel chosen and params
     """
-    # 1. Extract and Pad Data (add context around the run)
-    pad = 5 # points on either side
+    pad = 5
     start_i = int(max(0, run_idx[0] - pad))
     end_i = int(min(len(jd), run_idx[-1] + pad + 1))
     
@@ -166,9 +149,7 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
             "morphology": "none", "bic": np.nan, "delta_bic_null": 0.0, "params": {}
         }
 
-    # 2. Initial Guesses
     baseline_guess = np.nanmedian(y_seg)
-    # Find peak relative to baseline
     abs_diff = np.abs(y_seg - baseline_guess)
     peak_local_idx = np.argmax(abs_diff)
     
@@ -176,16 +157,13 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     amp_guess = y_seg[peak_local_idx] - baseline_guess
     sigma_guess = max((t_seg[-1] - t_seg[0]) / 4.0, 0.01)
     
-    # 3. Fit Baseline (Null Hypothesis)
-    # k=1 (baseline level)
     resid_null = y_seg - baseline_guess
-    bic_null = calc_bic(resid_null, e_seg, 1)
+    bic_null = bic(resid_null, e_seg, 1)
     
     best_bic = bic_null
     best_model = "noise"
     best_params = {}
 
-    # 4. Fit Gaussian 
     try:
         popt_g, _ = curve_fit(
             gaussian, t_seg, y_seg, 
@@ -193,14 +171,10 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
             sigma=e_seg, maxfev=2000
         )
         resid_g = y_seg - gaussian(t_seg, *popt_g)
-        bic_g = calc_bic(resid_g, e_seg, 4) # k=4 params
+        bic_g = bic(resid_g, e_seg, 4)
         
-        # Enforce polarity
-        # If kind="dip", we expect positive amplitude in magnitude space (fainter)
-        # If kind="jump", we expect negative amplitude in magnitude space (brighter)
         is_valid = (popt_g[0] > 0) if kind == "dip" else (popt_g[0] < 0)
         
-        # Require strong evidence (delta BIC > 10) to prefer over noise
         if is_valid and bic_g < (best_bic - 10):
             best_bic = bic_g
             best_model = "gaussian"
@@ -211,12 +185,8 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     except Exception:
         pass
 
-    # 5. Fit Paczynski
-    # Usually only relevant for jumps (brightening), but code supports checking both
     if kind == "jump":
         try:
-            # Paczynski strictly brightens (negative amp in mag)
-            # Ensure initial guess is negative
             amp_p_guess = -abs(amp_guess) 
             
             popt_p, _ = curve_fit(
@@ -225,9 +195,8 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
                 sigma=e_seg, maxfev=2000
             )
             resid_p = y_seg - paczynski(t_seg, *popt_p)
-            bic_p = calc_bic(resid_p, e_seg, 4)
+            bic_p = bic(resid_p, e_seg, 4)
 
-            # Valid if amp is negative (brightening)
             is_valid_p = (popt_p[0] < 0)
 
             if is_valid_p and bic_p < (best_bic - 10): 
@@ -243,14 +212,13 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     return {
         "morphology": best_model,
         "bic": float(best_bic),
-        "delta_bic_null": float(bic_null - best_bic), # Positive means better than noise
+        "delta_bic_null": float(bic_null - best_bic),
         "params": best_params
     }
 
 
-# clustering utils
 
-def cluster_triggered_indices(
+def build_runs(
     trig_idx: np.ndarray,
     jd: np.ndarray,
     *,
@@ -258,7 +226,7 @@ def cluster_triggered_indices(
     max_gap_days: float | None = None,
 ):
     """
-    Build runs from triggered indices in time order.
+    build runs from clustered triggered points
     """
     jd = np.asarray(jd, float)
     trig_idx = np.asarray(trig_idx, dtype=int)
@@ -272,7 +240,7 @@ def cluster_triggered_indices(
     cad = robust_median_dt_days(jd)
     if max_gap_days is None:
         if np.isfinite(cad):
-            max_gap_days = max(5.0 * cad, 5.0)  # avoid merging seasonal gaps
+            max_gap_days = max(5.0 * cad, 5.0)
         else:
             max_gap_days = 5.0
     max_gap_days = float(max_gap_days)
@@ -297,7 +265,7 @@ def cluster_triggered_indices(
     return runs
 
 
-def gate_runs(
+def filter_runs(
     runs,
     jd: np.ndarray,
     score_vec: np.ndarray,
@@ -308,13 +276,7 @@ def gate_runs(
     sum_threshold: float | None = None,
 ):
     """
-    Gate runs by:
-      - min_points
-      - min_duration_days (cadence-adaptive if None)
-      - optional per_point_threshold (run_max >= threshold)
-      - optional sum_threshold (run_sum >= threshold)
-
-    Returns: (kept_runs, run_summaries)
+    filter runs by minimum points, minimum duration, per_point_threshold, sum_threshold; returns dict of kept runs' starting and ending indices/JDs, number of points
     """
     jd = np.asarray(jd, float)
     score_vec = np.asarray(score_vec, float)
@@ -372,6 +334,9 @@ def gate_runs(
 
 
 def summarize_kept_runs(kept_runs, jd: np.ndarray, score_vec: np.ndarray):
+    """
+    
+    """
     jd = np.asarray(jd, float)
     score_vec = np.asarray(score_vec, float)
 
@@ -410,18 +375,17 @@ def summarize_kept_runs(kept_runs, jd: np.ndarray, score_vec: np.ndarray):
         max_run_max=float(max_max) if np.isfinite(max_max) else np.nan,
     )
 
-# bayesian scoring
 
 def bayesian_excursion_significance(
     df: pd.DataFrame,
     *,
-    kind: str = "dip",            # "dip" or "jump"
+    kind: str = "dip",
     mag_col: str = "mag",
     err_col: str = "error",
 
     baseline_func=per_camera_gp_baseline,
     baseline_kwargs: dict | None = None,
-    df_base: pd.DataFrame | None = None,  # pass precomputed baseline to avoid refit
+    df_base: pd.DataFrame | None = None,
 
     use_sigma_eff: bool = True,
     require_sigma_eff: bool = False,
@@ -431,12 +395,10 @@ def bayesian_excursion_significance(
     p_points: int = 80,
     mag_grid: np.ndarray | None = None,
 
-    # per-point trigger mode
-    trigger_mode: str = "logbf",  # "logbf" or "posterior_prob"
+    trigger_mode: str = "logbf",
     logbf_threshold: float = 5.0,
-    significance_threshold: float = 99.99997,  # used if posterior_prob
+    significance_threshold: float = 99.99997,
 
-    # run-based triggers (1,2,3)
     run_min_points: int = 3,
     run_allow_gap_points: int = 1,
     run_max_gap_days: float | None = None,
@@ -444,7 +406,6 @@ def bayesian_excursion_significance(
     run_sum_threshold: float | None = None,
     run_sum_multiplier: float = 2.5,
 
-    # diagnostics
     compute_event_prob: bool = True,
 ):
     """
@@ -460,7 +421,6 @@ def bayesian_excursion_significance(
     jd = np.asarray(df["JD"], float)
     mags = np.asarray(df[mag_col], float)
 
-    # Diagnostic: Check mags after reading
     mags_finite = np.isfinite(mags).sum()
     mags_total = len(mags)
     if mags_finite == 0:
@@ -470,13 +430,11 @@ def bayesian_excursion_significance(
             f"NaN={np.isnan(mags).sum()}, inf={np.isinf(mags).sum()}"
         )
 
-    # raw errors as fallback
     if err_col in df.columns:
         errs = np.asarray(df[err_col], float)
     else:
         errs = np.full_like(mags, 0.05)
     
-    # Diagnostic: Check errors
     errs_finite = np.isfinite(errs).sum()
     errs_positive = (errs > 0).sum() if errs_finite > 0 else 0
     if errs_finite == 0:
@@ -497,12 +455,10 @@ def bayesian_excursion_significance(
 
     used_sigma_eff = False
 
-    # baseline / sigma_eff
     if df_base is None and baseline_func is not None:
         df_base = baseline_func(df, **baseline_kwargs)
 
     if df_base is None:
-        # Check if mags has any finite values
         if not np.isfinite(mags).any():
             raise ValueError("All magnitude values are NaN/inf")
         baseline_mags = np.full_like(mags, np.nanmedian(mags))
@@ -519,7 +475,6 @@ def bayesian_excursion_significance(
 
         if use_sigma_eff and ("sigma_eff" in df_base.columns):
             errs_new = np.asarray(df_base["sigma_eff"], float)
-            # Diagnostic: Check sigma_eff from baseline
             errs_new_finite = np.isfinite(errs_new).sum()
             errs_new_positive = (errs_new > 0).sum() if errs_new_finite > 0 else 0
             if errs_new_finite == 0:
@@ -539,7 +494,6 @@ def bayesian_excursion_significance(
         elif require_sigma_eff:
             raise RuntimeError("require_sigma_eff=True but baseline did not return 'sigma_eff'")
 
-    # Diagnostic: Check baseline values
     baseline_finite = np.isfinite(baseline_mags).sum()
     if baseline_finite == 0:
         raise ValueError(
@@ -549,7 +503,6 @@ def bayesian_excursion_significance(
             f"baseline_func={baseline_func.__name__ if baseline_func else 'None'}"
         )
     
-    # Final check on errors after potential update
     errs_finite_final = np.isfinite(errs).sum()
     errs_positive_final = (errs > 0).sum() if errs_finite_final > 0 else 0
     if errs_finite_final == 0:
@@ -565,7 +518,6 @@ def bayesian_excursion_significance(
             f"min={np.nanmin(errs) if errs_finite_final > 0 else 'N/A'}"
         )
     
-    # Drop any rows with non-finite mags / errors / baseline (otherwise a single NaN drives loglik to -inf)
     total_points = len(mags)
     valid_mask = (
         np.isfinite(mags)
@@ -590,13 +542,10 @@ def bayesian_excursion_significance(
 
     baseline_mag = float(np.nanmedian(baseline_mags))
 
-    # choose p-grid bounds if not specified
     if p_min is None and p_max is None:
         if kind == "dip":
-            # p ~ baseline fraction (dominant), excursions rare
             p_min, p_max = 0.5, 1.0 - 1e-4
         elif kind == "jump":
-            # bright excursions rare
             p_min, p_max = 1e-4, 0.5
         else:
             raise ValueError("kind must be 'dip' or 'jump'")
@@ -611,22 +560,18 @@ def bayesian_excursion_significance(
     M = int(len(mag_grid))
     N = int(len(mags))
 
-    # Likelihood pieces
     if kind == "dip":
-        # baseline fixed at baseline_mags; excursion is fainter grid
-        log_Pb_vec = log_gaussian(mags, baseline_mags, errs)                # (N,)
-        log_Pb_grid = np.broadcast_to(log_Pb_vec, (M, N))                 # (M,N)
-        log_Pf_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)  # (M,N)
+        log_Pb_vec = log_gaussian(mags, baseline_mags, errs)
+        log_Pb_grid = np.broadcast_to(log_Pb_vec, (M, N))
+        log_Pf_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)
         excursion_component = "faint"
 
     elif kind == "jump":
-        # excursion is brighter grid; baseline fixed at baseline_mags
-        log_Pb_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)  # (M,N)
-        log_Pf_vec = log_gaussian(mags, baseline_mags, errs)                # (N,)
-        log_Pf_grid = np.broadcast_to(log_Pf_vec, (M, N))                    # (M,N)
+        log_Pb_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)
+        log_Pf_vec = log_gaussian(mags, baseline_mags, errs)
+        log_Pf_grid = np.broadcast_to(log_Pf_vec, (M, N))
         excursion_component = "bright"
         
-        # Check for all-NaN likelihoods
         if not np.isfinite(log_Pf_vec).any():
             raise ValueError("All baseline likelihood values are NaN/inf")
         if not np.isfinite(log_Pb_grid).any():
@@ -635,7 +580,6 @@ def bayesian_excursion_significance(
     else:
         raise ValueError("kind must be 'dip' or 'jump'")
 
-    # Drop points where both baseline and excursion likelihoods are invalid (-inf/NaN across all grid points)
     valid_points = (np.isfinite(log_Pb_grid).any(axis=0)) | (np.isfinite(log_Pf_grid).any(axis=0))
     n_valid_points = int(valid_points.sum())
     total_points = log_Pb_grid.shape[1]
@@ -659,12 +603,11 @@ def bayesian_excursion_significance(
             log_Pf_vec = log_Pf_vec[valid_points]
         N = n_valid_points
 
-    # local per-point logBF: ln p(x|event) - ln p(x|baseline), event mag uniform prior
     if kind == "dip":
         loglik_baseline_only = float(np.sum(log_Pb_vec))
         log_px_baseline = log_Pb_vec
         log_px_event = logsumexp(log_Pf_grid, axis=0) - np.log(M)
-    else:  # jump
+    else:
         loglik_baseline_only = float(np.sum(log_Pf_vec))
         log_px_baseline = log_Pf_vec
         log_px_event = logsumexp(log_Pb_grid, axis=0) - np.log(M)
@@ -673,21 +616,17 @@ def bayesian_excursion_significance(
 
     max_log_bf_local = float(np.nanmax(log_bf_local)) if np.isfinite(log_bf_local).any() else np.nan
 
-    # Mixture model evidence over (mag_event, p)
-    log_p = np.log(p_grid)         # (P,)
-    log_1mp = np.log1p(-p_grid)    # (P,)
+    log_p = np.log(p_grid)
+    log_1mp = np.log1p(-p_grid)
 
-    # (M,P,N)
     log_Pb_weighted = log_p[None, :, None] + log_Pb_grid[:, None, :]
     log_Pf_weighted = log_1mp[None, :, None] + log_Pf_grid[:, None, :]
 
-    # Handle NaN/Inf values before logaddexp
     log_Pb_weighted = np.where(np.isfinite(log_Pb_weighted), log_Pb_weighted, -np.inf)
     log_Pf_weighted = np.where(np.isfinite(log_Pf_weighted), log_Pf_weighted, -np.inf)
 
-    log_mix = np.logaddexp(log_Pb_weighted, log_Pf_weighted)  # (M,P,N)
+    log_mix = np.logaddexp(log_Pb_weighted, log_Pf_weighted)
     
-    # Diagnostic: Check log_mix before summing
     log_mix_finite = np.isfinite(log_mix).sum()
     log_mix_total = log_mix.size
     if log_mix_finite == 0:
@@ -698,19 +637,15 @@ def bayesian_excursion_significance(
             f"log_Pf_weighted_finite={np.isfinite(log_Pf_weighted).sum()}/{log_Pf_weighted.size}"
         )
     
-    loglik = np.sum(log_mix, axis=2)                            # (M,P)
+    loglik = np.sum(log_mix, axis=2)
 
-    # posterior mode on the grid (uniform priors)
-    # Diagnostic: Check loglik before normalization
     loglik_finite = np.isfinite(loglik).sum()
     loglik_total = loglik.size
     loglik_inf_neg = np.isinf(loglik) & (loglik < 0)
     loglik_inf_neg_count = loglik_inf_neg.sum()
     
     if loglik_finite == 0:
-        # All values are NaN or inf
         if loglik_inf_neg_count == loglik_total:
-            # All are -inf: this means all likelihoods were invalid (all NaN inputs)
             raise ValueError(
                 f"All loglik values are -inf (all inputs were invalid): "
                 f"total={loglik_total}, finite={loglik_finite}, -inf={loglik_inf_neg_count}, "
@@ -734,7 +669,6 @@ def bayesian_excursion_significance(
     
     log_post_norm = loglik - loglik_sum
     
-    # Check if log_post_norm has any finite values
     log_post_finite = np.isfinite(log_post_norm).sum()
     if log_post_finite == 0:
         raise ValueError(
@@ -748,16 +682,14 @@ def bayesian_excursion_significance(
     best_mag_event = float(mag_grid[int(best_m_idx)])
     best_p = float(p_grid[int(best_p_idx)])
 
-    # global evidence (uniform over grid points)
     K = loglik.size
     log_evidence_mixture = float(logsumexp(loglik) - np.log(K))
     bayes_factor = float(log_evidence_mixture - loglik_baseline_only)
 
-    # LOO responsibilities (optional; expensive)
     if compute_event_prob:
         event_prob = np.zeros(N, dtype=float)
         for j in range(N):
-            loglik_excl = loglik - log_mix[:, :, j]  # (M,P)
+            loglik_excl = loglik - log_mix[:, :, j]
 
             bright_num = loglik_excl + log_p[None, :] + log_Pb_grid[:, j][:, None]
             faint_num = loglik_excl + log_1mp[None, :] + log_Pf_grid[:, j][:, None]
@@ -776,9 +708,6 @@ def bayesian_excursion_significance(
     else:
         event_prob = None
 
-    # -----------------
-    # Triggering: point -> runs -> gated runs
-    # -----------------
     if trigger_mode == "logbf":
         per_point_thr = float(logbf_threshold)
         score_vec = np.asarray(log_bf_local, float)
@@ -786,7 +715,6 @@ def bayesian_excursion_significance(
         trigger_threshold_used = per_point_thr
         trigger_value_max = max_log_bf_local
 
-        # default run sum gate in logBF units
         if run_sum_threshold is None:
             run_sum_threshold_eff = float(run_sum_multiplier) * per_point_thr
         else:
@@ -802,7 +730,6 @@ def bayesian_excursion_significance(
         trigger_threshold_used = thr_prob
         trigger_value_max = float(np.nanmax(score_vec)) if score_vec.size else np.nan
 
-        # default run sum gate in probability units
         if run_sum_threshold is None:
             run_sum_threshold_eff = float(run_min_points) * thr_prob
         else:
@@ -811,7 +738,6 @@ def bayesian_excursion_significance(
     else:
         raise ValueError("trigger_mode must be 'logbf' or 'posterior_prob'")
 
-    # build/gate runs
     kept_runs = []
     run_summaries = []
 
@@ -820,14 +746,14 @@ def bayesian_excursion_significance(
         significant = False
         run_stats = summarize_kept_runs([], jd, score_vec)
     else:
-        runs = cluster_triggered_indices(
+        runs = build_runs(
             raw_idx,
             jd,
             allow_gap_points=int(run_allow_gap_points),
             max_gap_days=run_max_gap_days,
         )
 
-        kept_runs, initial_summaries = gate_runs(
+        kept_runs, initial_summaries = filter_runs(
             runs,
             jd,
             score_vec,
@@ -837,19 +763,14 @@ def bayesian_excursion_significance(
             sum_threshold=run_sum_threshold_eff,
         )
 
-        # --- MORPHOLOGY CLASSIFICATION BLOCK ---
         final_summaries = []
         for i, r in enumerate(kept_runs):
-            # Get the basic summary from gate_runs
             summary = initial_summaries[i]
-            # Run morphology classification on this specific run
             morph_res = classify_run_morphology(jd, mags, errs, r, kind=kind)
-            # Merge results into summary
             summary.update(morph_res)
             final_summaries.append(summary)
         
         run_summaries = final_summaries
-        # ---------------------------------------
 
         if kept_runs:
             event_indices = np.unique(np.concatenate(kept_runs)).astype(int)
@@ -866,31 +787,26 @@ def bayesian_excursion_significance(
         best_mag_event=float(best_mag_event),
         best_p=float(best_p),
 
-        # diagnostics / scoring
         log_bf_local=log_bf_local,
         max_log_bf_local=float(max_log_bf_local) if np.isfinite(max_log_bf_local) else np.nan,
         event_probability=event_prob,
         used_sigma_eff=bool(used_sigma_eff),
 
-        # trigger outputs (run-gated)
         trigger_mode=str(trigger_mode),
         trigger_threshold=float(trigger_threshold_used),
         trigger_max=float(trigger_value_max) if np.isfinite(trigger_value_max) else np.nan,
         event_indices=event_indices,
         significant=bool(significant),
 
-        # run outputs
         run_sum_threshold=float(run_sum_threshold_eff),
-        run_summaries=run_summaries,   # list[dict] (includes morphology now)
+        run_summaries=run_summaries,
         **run_stats,
 
-        # global model comparison
         bayes_factor=float(bayes_factor),
         log_evidence_mixture=float(log_evidence_mixture),
         log_evidence_baseline=float(loglik_baseline_only),
         baseline_source=",".join(sorted({str(x) for x in baseline_sources if isinstance(x, (str, bytes)) and len(str(x)) > 0})) or "unknown",
 
-        # grids (debug)
         p_grid=p_grid,
         mag_grid=mag_grid,
     )
@@ -902,7 +818,6 @@ def run_bayesian_significance(
     baseline_func=per_camera_gp_baseline,
     baseline_kwargs: dict | None = None,
 
-    # grids
     p_points: int = 80,
     p_min_dip: float | None = None,
     p_max_dip: float | None = None,
@@ -911,13 +826,11 @@ def run_bayesian_significance(
     mag_grid_dip: np.ndarray | None = None,
     mag_grid_jump: np.ndarray | None = None,
 
-    # triggering
     trigger_mode: str = "logbf",
     logbf_threshold_dip: float = 5.0,
     logbf_threshold_jump: float = 5.0,
     significance_threshold: float = 99.99997,
 
-    # run-based triggers
     run_min_points: int = 3,
     run_allow_gap_points: int = 1,
     run_max_gap_days: float | None = None,
@@ -925,11 +838,9 @@ def run_bayesian_significance(
     run_sum_threshold: float | None = None,
     run_sum_multiplier: float = 2.5,
 
-    # noise
     use_sigma_eff: bool = True,
     require_sigma_eff: bool = True,
 
-    # diagnostics
     compute_event_prob: bool = True,
 ):
     """
@@ -993,9 +904,6 @@ def run_bayesian_significance(
     return dict(dip=dip, jump=jump)
 
 
-# ----------------------------
-# Multiprocessing wrapper
-# ----------------------------
 
 def _process_one(
     path: str,
@@ -1015,20 +923,20 @@ def _process_one(
 
     compute_event_prob: bool,
 ):
-    # Handle full file path: read CSV directly or extract ID from path for .dat2 files
+    """
+    
+    """
     import os
     path = str(path)
     
     if os.path.isfile(path) and (path.endswith('.csv') or path.endswith('-light-curves.csv')):
-        # Direct CSV file (SkyPatrol format)
         try:
-            from calder.df_plot import read_skypatrol_csv
+            from df_plot import read_skypatrol_csv
         except ImportError:
             from df_plot import read_skypatrol_csv
         try:
             result = read_skypatrol_csv(path)
             if isinstance(result, tuple):
-                # If it returns a tuple, combine the dataframes
                 if len(result) == 2:
                     df = pd.concat([result[0], result[1]], ignore_index=True) if not (result[0].empty and result[1].empty) else pd.DataFrame()
                 else:
@@ -1038,25 +946,20 @@ def _process_one(
         except ValueError as e:
             raise ValueError(f"Error reading {path}: {e}")
     elif os.path.isfile(path) and path.endswith('.dat2'):
-        # .dat2 file - extract ID and directory
         dir_path = os.path.dirname(path) or '.'
         basename = os.path.basename(path)
         asassn_id = basename.replace('.dat2', '')
         try:
             dfg, dfv = read_lc_dat2(asassn_id, dir_path)
-            # Combine g and v bands into single dataframe
             df = pd.concat([dfg, dfv], ignore_index=True) if not (dfg.empty and dfv.empty) else pd.DataFrame()
         except Exception as e:
             raise ValueError(f"Error reading .dat2 file {path}: {e}")
     else:
-        # Assume path is a directory - this requires knowing the ID, which we don't have
-        # Try to find CSV files in the directory
         import glob
         csv_files = sorted(glob.glob(os.path.join(path, '*-light-curves.csv')))
         if csv_files:
-            # Use first CSV found (for batch processing, each file should be specified individually)
             try:
-                from calder.df_plot import read_skypatrol_csv
+                from df_plot import read_skypatrol_csv
             except ImportError:
                 from df_plot import read_skypatrol_csv
             df = read_skypatrol_csv(csv_files[0])
@@ -1066,24 +969,22 @@ def _process_one(
     if df.empty:
         raise ValueError(f"Empty dataframe read from {path}")
     
-    # Check for sufficient valid data
     required_cols = ["JD", "mag", "error"]
     for col in required_cols:
         if col not in df.columns:
             raise ValueError(f"Missing required column '{col}' in {path}")
     
-    # Filter out invalid data
     valid_mask = (
         np.isfinite(df["JD"]) & 
         np.isfinite(df["mag"]) & 
         np.isfinite(df["error"]) &
         (df["error"] > 0) &
-        (df["error"] < 10)  # Reasonable error upper bound
+        (df["error"] < 10)
     )
     
     df = df[valid_mask].copy()
     
-    if len(df) < 10:  # Need at least 10 points for meaningful analysis
+    if len(df) < 10:
         raise ValueError(f"Insufficient valid data points ({len(df)} < 10) in {path}")
     
     res = run_bayesian_significance(
@@ -1109,24 +1010,21 @@ def _process_one(
     dip = res["dip"]
     jump = res["jump"]
 
-    # Helper to extract best morphology info
     def get_best_morph_info(run_list):
+        """
+        
+        """
         if not run_list:
             return "none", 0.0, 0.0
-        # sort by run_sum descending (strongest detection first)
         best = sorted(run_list, key=lambda x: x['run_sum'], reverse=True)[0]
         
         morph = best.get('morphology', 'none')
         delta_bic = best.get('delta_bic_null', 0.0)
         
-        # safely get params
         params = best.get('params', {})
-        # approximate "best_param" based on morphology
         if morph == 'gaussian':
-            # return sigma
             main_param = params.get('sigma', np.nan)
         elif morph == 'paczynski':
-            # return tE
             main_param = params.get('tE', np.nan)
         else:
             main_param = np.nan
@@ -1142,7 +1040,6 @@ def _process_one(
         dip_significant=bool(dip["significant"]),
         jump_significant=bool(jump["significant"]),
 
-        # Morphology Results
         dip_best_morph=str(dip_morph),
         dip_best_delta_bic=float(dip_dbic),
         dip_best_width_param=float(dip_param),
@@ -1151,15 +1048,12 @@ def _process_one(
         jump_best_delta_bic=float(jump_dbic),
         jump_best_width_param=float(jump_param),
 
-        # counts (post run-gating)
         dip_count=int(len(dip["event_indices"])),
         jump_count=int(len(jump["event_indices"])),
 
-        # run counts (post run-gating)
         dip_run_count=int(dip.get("n_runs", 0)),
         jump_run_count=int(jump.get("n_runs", 0)),
 
-        # run summary maxima
         dip_max_run_points=int(dip.get("max_run_points", 0)),
         jump_max_run_points=int(jump.get("max_run_points", 0)),
         dip_max_run_duration=float(dip.get("max_run_duration", np.nan)),
@@ -1169,11 +1063,9 @@ def _process_one(
         dip_max_run_max=float(dip.get("max_run_max", np.nan)),
         jump_max_run_max=float(jump.get("max_run_max", np.nan)),
 
-        # local BF diagnostics
         dip_max_log_bf_local=float(dip.get("max_log_bf_local", np.nan)),
         jump_max_log_bf_local=float(jump.get("max_log_bf_local", np.nan)),
 
-        # global BF diagnostics
         dip_bayes_factor=float(dip["bayes_factor"]),
         jump_bayes_factor=float(jump["bayes_factor"]),
 
@@ -1191,6 +1083,9 @@ def _process_one(
 
 
 def main():
+    """
+    
+    """
     parser = argparse.ArgumentParser(
         description="Run Bayesian excursion scoring on light curves in parallel."
     )
@@ -1252,7 +1147,6 @@ def main():
         help="Number of points in the logit-spaced p grid (default 80)",
     )
 
-    # Run-based triggers (1,2,3)
     parser.add_argument(
         "--run-min-points",
         type=int,
@@ -1327,10 +1221,8 @@ def main():
 
     compute_event_prob = (not args.no_event_prob)
 
-    # Collect input files from mag_bins if specified
     expanded_inputs = []
     
-    # If mag_bins specified, find all .dat2 files in lcX_cal directories
     if args.mag_bins:
         lc_path = args.lc_path
         for mag_bin in args.mag_bins:
@@ -1339,7 +1231,6 @@ def main():
                 print(f"Warning: mag_bin directory does not exist: {mag_bin_dir}", flush=True)
                 continue
             
-            # Find all lc*_cal directories
             lc_dirs = sorted(glob.glob(os.path.join(mag_bin_dir, "lc*_cal")))
             if not lc_dirs:
                 print(f"Warning: No lc*_cal directories found in {mag_bin_dir}", flush=True)
@@ -1347,7 +1238,6 @@ def main():
             
             print(f"Found {len(lc_dirs)} lc*_cal directories in {mag_bin}...", flush=True)
             
-            # Find all .dat2 files in each lcX_cal directory
             for lc_dir in lc_dirs:
                 dat2_files = sorted(glob.glob(os.path.join(lc_dir, "*.dat2")))
                 if dat2_files:
@@ -1356,20 +1246,16 @@ def main():
             
             print(f"Total .dat2 files in {mag_bin}: {len([f for f in expanded_inputs if mag_bin in f])}", flush=True)
     
-    # Also add explicit input files
     for pattern in args.inputs:
         if '*' in pattern or '?' in pattern or '[' in pattern:
-            # It's a glob pattern, expand it
             matches = glob.glob(pattern)
             if matches:
                 expanded_inputs.extend(sorted(matches))
             else:
                 print(f"Warning: glob pattern '{pattern}' matched no files", flush=True)
         else:
-            # Regular path
             expanded_inputs.append(pattern)
     
-    # Remove duplicates while preserving order
     seen = set()
     expanded_inputs = [x for x in expanded_inputs if not (x in seen or seen.add(x))]
     
@@ -1382,22 +1268,19 @@ def main():
     errors = []
     temp_files = []
     
-    # Auto-determine chunk size if not specified (and not disabled)
     if args.chunk_size is None:
-        # Adaptive: smaller chunks for smaller jobs, larger for huge jobs
         if len(expanded_inputs) < 10000:
-            chunk_size = 500  # Small jobs: write every 500
+            chunk_size = 500
         elif len(expanded_inputs) < 100000:
-            chunk_size = 1000  # Medium jobs: write every 1000
+            chunk_size = 1000
         else:
-            chunk_size = 5000  # Large jobs: write every 5000
+            chunk_size = 5000
         print(f"Auto-selected chunk size: {chunk_size} (based on {len(expanded_inputs)} files)", flush=True)
     elif args.chunk_size > 0:
         chunk_size = args.chunk_size
     else:
-        chunk_size = None  # Disabled
+        chunk_size = None
 
-    # Decide output strategy
     use_temp_merge = bool(args.temp_merge)
     total_written = 0
     out_fh = None
@@ -1423,7 +1306,6 @@ def main():
             temp_files.append(part_path)
         else:
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            # Keep a single file handle open to avoid repeated open/close on networked filesystems
             if out_fh is None:
                 file_exists = output_path.exists()
                 mode = "a" if file_exists else "w"
@@ -1468,24 +1350,20 @@ def main():
                 result = fut.result()
                 results.append(result)
                 
-                # Write chunk if we've accumulated enough results
                 if chunk_size and len(results) >= chunk_size:
                     _write_chunk(results)
-                    results = []  # Clear the buffer
+                    results = []
             except Exception as e:
                 import traceback
                 tb_str = traceback.format_exc()
                 errors.append(dict(path=str(path), error=repr(e), traceback=tb_str))
                 print(f"ERROR processing {path}: {e}", flush=True)
-                # Print full traceback for debugging
                 if "too many values to unpack" in str(e):
                     print(f"Full traceback:\n{tb_str}", flush=True)
 
-    # Write any remaining results
     if results:
         _write_chunk(results, is_final=True)
     elif args.output and total_written == 0 and not use_temp_merge:
-        # No results at all - create empty file with headers
         pass
     else:
         for row in results:
@@ -1496,17 +1374,15 @@ def main():
                 f"jump_sig={row['jump_significant']} ({row['jump_best_morph']}) jump_dBIC={row['jump_best_delta_bic']:.1f}"
             )
 
-    # Final merge of temp files if requested
     if use_temp_merge and temp_files:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", newline="") as fout:
             for i, part_path in enumerate(temp_files):
                 with open(part_path, "r") as fin:
                     if i > 0:
-                        next(fin, None)  # skip header
+                        next(fin, None)
                     shutil.copyfileobj(fin, fout)
         print(f"Merged {len(temp_files)} temp chunks into {args.output}", flush=True)
-        # Optional cleanup of temp files
         for part_path in temp_files:
             try:
                 part_path.unlink()

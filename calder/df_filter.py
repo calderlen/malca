@@ -19,10 +19,16 @@ from lc_utils import read_lc_dat, read_lc_raw
 
 
 def _call_filter_by_name(func_name: str, df_in: pd.DataFrame, kwargs: Dict[str, Any]) -> pd.DataFrame:
+    """
+    
+    """
     fn = globals()[func_name]
     return fn(df_in, **kwargs)
 
 def _filter_candidates_chunk(df_chunk: pd.DataFrame, band_key: str) -> pd.DataFrame:
+    """
+    
+    """
     if df_chunk.empty:
         return df_chunk.iloc[0:0].copy()
 
@@ -45,6 +51,9 @@ def _run_step_sequential(
     step_desc: str,
     position: int = 0,
 ) -> pd.DataFrame:
+    """
+    
+    """
     func_kwargs = func_kwargs or {}
     start = perf_counter()
     n_in = len(df_in)
@@ -60,6 +69,9 @@ def _run_step_sequential(
     return df_out
 
 def _first_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
+    """
+    
+    """
     for c in candidates:
         if c in df.columns:
             return c
@@ -72,6 +84,9 @@ def _log_rejections(
     filter_name: str,
     log_csv: str | Path | None,
 ) -> None:
+    """
+    
+    """
     if log_csv is None:
         return
 
@@ -96,6 +111,9 @@ def candidates_with_peaks_naive(
     *,
     n_workers: int = 1,
 ) -> pd.DataFrame:
+    """
+    
+    """
     file = Path(csv_path)
 
     df = pd.read_csv(file).copy()
@@ -161,7 +179,10 @@ def candidates_with_peaks_biweight(
     *,
     n_workers: int = 1,
 ) -> pd.DataFrame:
-    # Same selection logic as naive; operates on biweight peak CSVs.
+                                                                    
+    """
+    
+    """
     return candidates_with_peaks_naive(
         csv_path,
         out_csv_path=out_csv_path,
@@ -177,6 +198,9 @@ def filter_bns(
     asassn_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
     rejected_log_csv: str | Path | None = None,
 ):
+    """
+    
+    """
     with tqdm(total=2, desc="filter_bns", leave=False) as pbar:
         catalog = pd.read_csv(asassn_csv)
         catalog["asas_sn_id"] = catalog["asas_sn_id"].astype(str)
@@ -205,6 +229,9 @@ def vsx_class_extract(
     vsx_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.csv",
     match_radius_arcsec: float = 3.0,
 ):
+    """
+    
+    """
     with tqdm(total=3, desc="vsx_class_extract", leave=False) as pbar:
         vsx = pd.read_csv(vsx_csv)
         vsx = vsx.dropna(subset=["ra", "dec"]).reset_index(drop=True)
@@ -232,6 +259,9 @@ def filter_dip_dominated(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
+    """
+    
+    """
     g_frac_col = _first_col(df, "g_dip_fraction", "g_dip_frac")
     v_frac_col = _first_col(df, "v_dip_fraction", "v_dip_frac")
     g_flag_col = _first_col(df, "g_dip_dominated", "g_dipdom")
@@ -270,6 +300,9 @@ def filter_multi_camera(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
+    """
+    
+    """
     cam_col = _first_col(
         df, "n_cameras", "num_cameras", "unique_cameras",
         "n_unique_cameras", "camera_count"
@@ -304,6 +337,9 @@ def filter_periodic_candidates(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
+    """
+    
+    """
     power_col = _first_col(df, "ls_max_power", "max_power")
     per_col = _first_col(df, "best_period", "ls_best_period", "period_best")
     n0 = len(df)
@@ -353,6 +389,9 @@ def filter_sparse_lightcurves(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
+    """
+    
+    """
     span_col = _first_col(df, "time_span_days", "timespan_days", "t_span_days", "t_span")
     ppd_col = _first_col(df, "points_per_day", "ppd", "n_per_day")
 
@@ -362,7 +401,7 @@ def filter_sparse_lightcurves(
         pbar.update(1)
 
     if span_col and ppd_col:
-        mask = (df[span_col].astype(float) >= float(min_time_span)) & \
+        mask = (df[span_col].astype(float) >= float(min_time_span)) &\
                (df[ppd_col].astype(float) >= float(min_points_per_day))
         out = df.loc[mask].reset_index(drop=True)
     elif span_col:
@@ -422,6 +461,9 @@ def box_filter(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
+    """
+    
+    """
     dip_col = _first_col(df, *dip_cols)
     peaks_col = _first_col(df, *peaks_cols)
     std_col = _first_col(df, *std_cols)
@@ -463,6 +505,9 @@ def box_filter(
 
 
 def _sigma_ok_for_row(asas_sn_id: str, raw_path: str | Path, min_sigma: float) -> bool:
+    """
+    
+    """
     try:
         raw_df = read_lc_raw(str(asas_sn_id), str(Path(raw_path).parent))
         scatter_vals = (raw_df["sig1_high"] - raw_df["sig1_low"]).to_numpy(dtype=float)
@@ -482,6 +527,9 @@ def filter_sigma_resid(
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
+    """
+    
+    """
     need_cols = {"asas_sn_id", "raw_path"}
     depth_g = _first_col(df, "g_max_depth", "g_depth_max")
     depth_v = _first_col(df, "v_max_depth", "v_depth_max")
@@ -490,10 +538,13 @@ def filter_sigma_resid(
         tqdm.write("[filter_sigma_resid] Missing asas_sn_id/raw_path or depth columns; passing through.")
         return df.reset_index(drop=True)
 
-    rows = df.reset_index(drop=False)  # keep original index for mask
+    rows = df.reset_index(drop=False)                                
     idx_name = "index"
 
     def _eval_row(row) -> tuple[int, bool]:
+        """
+        
+        """
         try:
             raw_ok = _sigma_ok_for_row(str(row["asas_sn_id"]), Path(row["raw_path"]), min_sigma)
             if not raw_ok:
@@ -564,6 +615,9 @@ def filter_csv(
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
 
+    """
+    
+    """
     if peak_mode == "biweight":
         df_filtered = candidates_with_peaks_biweight(
             csv_path,
@@ -671,6 +725,9 @@ BIN_RE = re.compile(
 
 
 def parse_bin_key(p: Path) -> tuple[str, str, str] | None:
+    """
+    
+    """
     m = BIN_RE.match(p.name)
     if not m:
         return None
@@ -678,6 +735,9 @@ def parse_bin_key(p: Path) -> tuple[str, str, str] | None:
 
 
 def latest_per_bin(files: list[Path]) -> list[Path]:
+    """
+    
+    """
     best: dict[tuple[str, str], tuple[str, Path]] = {}
     for f in files:
         parsed = parse_bin_key(f)
@@ -699,6 +759,9 @@ def gather_files(
     keep_latest: bool,
     pattern: str = "peaks_*.csv",
 ) -> list[Path]:
+    """
+    
+    """
     candidates: set[Path] = set()
     if files:
         for pat in files:
@@ -733,6 +796,9 @@ def _run_one_file(
     out_dir: Path | None = None,
     out_path_override: Path | None = None,
 ) -> pd.DataFrame:
+    """
+    
+    """
     if out_path_override is not None:
         out_csv_path = out_path_override
     else:
@@ -771,6 +837,9 @@ def _run_one_file(
 
 
 def _build_cli_parser() -> argparse.ArgumentParser:
+    """
+    
+    """
     parser = argparse.ArgumentParser(description="Run filter_csv on one peaks CSV or a directory of peaks_*.csv files.")
     parser.add_argument("csv_path", type=Path, help="Input peaks CSV path OR a directory containing peaks_*.csv files.")
     parser.add_argument("--files", nargs="+", default=None, help="Specific file globs within the directory (e.g., 'peaks_12_5_13_*.csv').")
@@ -803,6 +872,9 @@ def _build_cli_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Iterable[str] | None = None) -> int:
+    """
+    
+    """
     parser = _build_cli_parser()
     args = parser.parse_args(argv)
     ts = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S%z")

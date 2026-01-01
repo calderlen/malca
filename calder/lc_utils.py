@@ -14,20 +14,20 @@ def year_to_jd(year):
     """
     ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
     """
-    jd_epoch = 2449718.5  # JD at 1995-01-01 00:00:00 TT
+    jd_epoch = 2449718.5                                
     year_epoch = 1995
     days_in_year = 365.25
-    # Return JD relative to JD-2450000 to match ASAS-SN convention
+                                                                  
     return (year - year_epoch) * days_in_year + (jd_epoch - 2450000.0)
 
 def jd_to_year(jd):
     """
     ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
     """
-    jd_epoch = 2449718.5  # JD at 1995-01-01 00:00:00 TT
+    jd_epoch = 2449718.5                                
     year_epoch = 1995
     days_in_year = 365.25
-    # Input jd is expected to be JD-2450000; convert back to JD
+                                                               
     return year_epoch + ((jd + 2450000.0) - jd_epoch) / days_in_year
 
 def read_lc_dat2(asassn_id, path):
@@ -35,7 +35,7 @@ def read_lc_dat2(asassn_id, path):
     dat2_path = os.path.join(path, f"{asassn_id}.dat2")
     if os.path.exists(dat2_path):
         file = dat2_path
-        # column names
+                      
         columns = ["JD", 
                    "mag", 
                    "error", 
@@ -45,20 +45,20 @@ def read_lc_dat2(asassn_id, path):
                    "saturated", 
                    "cam_field"]
 
-        # read fwf
+                  
         df = pd.read_fwf(
             file,
             header=None,
             names=columns
         )
     
-        # split the "cam_field" column into two
+                                               
         df[["camera_name", "field"]] = df["cam_field"].str.split("/", expand=True)
 
-        # drop the old combined column
+                                      
         df = df.drop(columns=["cam_field"])
 
-        # enforce dtypes
+                        
         df = df.astype({
             "JD": "float64",
             "mag": "float64",
@@ -76,16 +76,16 @@ def read_lc_dat2(asassn_id, path):
 
         return df_g, df_v
 
-    # Fallback: SkyPatrol CSV (e.g., <id>-light-curves.csv)
+                                                           
     csv_candidates = [
         os.path.join(path, f"{asassn_id}-light-curves.csv"),
         os.path.join(path, f"{asassn_id}.csv"),
     ]
     csv_path = next((p for p in csv_candidates if os.path.exists(p)), None)
     if csv_path:
-        # SkyPatrol CSVs have comment lines starting with # and blank lines before header
+                                                                                         
         df = pd.read_csv(csv_path, comment='#', skip_blank_lines=True)
-        # Normalize column names we care about
+                                              
         rename_map = {
             "Mag": "mag",
             "Mag Error": "error",
@@ -95,7 +95,7 @@ def read_lc_dat2(asassn_id, path):
         }
         df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
         
-        # Create expected columns to match read_skypatrol_csv format
+                                                                    
         if "camera" in df.columns:
             df["camera"] = df["camera"].astype(str).str.strip()
             df["camera#"] = df["camera"]
@@ -105,10 +105,10 @@ def read_lc_dat2(asassn_id, path):
             df["camera#"] = ""
             df["cam_field"] = ""
         
-        # Provide minimal columns expected downstream
+                                                     
         df["saturated"] = df.get("saturated", 0)
         
-        # Handle quality flag if present
+                                        
         if "Quality" in df.columns:
             df["quality_flag"] = df["Quality"].astype(str).str.strip().str.upper()
             df["good_bad"] = (df["quality_flag"] == "G").astype(int)
@@ -119,12 +119,12 @@ def read_lc_dat2(asassn_id, path):
         def _band_flag(val: str) -> int:
             v = str(val).upper()
             if v.startswith("V"):
-                return 1  # V band
-            return 0    # treat everything else as g-equivalent
+                return 1          
+            return 0                                           
 
         df["v_g_band"] = df["filter"].map(_band_flag) if "filter" in df.columns else 0
 
-        # Ensure types
+                      
         for col in ["JD", "mag", "error"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -133,7 +133,7 @@ def read_lc_dat2(asassn_id, path):
         df_v = df.loc[df["v_g_band"] == 1].reset_index(drop=True)
         return df_g, df_v
 
-    # No data found
+                   
     print(f"[error] {asassn_id}: file not found in {path}")
     return pd.DataFrame(), pd.DataFrame()
 
@@ -185,7 +185,7 @@ def match_index_to_lc(
         idx_paths = sorted(glob(os.path.join(index_path, mag_bin, "index*_masked.csv")))
         for idx_csv in tqdm(idx_paths, desc=f"{mag_bin} index CSVs", leave=False):
 
-            # Assume pattern matches; will raise if not.
+                                                        
             idx_num = int(idx_pattern.search(os.path.basename(idx_csv)).group(1))
 
             lc_dir = os.path.join(lc_path, mag_bin, f"lc{idx_num}_cal")

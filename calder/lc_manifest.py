@@ -12,7 +12,7 @@ from lc_excursions import MAG_BINS, lc_dir_masked
 
 IDX_PATTERN = re.compile(r"index(\d+)_masked\.csv$", re.IGNORECASE)
 
-# "manifest" in this file refers to the data product, acsv file that maps ASAS-SN IDs to their index CSV and light curve directory.
+                                                                                                                                   
 
 def _iter_source_records(
     index_root: Path,

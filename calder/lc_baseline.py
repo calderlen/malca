@@ -101,7 +101,6 @@ def global_median_baseline(
     return df_out
 
 
-# rolling time window helper functions for subsequent baselines
 
 
 def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0, past_only=True):
@@ -114,7 +113,6 @@ def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0, past_
     n = len(jd)
     out = np.full(n, np.nan, dtype=float)
     
-    # cast to numpy arrays just in case
     jd = np.asarray(jd, dtype=float)
     mag = np.asarray(mag, dtype=float)
 
@@ -132,11 +130,8 @@ def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0, past_
             idx_start = np.searchsorted(jd, lo_val, side='left')
             idx_end = np.searchsorted(jd, hi_val, side='right')
             
-            # Slice the arrays (very fast view, no copy)
             vals = mag[idx_start:idx_end]
             
-            # Check for NaNs
-            # (In pure numpy, we must filter them explicitly before median)
             finite_vals = vals[np.isfinite(vals)]
             
             if len(finite_vals) >= int(min_points):
@@ -159,7 +154,6 @@ def rolling_time_mad(jd, resid, days=200.0, min_points=10, min_days=20.0, past_o
     jd = np.asarray(jd, dtype=float)
     resid = np.asarray(resid, dtype=float)
     
-    # Handle add_err (scalar or array)
     if add_err is not None:
         if np.ndim(add_err) > 0:
             err_is_array = True
@@ -179,7 +173,6 @@ def rolling_time_mad(jd, resid, days=200.0, min_points=10, min_days=20.0, past_o
                 half = window / 2.0
                 lo_val, hi_val = t0 - half, t0 + half
             
-            # BINARY SEARCH OPTIMIZATION
             idx_start = np.searchsorted(jd, lo_val, side='left')
             idx_end = np.searchsorted(jd, hi_val, side='right')
             
@@ -188,7 +181,6 @@ def rolling_time_mad(jd, resid, days=200.0, min_points=10, min_days=20.0, past_o
             
             if len(finite_vals) >= int(min_points):
                 med = np.median(finite_vals)
-                # MAD calculation
                 mad = 1.4826 * np.median(np.abs(finite_vals - med))
                 
                 if add_err is not None:
@@ -389,13 +381,11 @@ def per_camera_median_baseline(
     """
     returns a df that mirrors input df but with three extra float columns: (1) baseline, a rolling 300-day median mag computed within each camera group; (2) resid, residual mag-baseline per-camera; (3) sigma_resid, residual divided by (MAD+mag_error) in quadrature, yielding a per-point significance
     """
-    # work on a copy; initialize df_outputs
     df_out = df.copy()
     for col in ("baseline", "resid", "sigma_resid"):
         if col not in df_out.columns:
             df_out[col] = np.nan
 
-    # group by camera and fill columns
     for _, sub in df_out.groupby(cam_col, group_keys=False):
         idx = sub.index
 
@@ -406,7 +396,6 @@ def per_camera_median_baseline(
         base = rolling_time_median(t, m, days=days, min_points=min_points)
         resid = m - base
 
-        # robust scatter
         resid_good = np.isfinite(resid)
         if resid_good.any():
             resid_vals = resid[resid_good]
@@ -422,7 +411,7 @@ def per_camera_median_baseline(
         mad_num = mad if np.isfinite(mad) else 0.0
         e_med_num = e_med if np.isfinite(e_med) else 0.0
         robust_std = float(np.sqrt(mad_num**2 + e_med_num**2))
-        robust_std = max(robust_std, 1e-6)  # avoid 0/NaN
+        robust_std = max(robust_std, 1e-6)
 
         sigma_resid = resid / robust_std
 
@@ -453,34 +442,28 @@ def per_camera_trend_baseline(
         if col not in df_out.columns:
             df_out[col] = np.nan
 
-    # process per camera, sorted by time
     for _, sub in df_out.groupby(cam_col, group_keys=False):
         idx = sub.sort_values(t_col).index
         t = df_out.loc[idx, t_col].to_numpy(float)
         m = df_out.loc[idx, mag_col].to_numpy(float)
         e = df_out.loc[idx, err_col].to_numpy(float)
 
-        # multi-scale, past-only baselines
         base_s = rolling_time_median(t, m, days=days_short, min_points=min_points, past_only=True)
         base_l = rolling_time_median(t, m, days=days_long, min_points=min_points, past_only=True)
 
-        # choose baseline adaptively: prefer long if |base_s - base_l| is small (slow trend), else short
-        choose_short = np.isfinite(base_s) & np.isfinite(base_l) & (np.abs(base_s - base_l) > 0.05) # 0.05 mag heuristic
+        choose_short = np.isfinite(base_s) & np.isfinite(base_l) & (np.abs(base_s - base_l) > 0.05)
         baseline = np.where(choose_short & np.isfinite(base_s), base_s,
         np.where(np.isfinite(base_l), base_l, base_s))
 
         resid = m - baseline
 
-        # rolling local robust scatter; add median(err) in quadrature
         e_med = np.nanmedian(e) if np.isfinite(e).any() else 0.0
         sigma_loc = rolling_time_mad(t, resid, days=days_short, min_points=max(8, min_points//2),
         past_only=True, add_err=e_med)
 
-        # late-window guard: within last N days, allow right-censored dips (don’t inflate sigma by requiring return)
         tmax = np.nanmax(t)
         near_end = (tmax - t) <= float(last_window_guard)
         
-        # If sigma_loc missing near the end, fall back to global robust + e_med
         if np.isnan(sigma_loc[near_end]).any():
             r_good = np.isfinite(resid)
             if r_good.any():
@@ -512,12 +495,11 @@ def per_camera_gp_baseline(
     mag_col="mag",
     err_col="error",
     cam_col="camera#",
-    # --- new: effective-noise (sigma_eff) control ---
-    sigma_floor=None,          # if None: estimate per-camera from quiescent residuals
-    floor_clip=3.0,            # robust clip threshold (in MAD-sigma units) for "quiet" selection
-    floor_iters=3,             # iterations for quiet-point selection
-    min_floor_points=30,       # need at least this many quiet points to estimate a floor
-    add_sigma_eff_col=True,    # optionally store sigma_eff in df_out
+    sigma_floor=None,
+    floor_clip=3.0,
+    floor_iters=3,
+    min_floor_points=30,
+    add_sigma_eff_col=True,
 ):
     """
     per-camera GP baseline (fixed SHO kernel)
@@ -550,7 +532,6 @@ def per_camera_gp_baseline(
 
         r = resid[finite0].copy()
 
-        # iterative quiet selection in residual-space (not normalized), robust to dips/jumps
         keep = np.ones_like(r, dtype=bool)
         for _ in range(int(max(floor_iters, 1))):
             rr = r[keep]
@@ -563,7 +544,7 @@ def per_camera_gp_baseline(
 
         rr = r[keep]
         if rr.size < max(10, min_floor_points):
-            rr = r  # fallback: use all finite residuals
+            rr = r
 
         s_quiet = 1.4826 * float(np.median(np.abs(rr - float(np.median(rr)))))
         s_quiet = max(s_quiet, 1e-12)
@@ -586,7 +567,6 @@ def per_camera_gp_baseline(
 
         finite = np.isfinite(t) & np.isfinite(y)
         if finite.sum() < 5:
-            # Too few points for GP: fallback to a per-camera median baseline and jitter floor
             if np.isfinite(y).any():
                 baseline_val = float(np.nanmedian(y[np.isfinite(y)]))
                 baseline = np.full_like(y, baseline_val, dtype=float)
@@ -617,7 +597,6 @@ def per_camera_gp_baseline(
         y_mean = float(np.mean(y_fit))
         y_centered = y_fit - y_mean
 
-        # per-point measurement errors for the fit (and later sigma_eff)
         yerr_fit = yerr[finite_idx]
         if not np.isfinite(yerr_fit).any():
             yerr_fit = np.full_like(y_fit, float(jitter), dtype=float)
@@ -627,7 +606,6 @@ def per_camera_gp_baseline(
             yerr_fit = np.where(np.isfinite(yerr_fit), yerr_fit, med_yerr)
             yerr_fit = np.nan_to_num(yerr_fit, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
 
-        # Build kernel - use S0, w0 if provided, otherwise use sigma, rho
         if S0 is not None and w0 is not None:
             k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(q))
         else:
@@ -637,7 +615,6 @@ def per_camera_gp_baseline(
                 rho = 200.0
             k = terms.SHOTerm(sigma=float(sigma), rho=float(rho), Q=float(q))
 
-        # defaults in case GP fails
         baseline = np.full_like(y, np.nan, dtype=float)
         var = np.zeros_like(y, dtype=float)
         baseline_flag = "median_fallback"
@@ -650,9 +627,8 @@ def per_camera_gp_baseline(
             var = np.asarray(var_pred, dtype=float)
             var = np.where(np.isfinite(var) & (var >= 0.0), var, 0.0)
             baseline_flag = "gp_sho"
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:
             warnings.warn(f"GP fit failed for camera group; falling back to median baseline. Error: {exc}")
-            # fallback baseline: per-camera median on finite points
             y_med = float(np.nanmedian(y[finite]))
             baseline = np.full_like(y, y_med, dtype=float)
             var = np.zeros_like(y, dtype=float)
@@ -660,7 +636,6 @@ def per_camera_gp_baseline(
 
         resid = y - baseline
 
-        # Build per-point measurement error array (full length), fill missing with a robust median
         if np.isfinite(yerr).any():
             med_yerr_all = float(np.nanmedian(yerr[np.isfinite(yerr)]))
             med_yerr_all = med_yerr_all if np.isfinite(med_yerr_all) else float(jitter)
@@ -670,13 +645,11 @@ def per_camera_gp_baseline(
         yerr_full = np.nan_to_num(yerr_full, nan=float(jitter), posinf=float(jitter), neginf=float(jitter))
         yerr_full = np.maximum(yerr_full, 0.0)
 
-        # Estimate / apply sigma_floor (per camera)
         if sigma_floor is None:
             floor_here = _robust_sigma_floor(resid, yerr_full, var)
         else:
             floor_here = float(max(sigma_floor, 0.0))
 
-        # sigma_eff,j^2 = sigma_j^2 + sigma_floor^2 + sigma_model,j^2  (physics convention)
         sigma_eff2 = yerr_full**2 + floor_here**2 + var
         sigma_eff = np.sqrt(np.maximum(sigma_eff2, 1e-12))
         sigma_resid = resid / sigma_eff
@@ -698,12 +671,10 @@ def per_camera_gp_baseline_masked(
     dip_sigma_thresh=-1.0,
     pad_days=100.0,
 
-    # SHO kernel parameters (default, preferred)
     S0=0.0005,
     w0=0.0031415926535897933,
     Q=0.7,
 
-    # RealTerm (OU mixture) parameters (optional, for backward compatibility)
     a1=None,
     rho1=None,
     a2=None,
@@ -748,11 +719,9 @@ def per_camera_gp_baseline_masked(
 
         finite = np.isfinite(t) & np.isfinite(y)
 
-        # --- 1) Cheap baseline: per-camera median
         y_med = float(np.nanmedian(y[finite]))
         r0 = y - y_med
 
-        # --- 2) Robust global scale for masking
         r0_f = r0[finite]
         med_r = float(np.nanmedian(r0_f))
         mad_r = 1.4826 * float(np.nanmedian(np.abs(r0_f - med_r)))
@@ -768,7 +737,6 @@ def per_camera_gp_baseline_masked(
         sig0 = r0 / s0
         dip_flag = finite & np.isfinite(sig0) & (sig0 < float(dip_sigma_thresh))
 
-        # --- 3) Pad mask in time around dip candidates
         keep = finite.copy()
         if dip_flag.any():
             t_dip = t[dip_flag]
@@ -799,15 +767,12 @@ def per_camera_gp_baseline_masked(
         y_mean = float(np.mean(y_fit))
         y_fit0 = y_fit - y_mean
 
-        # Build kernel: prefer SHO if S0/w0 provided, otherwise use RealTerm
         if a1 is not None and rho1 is not None and a2 is not None and rho2 is not None:
-            # Use RealTerm (OU mixture) if explicitly provided
             k = (
                 terms.RealTerm(a=float(a1), c=1.0 / float(rho1)) +
                 terms.RealTerm(a=float(a2), c=1.0 / float(rho2))
             )
         else:
-            # Default: use SHO kernel with S0, w0, Q
             k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(Q))
 
         try:

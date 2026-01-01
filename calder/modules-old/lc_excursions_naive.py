@@ -8,16 +8,11 @@ import os
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
-try:
-    from lc_baseline import per_camera_trend_baseline, per_camera_median_baseline
-    from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
-    from df_utils import peak_search_residual_baseline
-    from lc_metrics import run_metrics, is_dip_dominated
-except ImportError:
-    from calder.lc_baseline import per_camera_trend_baseline, per_camera_median_baseline
-    from calder.lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
-    from calder.df_utils import peak_search_residual_baseline
-    from calder.lc_metrics import run_metrics, is_dip_dominated
+from calder.lc_baseline import per_camera_trend_baseline, per_camera_median_baseline
+from calder.lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+from calder.df_utils import peak_search_residual_baseline, clean_lc, empty_metrics
+from calder.lc_metrics import run_metrics, is_dip_dominated
+
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from astropy.stats import biweight_location, biweight_scale
@@ -26,68 +21,7 @@ from lc_metrics import run_metrics, is_dip_dominated
 lc_dir_masked = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked"
 
 MAG_BINS = ['12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15']
-
-# masked index CSVs live here (for index*_masked.csv)
-masked_bins = [f"{lc_dir_masked}/{b}" for b in MAG_BINS]
-
-lc_12_12_5 = lc_dir_masked + '/12_12.5'
-lc_12_5_13 = lc_dir_masked + '/12.5_13'
-lc_13_13_5 = lc_dir_masked + '/13_13.5'
-lc_13_5_14 = lc_dir_masked + '/13.5_14'
-lc_14_14_5 = lc_dir_masked + '/14_14.5'
-lc_14_5_15 = lc_dir_masked + '/14.5_15'
-
-def clean_lc(df):
-    
-    mask = np.ones(len(df), dtype=bool)
-
-    #if "good_bad" in df.columns:
-    #    mask &= (df["good_bad"] == 1) #NOT DOING THIS FOR DIPPERS RIGHT NOW UNTIL YOU RECOVER SAME CANDIDATES AS BRAYDEN WITH DIPS ENABLED!
-    if "saturated" in df.columns:
-        mask &= (df["saturated"] == 0)
-    
-    # required fields
-    mask &= df["JD"].notna() & df["mag"].notna()
-    if "error" in df.columns:
-        mask &= df["error"].notna() & (df["error"] > 0.) & (df["error"] < 1.)
-    df = df.loc[mask]
-
-    df = df.sort_values("JD").reset_index(drop=True)
-    return df
-
-METRIC_NAMES = (
-    "n_dip_runs",
-    "n_jump_runs",
-    "n_dip_points",
-    "n_jump_points",
-    "most_recent_dip",
-    "most_recent_jump",
-    "max_depth",
-    "max_height",
-    "max_dip_duration",
-    "max_jump_duration",
-    "dip_fraction",
-    "jump_fraction",
-)
-
-def empty_metrics(prefix):
-        vals = {
-            "n_dip_runs": 0,
-            "n_jump_runs": 0,
-            "n_dip_points": 0,
-            "n_jump_points": 0,
-            "most_recent_dip": np.nan,
-            "most_recent_jump": np.nan,
-            "max_depth": np.nan,
-            "max_height": np.nan,
-            "max_dip_duration": np.nan,
-            "max_jump_duration": np.nan,
-            "dip_fraction": np.nan,
-            "jump_fraction": np.nan,
-        }
-        out = {f"{prefix}_{k}": vals[k] for k in METRIC_NAMES}
-        out[f"{prefix}_is_dip_dominated"] = False
-        return out
+from df_utils import clean_lc, empty_metrics
 
 def lc_proc_naive(
     record: dict,
@@ -98,7 +32,7 @@ def lc_proc_naive(
     metrics_dip_threshold=0.3,
 ):
     """
-    worker function that processes a single lc
+    
     """
     baseline_kwargs = dict(baseline_kwargs)
 
@@ -200,8 +134,8 @@ def lc_proc_naive(
         row["raw_median_max_camera"] = int(raw_df.loc[raw_df["median"].idxmax(), "camera#"])
         row["raw_median_range"] = raw_median_max - raw_median_min
         
-        # --- ADDED OPTIMIZATION FROM PREVIOUS DISCUSSION ---
-        # Calculating raw scatter here to avoid I/O bottlenecks during filtering later
+                                                             
+                                                                                      
         scatter_vals = (raw_df["sig1_high"] - raw_df["sig1_low"]).to_numpy(dtype=float)
         finite_scatter = scatter_vals[np.isfinite(scatter_vals)]
         row["raw_robust_scatter"] = float(np.nanmedian(finite_scatter)) if finite_scatter.size > 0 else np.nan
@@ -216,7 +150,7 @@ def lc_proc_naive(
     return row
 
 
-# naive dip finder that works one bin at a time
+                                               
 def dip_finder_naive(
     index_path="/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked/",
     lc_path="/data/poohbah/1/assassin/rowan.90/lcsv2",
@@ -235,16 +169,13 @@ def dip_finder_naive(
     return_rows: bool = False,
     **baseline_kwargs,
 ):
-    """Run the naive dip search across one or more magnitude bins.
-
-    Args:
-        target_ids_by_bin: optional mapping of ``mag_bin`` to set of ASAS-SN IDs to check if some subset of candidates are reproduced.
-        return_rows: when True, return a DataFrame of all processed rows instead of just writing peak CSV/Parquet files.
+    """
+    run the naive dip search across one or more magnitude bins.
     """
     os.makedirs(out_dir, exist_ok=True)
     timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S%z")
 
-    # determine worker defaults
+                               
     if n_workers is None:
         try:
             cpu = os.cpu_count() or 1
@@ -305,15 +236,18 @@ def dip_finder_naive(
         if out_format == "csv":
             header_written = False
         else:
-            header_written = None  # unused for parquet
+            header_written = None                      
 
         with ProcessPoolExecutor(max_workers=n_workers) as ex:
             pending = set()
             pbar = tqdm(desc=f"{b} peak search", unit="obj", leave=False)
             scheduled = 0
 
-            # flushes chunk_size amount of data when it's reached
+                                                                 
             def flush_if_needed():
+                """
+                
+                """
                 if out_format == "csv" and len(rows_buffer) >= chunk_size:
                     mode = "a" if os.path.exists(out_path) else "w"
                     header = not os.path.exists(out_path)
@@ -322,6 +256,9 @@ def dip_finder_naive(
 
 
             def drain_some(all_pending):
+                """
+                
+                """
                 done_now = 0
                 for fut in list(all_pending):
                     if fut.done():
@@ -362,21 +299,21 @@ def dip_finder_naive(
                     )
                 )
                 scheduled += 1
-                # grow total dynamically for ETA
+                                                
                 pbar.total = scheduled
                 pbar.refresh()
                 if len(pending) >= max_inflight:
                     done = drain_some(pending)
                     pbar.update(done)
 
-            # Drain remaining
+                             
             while pending:
                 done = drain_some(pending)
                 pbar.update(done)
 
             pbar.close()
 
-        # Final flush
+                     
         if rows_buffer:
             if out_format == "parquet":
                 pd.DataFrame(rows_buffer).to_parquet(out_path, index=False)

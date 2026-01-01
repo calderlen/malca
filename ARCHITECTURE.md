@@ -90,7 +90,9 @@
   - `peak_search_biweight_delta`
 - `calder/df_plot.py`
   - `read_asassn_dat`
+    - Read an ASAS-SN .dat file using whitespace separation.
   - `read_skypatrol_csv`
+    - Read a SkyPatrol CSV, remapping columns to the ASAS-SN schema.
   - `_load_lightcurve_df`
   - `load_detection_results`
   - `lookup_source_metadata`
@@ -99,10 +101,173 @@
   - `plot_lc_with_residuals`
   - `plot_one_lc`
   - `plot_many_lc`
+- `calder/df_utils.py`
+  - `clean_lc`
+  - `year_to_jd`
+  - `jd_to_year`
+  - `peak_search_residual_baseline`
+    - Peak finder that prefers per-camera-baseline residuals when available.
+    - Falls back to (mag - mean) if 'resid' is absent.
+  - `peak_search_biweight_delta`
+    - Tzanidakis et al. (2025) biweight magnitude deviation
+  - `empty_metrics`
+- `calder/fp_analysis.py`
+  - `_load_many`
+  - `_band_flags`
+  - `summarize`
+  - `retention`
+  - `main`
+- `calder/lc_baseline.py`
+  - `global_mean_baseline`
+  - `global_median_baseline`
+  - `rolling_time_median`
+    - Rolling median in time using pure numpy optimization (searchsorted).
+    - If past_only=True, uses [t0 - days, t0] (one-sided) to avoid future-leakage into ongoing dips.
+    - Halves 'days' down to min_days until >= min_points exist.
+  - `rolling_time_mad`
+    - Rolling robust scatter (MAD) using pure NumPy optimization.
+    - 1.4826 * median(|resid - median(resid)|)
+  - `global_rolling_median_baseline`
+    - A global rolling-median baseline (not per camera). Applies rolling_time_median
+    - to the entire dataset once, returning baseline/resid/sigma_resid columns.
+  - `global_rolling_mean_baseline`
+    - Similar to global_rolling_median_baseline but uses a rolling mean instead of median.
+  - `per_camera_mean_baseline`
+  - `per_camera_median_baseline`
+    - returns a df that mirrors input df but with three extra float columns: (1) baseline, a rolling 300-day median mag computed within each camera group; (2) resid, residual mag-baseline per-camera; (3) sigma_resid, residual divided by (MAD+mag_error) in quadrature, yielding a per-point significance
+  - `per_camera_trend_baseline`
+    - Multi-scale, one-sided (past-only) rolling-median baseline per camera to avoid
+    - future-leakage; rolling MAD for local significance; late-window guard for right-censored dips.
+  - `per_camera_gp_baseline`
+    - per-camera GP baseline (fixed SHO kernel)
+    - 
+    - Supports two parameterizations:
+    - - sigma, rho, Q (default)
+    - - S0, w0, Q (alternative)
+    - 
+    - Implements (physics convention):
+    -     sigma_eff,j^2 = sigma_j^2 + sigma_floor^2 + sigma_model,j^2
+    - where:
+    -     sigma_j         = reported photometric error (yerr) per point (filled robustly if missing),
+    -     sigma_model,j^2 = GP predictive variance (var) at t_j,
+    -     sigma_floor     = extra jitter ("noise floor"), either user-specified or estimated from quiescent residuals.
+    - 
+    - Outputs:
+    -     baseline, resid, sigma_resid  (and optionally sigma_eff)
+  - `per_camera_gp_baseline_masked`
+    - per-camera GP baseline with masking (dips excluded from fit)
+    - 
+    - Masks out significant dips (thresholded by local MAD) before fitting the GP
+    - baseline to ensure the baseline follows the quiescent state rather than the dips.
+    - 
+    - Supports two kernel parameterizations:
+    - - SHO kernel (default): S0, w0, Q
+    - - RealTerm (OU mixture): a1, rho1, a2, rho2 (for backward compatibility)
+    - 
+    - If RealTerm parameters are explicitly provided, they take precedence.
+- `calder/lc_excursions.py`
+  - `gaussian`
+  - `mag_to_delta`
+    - Compute delta relative to a robust baseline.
+    - 
+    - - Default: global biweight location/scale on the full light curve.
+    - - If baseline_func is provided (e.g., from lc_baseline.py), it is called as
+    -   baseline_func(df, **baseline_kwargs). A "baseline" column is expected in the
+    -   returned DataFrame; residuals are mag - baseline. A robust scale on residuals
+    -   is then used in the denominator.
+    - - sign=+1 for dimmings (mag - baseline), sign=-1 for brightenings.
+  - `score_dips_gaussian`
+    - Fit simple Gaussians to biweight-delta peaks and compute a heuristic score.
+  - `paczynski`
+  - `score_peaks_paczynski`
+    - Fit Paczynski-like microlensing curves to biweight-delta peaks and compute a heuristic score.
+    - 
+    - Model: amp / sqrt(1 + ((t - t0) / tE)^2)
+    - FWHM for this model is 2 * sqrt(3) * tE.
+  - `lc_band_proc`
+    - Analyze a single band: clean, delta-transform, peak find, fit/score, metrics.
+  - `prefix_metrics`
+    - Rename metrics keys from x_ -> <prefix>_ and ensure a filled dict when missing.
+  - `lc_proc`
+    - processes a single light curve
+    - 
+    - mode="dips": use (mag-R) biweight delta, Gaussian fits, and dip metrics.
+    - mode="peaks": use (R-mag) biweight delta, Paczynski fits, no dip metrics.
+  - `excursion_finder`
+    - Combined excursion finder (dips or peaks) using efficient process pool.
+- `calder/lc_excursions_bayes.py`
+  - `gaussian`
+    - gaussian kernel + baseline term
+  - `paczynski`
+    - paczynski kernel + baseline term
+  - `log_gaussian`
+    - ln p = -1/2 * ((x-mu)/sigma)^2 - ln(sigma) - 1/2 ln(2pi)
+  - `logit_spaced_grid`
+  - `default_mag_grid`
+  - `robust_median_dt_days`
+  - `bic`
+    - bayesian information criterion = chi2 + k * ln(n)
+  - `classify_run_morphology`
+    - fits gaussian vs paczynski vs noise kernel to an individual run, returns a dict with kernel chosen and params
+  - `build_runs`
+    - build runs from clustered triggered points
+  - `filter_runs`
+    - filter runs by minimum points, minimum duration, per_point_threshold, sum_threshold; returns dict of kept runs' starting and ending indices/JDs, number of points
+  - `summarize_kept_runs`
+  - `bayesian_excursion_significance`
+    - Returns a dict including:
+    -   - log_bf_local (N,)
+    -   - event_probability (N,) if compute_event_prob
+    -   - event_indices (after run gating)
+    -   - significant (after run gating)
+    -   - run diagnostics
+    -   - global bayes_factor
+  - `run_bayesian_significance`
+    - Compute baseline ONCE, then reuse it for dip & jump scoring.
+  - `_process_one`
+  - `main`
+- `calder/lc_excursions_naive.py`
+  - `lc_proc_naive`
+  - `dip_finder_naive`
+    - run the naive dip search across one or more magnitude bins.
 - `calder/lc_manifest.py`
   - `_iter_source_records`
+    - Yield dictionaries that describe each source found in the masked index files.
   - `build_manifest_dataframe`
   - `parse_args`
+  - `main`
+- `calder/lc_metrics.py`
+  - `find_runs`
+  - `run_metrics`
+    - calculates dip and jump metrics for a given lc df and returns as a dict
+  - `is_dip_dominated`
+    - returns True if the the dip fraction from the metrics dict is above a certain value, currently 2/3
+  - `multi_camera_confirmation`
+- `calder/lc_utils.py`
+  - `year_to_jd`
+    - ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
+  - `jd_to_year`
+    - ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
+  - `read_lc_dat2`
+  - `read_lc_raw`
+    - read <asassn_id>.raw containing per-camera summary statistics
+  - `match_index_to_lc`
+    - Generator function that iterates over index*_masked.csv files in lcsv2_masked/<mag_bin>/, find corresponding lc<num>_cal/ directories in lcsv2/<mag_bin>/, and yield one record per asas_sn_id with whether its .dat file exists. Outputs a dict
+  - `custom_id`
+    - ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
+  - `plotparams`
+    - ADAPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
+  - `divide_cameras`
+    - ADAPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
+- `calder/plot_bayes_results.py`
+  - `plot_bayes_results`
+    - Plot a light curve with Bayesian detection results and run fits.
+  - `main`
+- `calder/plot_skypatrol_peaks.py`
+  - `parse_peaks_jd`
+    - Parse peaks_jd string from CSV (e.g., "[2458327.89, 2458480.59]") into list of floats.
+  - `plot_skypatrol_with_peaks`
+    - Plot a SkyPatrol light curve with detected peaks marked.
   - `main`
 - `calder/reproduce_candidates.py`
   - `_load_manifest_df`
@@ -126,24 +291,46 @@
   - `print_summary`
   - `load_dat`
   - `main`
+- `calder/test.py`
+  - `all_candidate_ids`
+    - Return every source_id from brayden_candidates as strings.
+  - `pick_id_column`
+    - Find an ID column, preferring 'source_id' when present.
+  - `locate_targets`
+  - `print_matches`
+  - `main`
+- `calder/test_skypatrol.py`
+  - `process_skypatrol_csv`
+    - Process a single SkyPatrol CSV file through the pipeline.
+  - `main`
 - `calder/vsx_crossmatch.py`
   - `load_asassn_catalog`
   - `load_vsx_catalog`
   - `propagate_asassn_coords`
   - `vsx_coords`
   - `crossmatch_asassn_vsx`
+    - Return a df of ASAS-SN and VSX matches within match_radius
   - `write_crossmatch`
+    - Write matches to a timestamped CSV and return the path
   - `main`
 - `calder/vsx_filter.py`
   - `normalize_token`
   - `tokenize_classes`
   - `filter_vsx_classes`
+    - Screens out unwanted VSX variability classes.
+    - Discard precedence: if any EXCLUDE token present -> exclude (return True).
   - `load_vsx_catalog`
+    - Load the raw VSX catalog and coerce numeric columns.
   - `filter_vsx`
+    - Return a VSX subset excluding unwanted variability classes.
   - `load_masked_indexes`
+    - Concatenate all masked index CSVs into a single dataframe.
   - `collect_present_ids`
+    - Return the set of ASAS-SN IDs with .dat files present.
   - `write_clean_outputs`
+    - Write cleaned ASAS-SN index and VSX CSVs, returning their paths.
   - `main`
+    - Run VSX filtering and ASAS-SN index cleaning and write cleaned CSVs.
 - `calder/vsx_reproducibility.py`
   - `validate_columns`
   - `coords`

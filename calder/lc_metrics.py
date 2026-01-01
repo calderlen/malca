@@ -8,7 +8,7 @@ try:
         global_mean_baseline,
     )
 except ImportError:
-    from calder.lc_baseline import (
+    from lc_baseline import (
         per_camera_trend_baseline,
         per_camera_median_baseline,
         per_camera_mean_baseline,

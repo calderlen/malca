@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+                      
 """
 Plot SkyPatrol light curves with vertical lines marking detected peaks.
 """
@@ -29,7 +29,7 @@ def parse_peaks_jd(peaks_jd_str):
     if pd.isna(peaks_jd_str) or peaks_jd_str == "" or peaks_jd_str == "[]":
         return []
     try:
-        # Handle string representation of list
+                                              
         if isinstance(peaks_jd_str, str):
             peaks = ast.literal_eval(peaks_jd_str)
         else:
@@ -50,34 +50,34 @@ def plot_skypatrol_with_peaks(
     baseline_kwargs=None,
 ):
     """Plot a SkyPatrol light curve with detected peaks marked."""
-    # Read light curve
+                      
     df = read_skypatrol_csv(csv_path)
     if df.empty:
         print(f"Warning: {csv_path.name} is empty")
         return None
     
-    # Extract ID from filename
+                              
     asas_sn_id = csv_path.stem.split("-")[0]
     
-    # Get detection results for this object (handle string/number mismatch and rounding)
+                                                                                        
     results_df["asas_sn_id"] = results_df["asas_sn_id"].astype(str)
     
-    # Try exact match first
+                           
     result_row = results_df[results_df["asas_sn_id"] == str(asas_sn_id)]
     
-    # If no exact match, try matching by prefix (handle rounded IDs)
+                                                                    
     if result_row.empty:
-        # Remove trailing zeros and decimal points for comparison
+                                                                 
         asas_sn_id_clean = str(asas_sn_id).rstrip('0').rstrip('.')
         for idx, row_id in enumerate(results_df["asas_sn_id"]):
             row_id_clean = str(row_id).rstrip('0').rstrip('.')
-            # Check if one is a prefix of the other (for rounded IDs)
+                                                                     
             if asas_sn_id_clean.startswith(row_id_clean) or row_id_clean.startswith(asas_sn_id_clean):
-                # Also check if they're close numerically (within reasonable rounding)
+                                                                                      
                 try:
                     id_float = float(asas_sn_id)
                     row_float = float(row_id)
-                    # If IDs are within 1000 of each other, likely a rounding issue
+                                                                                   
                     if abs(id_float - row_float) < 1000:
                         result_row = results_df.iloc[[idx]]
                         break
@@ -89,11 +89,11 @@ def plot_skypatrol_with_peaks(
     
     result = result_row.iloc[0]
     
-    # Parse peak JDs
+                    
     g_peaks_jd = parse_peaks_jd(result.get("g_peaks_jd", []))
     v_peaks_jd = parse_peaks_jd(result.get("v_peaks_jd", []))
     
-    # Prepare data
+                  
     df = df[np.isfinite(df["JD"]) & np.isfinite(df["mag"])].copy()
     median_jd = df["JD"].median()
     if median_jd > 2000000:
@@ -105,21 +105,21 @@ def plot_skypatrol_with_peaks(
         g_peaks_plot = [jd - 8000.0 for jd in g_peaks_jd]
         v_peaks_plot = [jd - 8000.0 for jd in v_peaks_jd]
     
-    # Determine bands present
+                             
     bands_present = []
     if (df["v_g_band"] == 0).any():
-        bands_present.append(0)  # g band
+        bands_present.append(0)          
     if (df["v_g_band"] == 1).any():
-        bands_present.append(1)  # V band
+        bands_present.append(1)          
     
     if not bands_present:
         print(f"Warning: No valid bands in {csv_path.name}")
         return None
     
-    # Create 2x2 figure: rows = [main, residuals], cols = [V, g]
+                                                                
     fig, axes = plt.subplots(2, 2, figsize=figsize, constrained_layout=True, sharex="col")
     
-    # Get camera colors
+                       
     camera_ids = sorted(df["camera#"].dropna().unique())
     cmap = plt.get_cmap("tab20", max(len(camera_ids), 1))
     camera_colors = {cam: cmap(i % cmap.N) for i, cam in enumerate(camera_ids)}
@@ -129,24 +129,24 @@ def plot_skypatrol_with_peaks(
     band_peaks = {0: g_peaks_plot, 1: v_peaks_plot}
     band_peak_counts = {0: result.get("g_n_peaks", 0), 1: result.get("v_n_peaks", 0)}
     
-    # Process each band: V (1) on left, g (0) on right
-    for band_idx, band in enumerate([1, 0]):  # V (1) first, then g (0)
+                                                      
+    for band_idx, band in enumerate([1, 0]):                           
         if band not in bands_present:
-            # Hide axes for missing bands
+                                         
             axes[0, band_idx].set_visible(False)
             axes[1, band_idx].set_visible(False)
             continue
         
-        # Get band data
+                       
         band_df = df[df["v_g_band"] == band].copy()
         
-        # Filter out high-variance outliers that cause bad zoom
-        # Remove points with very large error bars (e.g., > 1 mag)
+                                                               
+                                                                  
         if "error" in band_df.columns:
-            error_threshold = 1.0  # mag
+            error_threshold = 1.0       
             band_df = band_df[band_df["error"] <= error_threshold].copy()
         
-        # Remove magnitude outliers (beyond 5 sigma from median)
+                                                                
         if not band_df.empty and "mag" in band_df.columns:
             mag_median = band_df["mag"].median()
             mag_std = band_df["mag"].std()
@@ -157,14 +157,14 @@ def plot_skypatrol_with_peaks(
                     (band_df["mag"] >= mag_lower) & (band_df["mag"] <= mag_upper)
                 ].copy()
         
-        # Calculate baseline and residuals
-        # Use original JD for baseline calculation, but keep JD_plot for plotting
+                                          
+                                                                                 
         if not band_df.empty:
-            # Use provided baseline function or default to per_camera_median_baseline
+                                                                                     
             baseline_func_to_use = baseline_func or per_camera_median_baseline
             baseline_kwargs_to_use = baseline_kwargs or {}
             
-            # Set default parameters for baseline functions that need them
+                                                                          
             if baseline_func_to_use in (per_camera_median_baseline, per_camera_mean_baseline):
                 if "days" not in baseline_kwargs_to_use:
                     baseline_kwargs_to_use["days"] = 300.0
@@ -205,7 +205,7 @@ def plot_skypatrol_with_peaks(
                 if "cam_col" not in baseline_kwargs_to_use:
                     baseline_kwargs_to_use["cam_col"] = "camera#"
             else:
-                # For global_mean_baseline and global_median_baseline
+                                                                     
                 if "t_col" not in baseline_kwargs_to_use:
                     baseline_kwargs_to_use["t_col"] = "JD"
                 if "mag_col" not in baseline_kwargs_to_use:
@@ -214,7 +214,7 @@ def plot_skypatrol_with_peaks(
                     baseline_kwargs_to_use["err_col"] = "error"
             
             band_df_baseline = baseline_func_to_use(band_df, **baseline_kwargs_to_use)
-            # Ensure JD_plot is preserved for plotting
+                                                      
             if "JD_plot" not in band_df_baseline.columns:
                 band_df_baseline["JD_plot"] = band_df["JD_plot"].values
             band_df_baseline["residual"] = band_df_baseline["mag"] - band_df_baseline["baseline"]
@@ -223,15 +223,15 @@ def plot_skypatrol_with_peaks(
             band_df_baseline["baseline"] = np.nan
             band_df_baseline["residual"] = np.nan
         
-        # Plot main light curve (top row)
+                                         
         ax_main = axes[0, band_idx]
         ax_main.invert_yaxis()
         
-        # Collect data ranges for tightening
+                                            
         mag_data = []
         err_data = []
         
-        # Plot data points by camera
+                                    
         legend_handles = {}
         for cam in camera_ids:
             subset = band_df[band_df["camera#"] == cam]
@@ -254,7 +254,7 @@ def plot_skypatrol_with_peaks(
                 markeredgewidth=0.3,
                 label=f"Camera {cam}",
             )
-            # Collect data ranges for tightening
+                                                
             mag_data.extend(subset["mag"].dropna().tolist())
             err_data.extend(subset["error"].dropna().tolist())
             if cam not in legend_handles:
@@ -268,7 +268,7 @@ def plot_skypatrol_with_peaks(
                     label=f"Camera {cam}"
                 )
         
-        # Plot baseline
+                       
         if not band_df_baseline.empty and "baseline" in band_df_baseline.columns:
             baseline_finite = band_df_baseline[np.isfinite(band_df_baseline["baseline"])]
             if not baseline_finite.empty:
@@ -283,7 +283,7 @@ def plot_skypatrol_with_peaks(
                     zorder=5,
                 )
         
-        # Plot vertical lines for detected peaks
+                                                
         peaks_plot = band_peaks[band]
         n_peaks = band_peak_counts[band]
         if peaks_plot and n_peaks > 0:
@@ -297,25 +297,25 @@ def plot_skypatrol_with_peaks(
                     zorder=10,
                 )
         
-        # Labels and formatting for main plot
+                                             
         band_label = band_labels.get(band, f"band {band}")
         ax_main.set_ylabel(f"{band_label} [mag]")
         ax_main.grid(True, which="both", linestyle="--", alpha=0.3)
         
-        # Add peak count to title
+                                 
         title_parts = [f"{band_label.upper()} band"]
         if n_peaks > 0:
             title_parts.append(f"({n_peaks} peak{'s' if n_peaks > 1 else ''})")
         ax_main.set_title(" ".join(title_parts))
         
-        # Tighten y-axis limits to fit data points with minimal padding
+                                                                       
         if mag_data:
             mag_with_err = []
             for i, mag_val in enumerate(mag_data):
                 if pd.notna(mag_val):
                     err_val = err_data[i] if i < len(err_data) and pd.notna(err_data[i]) else 0
                     mag_with_err.extend([mag_val - err_val, mag_val + err_val])
-            # Also include baseline in range
+                                            
             if not band_df_baseline.empty and "baseline" in band_df_baseline.columns:
                 baseline_vals = band_df_baseline["baseline"].dropna().tolist()
                 mag_with_err.extend(baseline_vals)
@@ -323,9 +323,9 @@ def plot_skypatrol_with_peaks(
                 mag_min = min(mag_with_err)
                 mag_max = max(mag_with_err)
                 mag_range = mag_max - mag_min
-                # Add small padding (1% of range, minimum 0.05 mag)
+                                                                   
                 padding = max(mag_range * 0.01, 0.05)
-                ax_main.set_ylim(mag_max + padding, mag_min - padding)  # Inverted for magnitude
+                ax_main.set_ylim(mag_max + padding, mag_min - padding)                          
         
         if legend_handles:
             ax_main.legend(
@@ -336,10 +336,10 @@ def plot_skypatrol_with_peaks(
                 ncol=min(len(legend_handles), 5),
             )
         
-        # Plot residuals (bottom row)
+                                     
         ax_resid = axes[1, band_idx]
         
-        # Collect residual data ranges for tightening
+                                                     
         resid_data = []
         resid_err_data = []
         
@@ -365,14 +365,14 @@ def plot_skypatrol_with_peaks(
                     markeredgecolor="black",
                     markeredgewidth=0.3,
                 )
-                # Collect data ranges for tightening
+                                                    
                 resid_data.extend(resid_finite["residual"].dropna().tolist())
                 resid_err_data.extend(resid_finite["error"].dropna().tolist())
         
-        # Zero line for residuals
+                                 
         ax_resid.axhline(0, color="gray", linestyle="-", linewidth=1, alpha=0.5, zorder=1)
         
-        # Plot vertical lines for detected peaks in residuals
+                                                             
         if peaks_plot and n_peaks > 0:
             for peak_jd in peaks_plot:
                 ax_resid.axvline(
@@ -384,12 +384,12 @@ def plot_skypatrol_with_peaks(
                     zorder=10,
                 )
         
-        # Labels and formatting for residuals
+                                             
         ax_resid.set_ylabel(f"{band_label} residual [mag]")
         ax_resid.grid(True, which="both", linestyle="--", alpha=0.3)
         ax_resid.set_xlabel(f"Julian Date - {int(JD_OFFSET)} [d]")
         
-        # Tighten y-axis limits to fit residual points with minimal padding
+                                                                           
         if resid_data:
             resid_with_err = []
             for i, resid_val in enumerate(resid_data):
@@ -400,11 +400,11 @@ def plot_skypatrol_with_peaks(
                 resid_min = min(resid_with_err)
                 resid_max = max(resid_with_err)
                 resid_range = resid_max - resid_min
-                # Add small padding (1% of range, minimum 0.05 mag)
+                                                                   
                 padding = max(resid_range * 0.01, 0.05)
                 ax_resid.set_ylim(resid_min - padding, resid_max + padding)
         
-        # Tighten y-axis limits to fit residual points with minimal padding
+                                                                           
         if not band_df_baseline.empty:
             resid_with_err = []
             for _, row in band_df_baseline.iterrows():
@@ -416,15 +416,15 @@ def plot_skypatrol_with_peaks(
                 resid_min = min(resid_with_err)
                 resid_max = max(resid_with_err)
                 resid_range = resid_max - resid_min
-                # Add small padding (1% of range, minimum 0.05 mag)
+                                                                   
                 padding = max(resid_range * 0.01, 0.05)
                 ax_resid.set_ylim(resid_min - padding, resid_max + padding)
     
-    # Remove the old loop that processed bands
-    # (This code is now replaced by the above)
-    # X-axis labels on bottom row (already set in loop above)
+                                              
+                                              
+                                                             
     
-    # Overall title
+                   
     source_name = result.get("source", asas_sn_id) if "source" in result else asas_sn_id
     category = result.get("category", "") if "category" in result else ""
     title_parts = [source_name]
@@ -433,7 +433,7 @@ def plot_skypatrol_with_peaks(
     title_parts.append("Known" if "Known" in str(category) else "New")
     fig.suptitle(" – ".join(title_parts), fontsize=12, fontweight="bold")
     
-    # Save or show
+                  
     if out_path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -448,7 +448,7 @@ def plot_skypatrol_with_peaks(
 
 
 def main():
-    # Baseline function mapping
+                               
     BASELINE_FUNCTIONS = {
         "global_mean": global_mean_baseline,
         "global_median": global_median_baseline,
@@ -499,13 +499,13 @@ def main():
     )
     args = parser.parse_args()
     
-    # Get baseline function
+                           
     baseline_func = BASELINE_FUNCTIONS[args.baseline]
     
-    # Set up baseline kwargs
+                            
     baseline_kwargs = {}
     
-    # Handle per_camera_trend separately (uses days_short and days_long)
+                                                                        
     if baseline_func == per_camera_trend_baseline:
         if args.baseline_days_short is not None:
             baseline_kwargs["days_short"] = args.baseline_days_short
@@ -514,25 +514,25 @@ def main():
         if args.baseline_min_points is not None:
             baseline_kwargs["min_points"] = args.baseline_min_points
     else:
-        # For other rolling baselines, use days parameter
+                                                         
         if args.baseline_days is not None:
             baseline_kwargs["days"] = args.baseline_days
         if args.baseline_min_points is not None:
             baseline_kwargs["min_points"] = args.baseline_min_points
         
-        # Set default days if not provided
+                                          
         if args.baseline_days is None:
             if baseline_func in (per_camera_median_baseline, per_camera_mean_baseline):
                 baseline_kwargs["days"] = 300.0
             elif baseline_func in (global_rolling_median_baseline, global_rolling_mean_baseline):
                 baseline_kwargs["days"] = 1000.0
     
-    # Load results
+                  
     if not args.results_csv.exists():
         parser.error(f"Results CSV file not found: {args.results_csv}")
     results_df = pd.read_csv(args.results_csv)
     
-    # Determine ID column name (check for common variations)
+                                                            
     id_column = None
     for col_name in ["asas_sn_id", "Source_ID", "source_id", "id"]:
         if col_name in results_df.columns:
@@ -545,7 +545,7 @@ def main():
             f"Found columns: {', '.join(results_df.columns)}"
         )
     
-    # Standardize to asas_sn_id for internal use
+                                                
     if id_column != "asas_sn_id":
         results_df["asas_sn_id"] = results_df[id_column].astype(str)
     
@@ -553,13 +553,13 @@ def main():
     print(f"Loaded {len(results_df)} results from {args.results_csv}")
     print(f"Using ID column: {id_column}")
     
-    # Determine which IDs to plot
+                                 
     if args.ids:
         ids_to_plot = [str(id) for id in args.ids]
     else:
         ids_to_plot = results_df["asas_sn_id"].tolist()
     
-    # Find CSV files
+                    
     csv_dir = Path(args.csv_dir)
     if not csv_dir.exists():
         print(f"Error: CSV directory not found: {csv_dir}")
@@ -568,16 +568,16 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    # Plot each light curve
+                           
     plotted = 0
     skipped = 0
     
-    # Build a mapping of available CSV files by their ID prefixes
-    # This handles cases where IDs in results are rounded (e.g., 377958000000.0 vs 377958261591)
+                                                                 
+                                                                                                
     available_csvs = {}
     for csv_path in csv_dir.glob("*-light-curves.csv"):
         csv_id = csv_path.stem.split("-")[0]
-        # Store both full ID and first 9 digits (for matching rounded IDs)
+                                                                          
         available_csvs[csv_id] = csv_path
         if len(csv_id) >= 9:
             prefix = csv_id[:9]
@@ -585,15 +585,15 @@ def main():
                 available_csvs[prefix] = csv_path
     
     for asas_sn_id in ids_to_plot:
-        # Try exact match first
+                               
         csv_path = csv_dir / f"{asas_sn_id}-light-curves.csv"
         
-        # If not found, try matching by prefix (handle rounded IDs)
+                                                                   
         if not csv_path.exists():
             csv_path = None
             asas_sn_id_str = str(asas_sn_id).rstrip('0').rstrip('.')
             
-            # Try prefix matching
+                                 
             if asas_sn_id_str in available_csvs:
                 csv_path = available_csvs[asas_sn_id_str]
             elif len(asas_sn_id_str) >= 9:
@@ -601,13 +601,13 @@ def main():
                 if prefix in available_csvs:
                     csv_path = available_csvs[prefix]
             else:
-                # Try numerical matching for rounded IDs
+                                                        
                 try:
                     id_float = float(asas_sn_id)
                     for csv_id, csv_file in available_csvs.items():
                         try:
                             csv_float = float(csv_id)
-                            # If IDs are within 1000 of each other, likely a rounding issue
+                                                                                           
                             if abs(id_float - csv_float) < 1000 and abs(id_float - csv_float) > 0:
                                 csv_path = csv_file
                                 break

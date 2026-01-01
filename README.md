@@ -10,7 +10,7 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 - `calder/lc_excursions.py`  
   Run dip/peak search (writes CSV/Parquet), with optional baseline override from `calder/lc_baseline.py`:  
   `python calder/lc_excursions.py --mode dips|peaks --out-dir ./results_dips --format csv --n-workers 10 --chunk-size 250000 [--mag-bin 12_12.5 ...]`  
-  Example with a baseline: `--baseline-func calder.lc_baseline:per_camera_median_baseline`
+  Example with a baseline: `--baseline-func lc_baseline:per_camera_median_baseline`
 
 - `calder/reproduce_candidates.py`  
   Search for peaks/dips from a list of candidates (default: brayden list):  
