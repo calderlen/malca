@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "calder"
+version = "0.0.0"
+description = "ASAS-SN excursion analysis utilities"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Calder" }]
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "tqdm",
+    "matplotlib",
+    "astropy",
+    "celerite2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
