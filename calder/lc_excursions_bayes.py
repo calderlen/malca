@@ -8,6 +8,7 @@ _os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 import argparse
 import glob
 import os
+import shutil
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -1307,6 +1308,17 @@ def main():
         default=5000,
         help="Write CSV in chunks of this many results. Default: auto (1000 for <100k files, 5000 for >=100k files). Set to 0 to disable chunking.",
     )
+    parser.add_argument(
+        "--tmp-dir",
+        type=str,
+        default=None,
+        help="Directory for temporary per-chunk CSVs when using --temp-merge (defaults to output dir sibling 'tmp_lc_bayes').",
+    )
+    parser.add_argument(
+        "--temp-merge",
+        action="store_true",
+        help="Write each chunk to a unique temp CSV and concatenate at the end (avoids concurrent appends).",
+    )
 
     args = parser.parse_args()
 
@@ -1368,8 +1380,9 @@ def main():
 
     results = []
     errors = []
+    temp_files = []
     
-    # Auto-determine chunk size if not specified
+    # Auto-determine chunk size if not specified (and not disabled)
     if args.chunk_size is None:
         # Adaptive: smaller chunks for smaller jobs, larger for huge jobs
         if len(expanded_inputs) < 10000:
@@ -1383,8 +1396,19 @@ def main():
         chunk_size = args.chunk_size
     else:
         chunk_size = None  # Disabled
+
+    # Decide output strategy
+    use_temp_merge = bool(args.temp_merge)
     total_written = 0
     out_fh = None
+    output_path = Path(args.output) if args.output else None
+    temp_dir = None
+    if use_temp_merge:
+        if output_path is None:
+            raise SystemExit("--temp-merge requires --output")
+        base_dir = Path(args.tmp_dir) if args.tmp_dir else output_path.parent
+        temp_dir = base_dir / "tmp_lc_bayes"
+        temp_dir.mkdir(parents=True, exist_ok=True)
 
     def _write_chunk(chunk_results, is_final=False):
         """Write a chunk of results to CSV."""
@@ -1393,20 +1417,23 @@ def main():
         nonlocal total_written, out_fh
         df_chunk = pd.DataFrame(chunk_results)
         
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Keep a single file handle open to avoid repeated open/close on networked filesystems
-        if out_fh is None:
-            file_exists = output_path.exists()
-            mode = "a" if file_exists else "w"
-            out_fh = open(output_path, mode, newline="")
-            header = not file_exists
+        if use_temp_merge:
+            part_path = temp_dir / f"{output_path.stem}_part_{len(temp_files):05d}.csv"
+            df_chunk.to_csv(part_path, index=False)
+            temp_files.append(part_path)
         else:
-            header = False
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            # Keep a single file handle open to avoid repeated open/close on networked filesystems
+            if out_fh is None:
+                file_exists = output_path.exists()
+                mode = "a" if file_exists else "w"
+                out_fh = open(output_path, mode, newline="")
+                header = not file_exists
+            else:
+                header = False
 
-        df_chunk.to_csv(out_fh, index=False, header=header)
-        out_fh.flush()
+            df_chunk.to_csv(out_fh, index=False, header=header)
+            out_fh.flush()
 
         total_written += len(chunk_results)
         if is_final:
@@ -1457,13 +1484,9 @@ def main():
     # Write any remaining results
     if results:
         _write_chunk(results, is_final=True)
-    elif args.output and total_written == 0:
+    elif args.output and total_written == 0 and not use_temp_merge:
         # No results at all - create empty file with headers
-        if chunk_size:
-            # We need to know the structure - create from first error or a dummy
-            # Actually, if there are no results, we might not know the structure
-            # So just write an empty file or skip
-            pass
+        pass
     else:
         for row in results:
             print(
@@ -1472,6 +1495,23 @@ def main():
                 f"dip_sig={row['dip_significant']} ({row['dip_best_morph']}) dip_dBIC={row['dip_best_delta_bic']:.1f}\t"
                 f"jump_sig={row['jump_significant']} ({row['jump_best_morph']}) jump_dBIC={row['jump_best_delta_bic']:.1f}"
             )
+
+    # Final merge of temp files if requested
+    if use_temp_merge and temp_files:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", newline="") as fout:
+            for i, part_path in enumerate(temp_files):
+                with open(part_path, "r") as fin:
+                    if i > 0:
+                        next(fin, None)  # skip header
+                    shutil.copyfileobj(fin, fout)
+        print(f"Merged {len(temp_files)} temp chunks into {args.output}", flush=True)
+        # Optional cleanup of temp files
+        for part_path in temp_files:
+            try:
+                part_path.unlink()
+            except OSError:
+                pass
 
     if errors:
         print(f"Completed with {len(errors)} failures.", flush=True)
