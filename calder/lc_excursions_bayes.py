@@ -632,14 +632,63 @@ def bayesian_excursion_significance(
     log_Pf_weighted = np.where(np.isfinite(log_Pf_weighted), log_Pf_weighted, -np.inf)
 
     log_mix = np.logaddexp(log_Pb_weighted, log_Pf_weighted)  # (M,P,N)
+    
+    # Diagnostic: Check log_mix before summing
+    log_mix_finite = np.isfinite(log_mix).sum()
+    log_mix_total = log_mix.size
+    if log_mix_finite == 0:
+        raise ValueError(
+            f"All log_mix values are NaN/inf: "
+            f"total={log_mix_total}, finite={log_mix_finite}, "
+            f"log_Pb_weighted_finite={np.isfinite(log_Pb_weighted).sum()}/{log_Pb_weighted.size}, "
+            f"log_Pf_weighted_finite={np.isfinite(log_Pf_weighted).sum()}/{log_Pf_weighted.size}"
+        )
+    
     loglik = np.sum(log_mix, axis=2)                            # (M,P)
 
     # posterior mode on the grid (uniform priors)
-    log_post_norm = loglik - logsumexp(loglik)
+    # Diagnostic: Check loglik before normalization
+    loglik_finite = np.isfinite(loglik).sum()
+    loglik_total = loglik.size
+    loglik_inf_neg = np.isinf(loglik) & (loglik < 0)
+    loglik_inf_neg_count = loglik_inf_neg.sum()
+    
+    if loglik_finite == 0:
+        # All values are NaN or inf
+        if loglik_inf_neg_count == loglik_total:
+            # All are -inf: this means all likelihoods were invalid (all NaN inputs)
+            raise ValueError(
+                f"All loglik values are -inf (all inputs were invalid): "
+                f"total={loglik_total}, finite={loglik_finite}, -inf={loglik_inf_neg_count}, "
+                f"This indicates all data points or baseline values were invalid."
+            )
+        else:
+            raise ValueError(
+                f"All loglik values are NaN/inf before normalization: "
+                f"total={loglik_total}, finite={loglik_finite}, "
+                f"NaN={np.isnan(loglik).sum()}, -inf={loglik_inf_neg_count}, +inf={np.isinf(loglik).sum() - loglik_inf_neg_count}"
+            )
+    
+    loglik_sum = logsumexp(loglik)
+    if not np.isfinite(loglik_sum):
+        raise ValueError(
+            f"logsumexp(loglik) is NaN/inf: "
+            f"loglik_sum={loglik_sum}, loglik_finite={loglik_finite}/{loglik_total}, "
+            f"loglik_min={np.nanmin(loglik) if loglik_finite > 0 else 'N/A'}, "
+            f"loglik_max={np.nanmax(loglik) if loglik_finite > 0 else 'N/A'}"
+        )
+    
+    log_post_norm = loglik - loglik_sum
     
     # Check if log_post_norm has any finite values
-    if not np.isfinite(log_post_norm).any():
-        raise ValueError("All log_posterior values are NaN/inf - cannot find best parameters")
+    log_post_finite = np.isfinite(log_post_norm).sum()
+    if log_post_finite == 0:
+        raise ValueError(
+            f"All log_posterior values are NaN/inf after normalization: "
+            f"total={log_post_norm.size}, finite={log_post_finite}, "
+            f"loglik_finite={loglik_finite}/{loglik_total}, loglik_sum={loglik_sum}, "
+            f"loglik_range=[{np.nanmin(loglik) if loglik_finite > 0 else 'N/A'}, {np.nanmax(loglik) if loglik_finite > 0 else 'N/A'}]"
+        )
     
     best_m_idx, best_p_idx = np.unravel_index(np.nanargmax(log_post_norm), log_post_norm.shape)
     best_mag_event = float(mag_grid[int(best_m_idx)])
