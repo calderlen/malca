@@ -6,6 +6,8 @@ _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 _os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import argparse
+import glob
+import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -24,6 +26,7 @@ except ImportError:
 
 
 # constants
+MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
 
 DEFAULT_BASELINE_KWARGS = dict(
     S0=0.0005,
@@ -807,8 +810,57 @@ def _process_one(
 
     compute_event_prob: bool,
 ):
-    df = read_lc_dat2(path)
+    # Handle full file path: read CSV directly or extract ID from path for .dat2 files
+    import os
+    path = str(path)
+    
+    if os.path.isfile(path) and (path.endswith('.csv') or path.endswith('-light-curves.csv')):
+        # Direct CSV file (SkyPatrol format)
+        try:
+            from calder.df_plot import read_skypatrol_csv
+        except ImportError:
+            from df_plot import read_skypatrol_csv
+        try:
+            result = read_skypatrol_csv(path)
+            if isinstance(result, tuple):
+                # If it returns a tuple, combine the dataframes
+                if len(result) == 2:
+                    df = pd.concat([result[0], result[1]], ignore_index=True) if not (result[0].empty and result[1].empty) else pd.DataFrame()
+                else:
+                    raise ValueError(f"read_skypatrol_csv returned unexpected tuple length: {len(result)}")
+            else:
+                df = result
+        except ValueError as e:
+            raise ValueError(f"Error reading {path}: {e}")
+    elif os.path.isfile(path) and path.endswith('.dat2'):
+        # .dat2 file - extract ID and directory
+        dir_path = os.path.dirname(path) or '.'
+        basename = os.path.basename(path)
+        asassn_id = basename.replace('.dat2', '')
+        try:
+            dfg, dfv = read_lc_dat2(asassn_id, dir_path)
+            # Combine g and v bands into single dataframe
+            df = pd.concat([dfg, dfv], ignore_index=True) if not (dfg.empty and dfv.empty) else pd.DataFrame()
+        except Exception as e:
+            raise ValueError(f"Error reading .dat2 file {path}: {e}")
+    else:
+        # Assume path is a directory - this requires knowing the ID, which we don't have
+        # Try to find CSV files in the directory
+        import glob
+        csv_files = sorted(glob.glob(os.path.join(path, '*-light-curves.csv')))
+        if csv_files:
+            # Use first CSV found (for batch processing, each file should be specified individually)
+            try:
+                from calder.df_plot import read_skypatrol_csv
+            except ImportError:
+                from df_plot import read_skypatrol_csv
+            df = read_skypatrol_csv(csv_files[0])
+        else:
+            raise ValueError(f"Cannot read light curve from path (not a CSV file and no CSVs found in directory): {path}")
 
+    if df.empty:
+        raise ValueError(f"Empty dataframe read from {path}")
+    
     res = run_bayesian_significance(
         df,
         trigger_mode=trigger_mode,
@@ -835,7 +887,7 @@ def _process_one(
     # Helper to extract best morphology info
     def get_best_morph_info(run_list):
         if not run_list:
-            return "none", 0.0, 0.0, 0.0
+            return "none", 0.0, 0.0
         # sort by run_sum descending (strongest detection first)
         best = sorted(run_list, key=lambda x: x['run_sum'], reverse=True)[0]
         
@@ -916,7 +968,25 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run Bayesian excursion scoring on light curves in parallel."
     )
-    parser.add_argument("inputs", nargs="+", help="Paths to light-curve files")
+    parser.add_argument(
+        "inputs",
+        nargs="*",
+        help="Paths to light-curve files (optional if using --mag-bin)",
+    )
+    parser.add_argument(
+        "--mag-bin",
+        dest="mag_bins",
+        action="append",
+        choices=MAG_BINS,
+        help="Process all light curves in this magnitude bin (can specify multiple times). "
+             "Light curves are found in <lc-path>/<mag_bin>/lc*_cal/*.dat2",
+    )
+    parser.add_argument(
+        "--lc-path",
+        type=str,
+        default="/data/poohbah/1/assassin/rowan.90/lcsv2",
+        help="Base path to light curve directories (default: /data/poohbah/1/assassin/rowan.90/lcsv2)",
+    )
     parser.add_argument(
         "--workers",
         type=int,
@@ -1014,6 +1084,59 @@ def main():
 
     compute_event_prob = (not args.no_event_prob)
 
+    # Collect input files from mag_bins if specified
+    import glob
+    import re
+    expanded_inputs = []
+    
+    # If mag_bins specified, find all .dat2 files in lcX_cal directories
+    if args.mag_bins:
+        lc_path = args.lc_path
+        for mag_bin in args.mag_bins:
+            mag_bin_dir = os.path.join(lc_path, mag_bin)
+            if not os.path.exists(mag_bin_dir):
+                print(f"Warning: mag_bin directory does not exist: {mag_bin_dir}", flush=True)
+                continue
+            
+            # Find all lc*_cal directories
+            lc_dirs = sorted(glob.glob(os.path.join(mag_bin_dir, "lc*_cal")))
+            if not lc_dirs:
+                print(f"Warning: No lc*_cal directories found in {mag_bin_dir}", flush=True)
+                continue
+            
+            print(f"Found {len(lc_dirs)} lc*_cal directories in {mag_bin}...", flush=True)
+            
+            # Find all .dat2 files in each lcX_cal directory
+            for lc_dir in lc_dirs:
+                dat2_files = sorted(glob.glob(os.path.join(lc_dir, "*.dat2")))
+                if dat2_files:
+                    expanded_inputs.extend(dat2_files)
+                    print(f"  {os.path.basename(lc_dir)}: {len(dat2_files)} .dat2 files", flush=True)
+            
+            print(f"Total .dat2 files in {mag_bin}: {len([f for f in expanded_inputs if mag_bin in f])}", flush=True)
+    
+    # Also add explicit input files
+    for pattern in args.inputs:
+        if '*' in pattern or '?' in pattern or '[' in pattern:
+            # It's a glob pattern, expand it
+            matches = glob.glob(pattern)
+            if matches:
+                expanded_inputs.extend(sorted(matches))
+            else:
+                print(f"Warning: glob pattern '{pattern}' matched no files", flush=True)
+        else:
+            # Regular path
+            expanded_inputs.append(pattern)
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    expanded_inputs = [x for x in expanded_inputs if not (x in seen or seen.add(x))]
+    
+    if not expanded_inputs:
+        raise SystemExit("No input files found. Specify --mag-bin or provide input file paths.")
+    
+    print(f"Processing {len(expanded_inputs)} light curve file(s)...", flush=True)
+
     results = []
     errors = []
 
@@ -1035,7 +1158,7 @@ def main():
                 run_sum_multiplier=args.run_sum_multiplier,
                 compute_event_prob=compute_event_prob,
             ): path
-            for path in args.inputs
+            for path in expanded_inputs
         }
 
         for fut in tqdm(as_completed(futs), total=len(futs), desc="LCs", unit="lc"):
@@ -1043,8 +1166,13 @@ def main():
             try:
                 results.append(fut.result())
             except Exception as e:
-                errors.append(dict(path=str(path), error=repr(e)))
+                import traceback
+                tb_str = traceback.format_exc()
+                errors.append(dict(path=str(path), error=repr(e), traceback=tb_str))
                 print(f"ERROR processing {path}: {e}", flush=True)
+                # Print full traceback for debugging
+                if "too many values to unpack" in str(e):
+                    print(f"Full traceback:\n{tb_str}", flush=True)
 
     if args.output:
         df_out = pd.DataFrame(results)
