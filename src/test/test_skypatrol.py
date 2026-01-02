@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from df_plot import read_skypatrol_csv
+from plot import read_skypatrol_csv
 from old.lc_excursions import lc_band_proc, per_camera_median_baseline
 from baseline import (
     global_mean_baseline,
@@ -79,7 +79,7 @@ def process_skypatrol_csv(csv_path: Path, **kwargs) -> dict:
             jd_last = float(df_v["JD"].iloc[-1])
     
                       
-    from lc_excursions import prefix_metrics
+    from old.lc_excursions import prefix_metrics
     g_metrics = prefix_metrics("g", g_res["metrics"])
     v_metrics = prefix_metrics("v", v_res["metrics"])
     

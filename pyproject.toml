@@ -28,7 +28,7 @@ include = ["old"]
 package-dir = {"" = "src"}
 py-modules = [
     "df_filter",
-    "df_plot",
+    "plot",
     "df_utils",
     "baseline",
     "lc_excursions",

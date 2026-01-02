@@ -928,7 +928,7 @@ def _process_one(
     
     """
     import os
-    from df_plot import read_skypatrol_csv
+    from plot import read_skypatrol_csv
     path = str(path)
     
     if os.path.isfile(path) and (path.endswith('.csv') or path.endswith('-light-curves.csv')):

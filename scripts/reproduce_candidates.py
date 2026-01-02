@@ -239,22 +239,22 @@ def _plot_light_curve_with_dips(
             ax.set_title(f"{source_id} - {band_label}-band (no data)", fontsize=12)
             return
 
-        df_plot = df_band.copy()
-        if "error" in df_plot.columns:
-            df_plot = df_plot[df_plot["error"] <= 1.0]
+        plot = df_band.copy()
+        if "error" in plot.columns:
+            plot = plot[plot["error"] <= 1.0]
 
         df_baseline = None
         try:
-            df_baseline = per_camera_gp_baseline(df_plot, **baseline_kwargs)
+            df_baseline = per_camera_gp_baseline(plot, **baseline_kwargs)
         except Exception:
             df_baseline = None
 
-        cam_col = "camera#" if "camera#" in df_plot.columns else None
-        if cam_col and cam_col in df_plot.columns:
-            cameras = sorted(df_plot[cam_col].dropna().unique())
+        cam_col = "camera#" if "camera#" in plot.columns else None
+        if cam_col and cam_col in plot.columns:
+            cameras = sorted(plot[cam_col].dropna().unique())
             for i, cam in enumerate(cameras):
-                cam_mask = df_plot[cam_col] == cam
-                cam_data = df_plot[cam_mask]
+                cam_mask = plot[cam_col] == cam
+                cam_data = plot[cam_mask]
                 if cam_data.empty:
                     continue
 
@@ -279,14 +279,14 @@ def _plot_light_curve_with_dips(
                             label=f"Baseline {label}"
                         )
         else:
-            if "error" in df_plot.columns:
+            if "error" in plot.columns:
                 ax.errorbar(
-                    df_plot["JD"], df_plot["mag"], yerr=df_plot["error"],
+                    plot["JD"], plot["mag"], yerr=plot["error"],
                     fmt="o", markersize=3, alpha=0.6,
                     label=f"{band_label}-band", elinewidth=1.0, capsize=1.5
                 )
             else:
-                ax.scatter(df_plot["JD"], df_plot["mag"], s=10, alpha=0.6, label=f"{band_label}-band")
+                ax.scatter(plot["JD"], plot["mag"], s=10, alpha=0.6, label=f"{band_label}-band")
 
             if df_baseline is not None and "baseline" in df_baseline.columns:
                 df_sorted = df_baseline.sort_values("JD")
@@ -329,9 +329,9 @@ def _plot_light_curve_with_dips(
                 dip_indices = np.asarray(dip_indices, dtype=int)
             
             if isinstance(dip_indices, np.ndarray) and dip_indices.size > 0:
-                valid = dip_indices[(dip_indices >= 0) & (dip_indices < len(df_plot))]
+                valid = dip_indices[(dip_indices >= 0) & (dip_indices < len(plot))]
                 if valid.size:
-                    dip_jds = df_plot.iloc[valid]["JD"].to_numpy()
+                    dip_jds = plot.iloc[valid]["JD"].to_numpy()
                     for jd in dip_jds:
                         ax.axvline(jd, alpha=0.3, linestyle="--", linewidth=1)
                     confirmed_count = len(dip_jds) # approximations

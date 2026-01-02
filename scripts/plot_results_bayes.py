@@ -13,7 +13,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-from df_plot import read_skypatrol_csv, JD_OFFSET
+from plot import read_skypatrol_csv, JD_OFFSET
 from excursions_bayes import (
     run_bayesian_significance,
     gaussian,

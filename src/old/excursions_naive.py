@@ -11,7 +11,7 @@ from concurrent.futures import ProcessPoolExecutor
 from baseline import per_camera_trend_baseline, per_camera_median_baseline
 from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
 from df_utils import peak_search_residual_baseline, clean_lc, empty_metrics
-from lc_metrics import run_metrics, is_dip_dominated
+from old.lc_metrics import run_metrics, is_dip_dominated
 
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks

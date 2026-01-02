@@ -6,6 +6,11 @@ from typing import Iterable
 
 import pandas as pd
 
+# Allow importing helper data from the scripts directory
+from pathlib import Path as _Path
+import sys as _sys
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_sys.path.append(str(_PROJECT_ROOT / "scripts"))
 from reproduce_candidates import brayden_candidates
 
 MANIFEST_PATH = Path("lc_manifest.csv")
