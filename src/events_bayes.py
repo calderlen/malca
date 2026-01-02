@@ -377,7 +377,7 @@ def summarize_kept_runs(kept_runs, jd: np.ndarray, score_vec: np.ndarray):
     )
 
 
-def bayesian_excursion_significance(
+def bayesian_event_significance(
     df: pd.DataFrame,
     *,
     kind: str = "dip",
@@ -565,18 +565,18 @@ def bayesian_excursion_significance(
         log_Pb_vec = log_gaussian(mags, baseline_mags, errs)
         log_Pb_grid = np.broadcast_to(log_Pb_vec, (M, N))
         log_Pf_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)
-        excursion_component = "faint"
+        event_component = "faint"
 
     elif kind == "jump":
         log_Pb_grid = log_gaussian(mags[None, :], mag_grid[:, None], errs)
         log_Pf_vec = log_gaussian(mags, baseline_mags, errs)
         log_Pf_grid = np.broadcast_to(log_Pf_vec, (M, N))
-        excursion_component = "bright"
+        event_component = "bright"
         
         if not np.isfinite(log_Pf_vec).any():
             raise ValueError("All baseline likelihood values are NaN/inf")
         if not np.isfinite(log_Pb_grid).any():
-            raise ValueError("All excursion likelihood values are NaN/inf")
+            raise ValueError("All event likelihood values are NaN/inf")
 
     else:
         raise ValueError("kind must be 'dip' or 'jump'")
@@ -588,7 +588,7 @@ def bayesian_excursion_significance(
         raise ValueError(
             "No valid likelihood contributions after baseline: "
             f"total={total_points}, baseline_finite={np.isfinite(log_Pb_grid).sum()}, "
-            f"excursion_finite={np.isfinite(log_Pf_grid).sum()}"
+            f"event_finite={np.isfinite(log_Pf_grid).sum()}"
         )
     if n_valid_points < total_points:
         mags = mags[valid_points]
@@ -702,7 +702,7 @@ def bayesian_excursion_significance(
             bright_prob = float(np.exp(log_bright - log_norm))
             faint_prob = float(np.exp(log_faint - log_norm))
 
-            if excursion_component == "faint":
+            if event_component == "faint":
                 event_prob[j] = faint_prob
             else:
                 event_prob[j] = bright_prob
@@ -854,7 +854,7 @@ def run_bayesian_significance(
 
     df_base = baseline_func(df, **baseline_kwargs) if baseline_func is not None else None
 
-    dip = bayesian_excursion_significance(
+    dip = bayesian_event_significance(
         df,
         kind="dip",
         baseline_func=None,
@@ -878,7 +878,7 @@ def run_bayesian_significance(
         compute_event_prob=compute_event_prob,
     )
 
-    jump = bayesian_excursion_significance(
+    jump = bayesian_event_significance(
         df,
         kind="jump",
         baseline_func=None,
@@ -1078,7 +1078,7 @@ def _process_one(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run Bayesian excursion scoring on light curves in parallel."
+        description="Run Bayesian event scoring on light curves in parallel."
     )
     parser.add_argument(
         "inputs",
@@ -1184,7 +1184,7 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="/home/lenhart.106/Documents/asassn-variability/outputs/lc_excursions_bayes_results.parquet",
+        default="/home/lenhart.106/Documents/asassn-variability/outputs/lc_events_bayes_results.parquet",
         help="Parquet path for results. If --mag-bin is set, the bin name is appended to the filename.",
     )
     parser.add_argument(

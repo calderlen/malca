@@ -1,4 +1,4 @@
-module ExcursionsBayes
+module EventsBayes
 
 import Base: @kwdef
 using DataFrames
@@ -310,7 +310,7 @@ function summarize_kept_runs(kept_runs::Vector{Vector{Int}}, jd, score_vec)
     )
 end
 
-function bayesian_excursion_significance(
+function bayesian_event_significance(
     df::DataFrame;
     kind::String="dip",
     mag_col::Symbol=:mag,
@@ -429,14 +429,14 @@ function bayesian_excursion_significance(
         log_Pb_vec = log_gaussian(mags, baseline_mags, errs)
         log_Pb_grid = repeat(log_Pb_vec', M, 1)
         log_Pf_grid = log_gaussian(mags', mag_grid, errs')
-        excursion_component = "faint"
+        event_component = "faint"
     elseif kind == "jump"
         log_Pb_grid = log_gaussian(mags', mag_grid, errs')
         log_Pf_vec = log_gaussian(mags, baseline_mags, errs)
         log_Pf_grid = repeat(log_Pf_vec', M, 1)
-        excursion_component = "bright"
+        event_component = "bright"
         !any(isfinite.(log_Pf_vec)) && error("All baseline likelihood values are NaN/inf")
-        !any(isfinite.(log_Pb_grid)) && error("All excursion likelihood values are NaN/inf")
+        !any(isfinite.(log_Pb_grid)) && error("All event likelihood values are NaN/inf")
     else
         error("kind must be 'dip' or 'jump'")
     end
@@ -521,7 +521,7 @@ function bayesian_excursion_significance(
             log_norm = logsumexp([log_bright, log_faint])
             bright_prob = exp(log_bright - log_norm)
             faint_prob = exp(log_faint - log_norm)
-            if excursion_component == "faint"
+            if event_component == "faint"
                 event_prob[j] = faint_prob
             else
                 event_prob[j] = bright_prob
@@ -649,7 +649,7 @@ function run_bayesian_significance(
     df = clean_lc(df)
     df_base = baseline_func !== nothing ? baseline_func(df; baseline_kwargs...) : nothing
 
-    dip = bayesian_excursion_significance(
+    dip = bayesian_event_significance(
         df;
         kind="dip",
         baseline_func=nothing,
@@ -673,7 +673,7 @@ function run_bayesian_significance(
         compute_event_prob=compute_event_prob,
     )
 
-    jump = bayesian_excursion_significance(
+    jump = bayesian_event_significance(
         df;
         kind="jump",
         baseline_func=nothing,

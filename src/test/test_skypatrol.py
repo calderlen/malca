@@ -1,6 +1,6 @@
                       
 """
-Test the excursion finder pipeline on SkyPatrol light curves.
+Test the event finder pipeline on SkyPatrol light curves.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 
 from plot import read_skypatrol_csv
-from old.lc_excursions import lc_band_proc, per_camera_median_baseline
+from old.lc_events import lc_band_proc, per_camera_median_baseline
 from baseline import (
     global_mean_baseline,
     global_median_baseline,
@@ -79,7 +79,7 @@ def process_skypatrol_csv(csv_path: Path, **kwargs) -> dict:
             jd_last = float(df_v["JD"].iloc[-1])
     
                       
-    from old.lc_excursions import prefix_metrics
+    from old.lc_events import prefix_metrics
     g_metrics = prefix_metrics("g", g_res["metrics"])
     v_metrics = prefix_metrics("v", v_res["metrics"])
     
@@ -126,7 +126,7 @@ def main():
     }
     
     parser = argparse.ArgumentParser(
-        description="Test excursion finder on SkyPatrol light curves",
+        description="Test event finder on SkyPatrol light curves",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"Available baseline functions: {', '.join(BASELINE_FUNCTIONS.keys())}"
     )

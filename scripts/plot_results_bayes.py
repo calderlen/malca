@@ -1,6 +1,6 @@
                       
 """
-Plot light curves with Bayesian excursion detection results, showing run fits overlaid.
+Plot light curves with Bayesian event detection results, showing run fits overlaid.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 from plot import read_skypatrol_csv, JD_OFFSET
-from excursions_bayes import (
+from events_bayes import (
     run_bayesian_significance,
     gaussian,
     paczynski,
@@ -359,7 +359,7 @@ def plot_bayes_results(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot light curves with Bayesian excursion detection results"
+        description="Plot light curves with Bayesian event detection results"
     )
     parser.add_argument("csv_paths", nargs="+", help="Path(s) to light curve CSV file(s)")
     parser.add_argument(

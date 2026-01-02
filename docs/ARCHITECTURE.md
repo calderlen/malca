@@ -1,6 +1,6 @@
 
 ## Modules
-- `src/old/lc_excursions.py`
+- `src/old/lc_events.py`
   - `clean_lc`
     - removes saturated light curves
     - mask any NaN's in JD and mag (may be unnecessary?)
@@ -24,9 +24,9 @@
     - intakes a single light curve's g and v bands
     - finds the first and last jd
     - outputs a dict summarizing information about the light curve
-  - `excursion_finder`
+  - `event_finder`
     - orchestrates parallel processing of light curves (record prep, worker submission, peak/dip analysis via `lc_proc`, and buffered writing of results) test
-- `src/old/lc_excursions_naive.py`
+- `src/old/lc_events_naive.py`
   - `clean_lc`
   - `empty_metrics`
   - `lc_proc_naive`
@@ -165,7 +165,7 @@
     - - RealTerm (OU mixture): a1, rho1, a2, rho2 (for backward compatibility)
     - 
     - If RealTerm parameters are explicitly provided, they take precedence.
-- `src/old/lc_excursions.py`
+- `src/old/lc_events.py`
   - `gaussian`
   - `mag_to_delta`
     - Compute delta relative to a robust baseline.
@@ -193,9 +193,9 @@
     - 
     - mode="dips": use (mag-R) biweight delta, Gaussian fits, and dip metrics.
     - mode="peaks": use (R-mag) biweight delta, Paczynski fits, no dip metrics.
-  - `excursion_finder`
-    - Combined excursion finder (dips or peaks) using efficient process pool.
-- `src/excursions_bayes.py`
+  - `event_finder`
+    - Combined event finder (dips or peaks) using efficient process pool.
+- `src/events_bayes.py`
   - `gaussian`
     - gaussian kernel + baseline term
   - `paczynski`
@@ -214,7 +214,7 @@
   - `filter_runs`
     - filter runs by minimum points, minimum duration, per_point_threshold, sum_threshold; returns dict of kept runs' starting and ending indices/JDs, number of points
   - `summarize_kept_runs`
-  - `bayesian_excursion_significance`
+  - `bayesian_event_significance`
     - Returns a dict including:
     -   - log_bf_local (N,)
     -   - event_probability (N,) if compute_event_prob
@@ -226,7 +226,7 @@
     - Compute baseline ONCE, then reuse it for dip & jump scoring.
   - `_process_one`
   - `main`
-- `src/old/lc_excursions_naive.py`
+- `src/old/lc_events_naive.py`
   - `lc_proc_naive`
   - `dip_finder_naive`
     - run the naive dip search across one or more magnitude bins.

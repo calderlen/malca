@@ -9,9 +9,9 @@ import pandas as pd
 from scipy import stats
 import matplotlib.pyplot as pl
 
-from lc_excursions_naive import dip_finder_naive
-from lc_excursions import excursion_finder
-from excursions_bayes import run_bayesian_significance
+from old.lc_events_naive import dip_finder_naive
+from old.lc_events import event_finder
+from events_bayes import run_bayesian_significance
 from lc_utils import read_lc_dat2
 from baseline import per_camera_gp_baseline
 
@@ -421,7 +421,7 @@ def build_reproduction_report(
         )
 
     elif method == "biweight":
-        rows = excursion_finder(
+        rows = event_finder(
             mode="dips",
             mag_bins=sorted(target_map),
             out_dir=out_dir,

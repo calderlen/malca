@@ -3,12 +3,12 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "calder"
-version = "0.0.0"
-description = "ASAS-SN excursion analysis utilities"
+name = "asassn-variability"
+version = "0.1a0"
+description = "ASAS-SN event analysis utilities"
 readme = "README.md"
 requires-python = ">=3.9"
-authors = [{ name = "Calder" }]
+authors = [{ name = "Calder Lenhart" }]
 dependencies = [
     "numpy",
     "pandas",
@@ -22,22 +22,16 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["old"]
+include = ["*"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 py-modules = [
-    "df_filter",
-    "plot",
-    "df_utils",
     "baseline",
-    "lc_excursions",
-    "lc_excursions_bayes",
-    "lc_excursions_naive",
-    "lc_metrics",
+    "df_utils",
+    "events_bayes",
+    "filter",
     "lc_utils",
+    "plot",
     "stats",
-    "vsx_crossmatch",
-    "vsx_filter",
-    "vsx_reproducibility",
 ]

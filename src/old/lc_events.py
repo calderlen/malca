@@ -582,7 +582,7 @@ def lc_proc(
 
     return row
 
-def excursion_finder(
+def event_finder(
     *,
     mode="dips",
     index_path="/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked/",
@@ -602,7 +602,7 @@ def excursion_finder(
     return_rows: bool = False,
     ) -> pd.DataFrame | None:
     """
-    Combined excursion finder (dips or peaks) using efficient process pool.
+    Combined event finder (dips or peaks) using efficient process pool.
     """
 
     def _normalize_target_ids(target_ids_by_bin: dict[str, set[str]] | None):
@@ -770,7 +770,7 @@ def excursion_finder(
         max_inflight = max(4, n_workers * 4)
 
                  
-    out_path = os.path.join(out_dir, f"excursions_{mode}.{out_format}")
+    out_path = os.path.join(out_dir, f"events_{mode}.{out_format}")
     
                                                             
     target_ids_norm = _normalize_target_ids(target_ids_by_bin)
@@ -799,7 +799,7 @@ def excursion_finder(
         return pd.DataFrame(collected_rows_list)
     return None
 
-__all__ = ["MAG_BINS", "lc_proc", "excursion_finder"]
+__all__ = ["MAG_BINS", "lc_proc", "event_finder"]
 
                
 if __name__ == "__main__":
@@ -813,7 +813,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     bins = args.mag_bins or MAG_BINS
 
-    excursion_finder(
+    event_finder(
         mode=args.mode,
         mag_bins=bins,
         out_dir=args.out_dir,

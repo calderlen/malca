@@ -7,9 +7,9 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
   Build a csv/parquet file mapping ASAS-SN IDs to LC paths:  
   `python scripts/lc_manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.csv [--mag-bin 12_12.5 ...]`
 
-- `src/excursions_bayes.py`  
+- `src/events_bayes.py`  
   Bayesian dip/peak search (writes CSV/Parquet), with optional baseline override from `src/baseline.py`:  
-  `python src/excursions_bayes.py --mode dips|peaks --out-dir ./results_bayes --chunk-size 5000 [--mag-bin 12_12.5 ...]`  
+  `python src/events_bayes.py --mode dips|peaks --out-dir ./results_bayes --chunk-size 5000 [--mag-bin 12_12.5 ...]`  
   Example with a baseline: `--baseline-func baseline:per_camera_median_baseline`
 
 - `scripts/reproduce_candidates.py`  
@@ -53,13 +53,13 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 ├── src
 │   ├── baseline.py
 │   ├── df_utils.py
-│   ├── excursions_bayes.py
+│   ├── events_bayes.py
 │   ├── filter.py
 │   ├── lc_utils.py
 │   ├── old
 │   │   ├── __init__.py
-│   │   ├── lc_excursions_naive.py
-│   │   ├── lc_excursions.py
+│   │   ├── lc_events_naive.py
+│   │   ├── lc_events.py
 │   │   └── lc_metrics.py
 │   ├── plot.py
 │   ├── stats.py
