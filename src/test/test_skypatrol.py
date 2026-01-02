@@ -10,8 +10,8 @@ import pandas as pd
 import numpy as np
 
 from df_plot import read_skypatrol_csv
-from lc_excursions import lc_band_proc, per_camera_median_baseline
-from lc_baseline import (
+from old.lc_excursions import lc_band_proc, per_camera_median_baseline
+from baseline import (
     global_mean_baseline,
     global_median_baseline,
     global_rolling_median_baseline,
@@ -243,4 +243,3 @@ def main():
 if __name__ == "__main__":
     import sys
     sys.exit(main())
-

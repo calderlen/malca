@@ -8,20 +8,18 @@ import os
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 
-from calder.lc_baseline import per_camera_trend_baseline, per_camera_median_baseline
-from calder.lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
-from calder.df_utils import peak_search_residual_baseline, clean_lc, empty_metrics
-from calder.lc_metrics import run_metrics, is_dip_dominated
+from baseline import per_camera_trend_baseline, per_camera_median_baseline
+from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+from df_utils import peak_search_residual_baseline, clean_lc, empty_metrics
+from lc_metrics import run_metrics, is_dip_dominated
 
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 from astropy.stats import biweight_location, biweight_scale
-from lc_metrics import run_metrics, is_dip_dominated
 
 lc_dir_masked = "/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked"
 
 MAG_BINS = ['12_12.5','12.5_13','13_13.5','13.5_14','14_14.5','14.5_15']
-from df_utils import clean_lc, empty_metrics
 
 def lc_proc_naive(
     record: dict,

@@ -1,6 +1,9 @@
 .vscode/
 *.pyc
 __pycache__/
+*.kate-swp
+asassn_index_masked_concat_cleaned_*.csv
+asassn_x_vsx_matches_*.csv
 /data/
 /output/
 .ipynb_checkpoints/
@@ -17,3 +20,4 @@ dist/
 *.egg-info/
 dip/
 ltv/
+src/vsxcat.*

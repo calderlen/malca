@@ -21,6 +21,22 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["old"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+py-modules = [
+    "df_filter",
+    "df_plot",
+    "df_utils",
+    "lc_baseline",
+    "lc_excursions",
+    "lc_excursions_bayes",
+    "lc_excursions_naive",
+    "lc_metrics",
+    "lc_utils",
+    "stats",
+    "vsx_crossmatch",
+    "vsx_filter",
+    "vsx_reproducibility",
+]

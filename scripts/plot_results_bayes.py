@@ -13,14 +13,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-from calder.df_plot import read_skypatrol_csv, JD_OFFSET
-from calder.lc_excursions_bayes import (
+from df_plot import read_skypatrol_csv, JD_OFFSET
+from excursions_bayes import (
     run_bayesian_significance,
     gaussian,
     paczynski,
     per_camera_gp_baseline,
 )
-from calder.lc_baseline import (
+from baseline import (
     global_mean_baseline,
     global_median_baseline,
     global_rolling_median_baseline,
@@ -448,4 +448,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

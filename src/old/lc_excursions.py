@@ -9,10 +9,10 @@ import warnings
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from calder.lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
-from calder.lc_metrics import run_metrics, is_dip_dominated
-from calder.lc_baseline import per_camera_median_baseline
-from calder.df_utils import clean_lc, empty_metrics
+from lc_utils import read_lc_dat2, read_lc_raw, match_index_to_lc
+from old.lc_metrics import run_metrics, is_dip_dominated
+from baseline import per_camera_median_baseline
+from df_utils import clean_lc, empty_metrics
 
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
@@ -34,8 +34,6 @@ lc_13_13_5 = lc_dir_masked + '/13_13.5'
 lc_13_5_14 = lc_dir_masked + '/13.5_14'
 lc_14_14_5 = lc_dir_masked + '/14_14.5'
 lc_14_5_15 = lc_dir_masked + '/14.5_15'
-
-from df_utils import clean_lc
 
 METRIC_NAMES = (
     "n_dip_runs",
@@ -74,7 +72,7 @@ def mag_to_delta(
     Compute delta relative to a robust baseline.
 
     - Default: global biweight location/scale on the full light curve.
-    - If baseline_func is provided (e.g., from lc_baseline.py), it is called as
+    - If baseline_func is provided (e.g., from baseline.py), it is called as
       baseline_func(df, **baseline_kwargs). A "baseline" column is expected in the
       returned DataFrame; residuals are mag - baseline. A robust scale on residuals
       is then used in the denominator.

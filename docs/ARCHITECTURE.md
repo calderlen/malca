@@ -1,6 +1,6 @@
 
 ## Modules
-- `calder/lc_excursions.py`
+- `src/old/lc_excursions.py`
   - `clean_lc`
     - removes saturated light curves
     - mask any NaN's in JD and mag (may be unnecessary?)
@@ -26,7 +26,7 @@
     - outputs a dict summarizing information about the light curve
   - `excursion_finder`
     - orchestrates parallel processing of light curves (record prep, worker submission, peak/dip analysis via `lc_proc`, and buffered writing of results) test
-- `calder/lc_excursions_naive.py`
+- `src/old/lc_excursions_naive.py`
   - `clean_lc`
   - `empty_metrics`
   - `lc_proc_naive`
@@ -34,7 +34,7 @@
     - finds peaks in baseline residuals for a single light curve
     - computes dip metrics for a single light curve
   - `dip_finder_naive`
-- `calder/lc_baseline.py`
+- `src/baseline.py`
   - `global_mean_baseline`
   - `global_median_baseline`
   - `rolling_time_median`
@@ -45,12 +45,12 @@
   - `per_camera_median_baseline`
   - `per_camera_trend_baseline`
   - `per_camera_gp_baseline`
-- `calder/lc_metrics.py`
+- `src/old/lc_metrics.py`
   - `find_runs`
   - `run_metrics`
   - `is_dip_dominated`
   - `multi_camera_confirmation`
-- `calder/lc_utils.py`
+- `src/lc_utils.py`
   - `year_to_jd`
   - `jd_to_year`
   - `read_lc_dat`
@@ -59,7 +59,7 @@
   - `custom_id`
   - `plotparams`
   - `divide_cameras`
-- `calder/df_filter.py`
+- `src/filter.py`
   - `_call_filter_by_name`
   - `_filter_candidates_chunk`
   - `_run_step_sequential`
@@ -83,12 +83,12 @@
   - `_run_one_file`
   - `_build_cli_parser`
   - `main`
-- `calder/df_utils.py`
+- `src/df_utils.py`
   - `year_to_jd`
   - `jd_to_year`
   - `peak_search_residual_baseline`
   - `peak_search_biweight_delta`
-- `calder/df_plot.py`
+- `src/plot.py`
   - `read_asassn_dat`
     - Read an ASAS-SN .dat file using whitespace separation.
   - `read_skypatrol_csv`
@@ -101,7 +101,7 @@
   - `plot_lc_with_residuals`
   - `plot_one_lc`
   - `plot_many_lc`
-- `calder/df_utils.py`
+- `src/df_utils.py`
   - `clean_lc`
   - `year_to_jd`
   - `jd_to_year`
@@ -111,13 +111,13 @@
   - `peak_search_biweight_delta`
     - Tzanidakis et al. (2025) biweight magnitude deviation
   - `empty_metrics`
-- `calder/fp_analysis.py`
+- `scripts/fp_analysis.py`
   - `_load_many`
   - `_band_flags`
   - `summarize`
   - `retention`
   - `main`
-- `calder/lc_baseline.py`
+- `src/baseline.py`
   - `global_mean_baseline`
   - `global_median_baseline`
   - `rolling_time_median`
@@ -165,13 +165,13 @@
     - - RealTerm (OU mixture): a1, rho1, a2, rho2 (for backward compatibility)
     - 
     - If RealTerm parameters are explicitly provided, they take precedence.
-- `calder/lc_excursions.py`
+- `src/old/lc_excursions.py`
   - `gaussian`
   - `mag_to_delta`
     - Compute delta relative to a robust baseline.
     - 
     - - Default: global biweight location/scale on the full light curve.
-    - - If baseline_func is provided (e.g., from lc_baseline.py), it is called as
+    - - If baseline_func is provided (e.g., from baseline.py), it is called as
     -   baseline_func(df, **baseline_kwargs). A "baseline" column is expected in the
     -   returned DataFrame; residuals are mag - baseline. A robust scale on residuals
     -   is then used in the denominator.
@@ -195,7 +195,7 @@
     - mode="peaks": use (R-mag) biweight delta, Paczynski fits, no dip metrics.
   - `excursion_finder`
     - Combined excursion finder (dips or peaks) using efficient process pool.
-- `calder/lc_excursions_bayes.py`
+- `src/excursions_bayes.py`
   - `gaussian`
     - gaussian kernel + baseline term
   - `paczynski`
@@ -226,24 +226,24 @@
     - Compute baseline ONCE, then reuse it for dip & jump scoring.
   - `_process_one`
   - `main`
-- `calder/lc_excursions_naive.py`
+- `src/old/lc_excursions_naive.py`
   - `lc_proc_naive`
   - `dip_finder_naive`
     - run the naive dip search across one or more magnitude bins.
-- `calder/lc_manifest.py`
+- `scripts/lc_manifest.py`
   - `_iter_source_records`
     - Yield dictionaries that describe each source found in the masked index files.
   - `build_manifest_dataframe`
   - `parse_args`
   - `main`
-- `calder/lc_metrics.py`
+- `src/old/lc_metrics.py`
   - `find_runs`
   - `run_metrics`
     - calculates dip and jump metrics for a given lc df and returns as a dict
   - `is_dip_dominated`
     - returns True if the the dip fraction from the metrics dict is above a certain value, currently 2/3
   - `multi_camera_confirmation`
-- `calder/lc_utils.py`
+- `src/lc_utils.py`
   - `year_to_jd`
     - ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
   - `jd_to_year`
@@ -259,17 +259,17 @@
     - ADAPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
   - `divide_cameras`
     - ADAPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
-- `calder/plot_bayes_results.py`
+- `scripts/plot_results_bayes.py`
   - `plot_bayes_results`
     - Plot a light curve with Bayesian detection results and run fits.
   - `main`
-- `calder/plot_skypatrol_peaks.py`
+- `scripts/plot_results.py`
   - `parse_peaks_jd`
     - Parse peaks_jd string from CSV (e.g., "[2458327.89, 2458480.59]") into list of floats.
   - `plot_skypatrol_with_peaks`
     - Plot a SkyPatrol light curve with detected peaks marked.
   - `main`
-- `calder/reproduce_candidates.py`
+- `scripts/reproduce_candidates.py`
   - `_load_manifest_df`
   - `_dataframe_from_candidates`
   - `_target_map`
@@ -279,7 +279,7 @@
   - `build_reproduction_report`
   - `_build_parser`
   - `main`
-- `calder/stats.py`
+- `src/stats.py`
   - `weighted_mean`
   - `robust_sigma`
   - `pct`
@@ -291,7 +291,7 @@
   - `print_summary`
   - `load_dat`
   - `main`
-- `calder/test.py`
+- `src/test.py`
   - `all_candidate_ids`
     - Return every source_id from brayden_candidates as strings.
   - `pick_id_column`
@@ -299,11 +299,11 @@
   - `locate_targets`
   - `print_matches`
   - `main`
-- `calder/test_skypatrol.py`
+- `src/test_skypatrol.py`
   - `process_skypatrol_csv`
     - Process a single SkyPatrol CSV file through the pipeline.
   - `main`
-- `calder/vsx_crossmatch.py`
+- `src/vsx_crossmatch.py`
   - `load_asassn_catalog`
   - `load_vsx_catalog`
   - `propagate_asassn_coords`
@@ -313,7 +313,7 @@
   - `write_crossmatch`
     - Write matches to a timestamped CSV and return the path
   - `main`
-- `calder/vsx_filter.py`
+- `src/vsx_filter.py`
   - `normalize_token`
   - `tokenize_classes`
   - `filter_vsx_classes`
@@ -331,14 +331,14 @@
     - Write cleaned ASAS-SN index and VSX CSVs, returning their paths.
   - `main`
     - Run VSX filtering and ASAS-SN index cleaning and write cleaned CSVs.
-- `calder/vsx_reproducibility.py`
+- `src/vsx_reproducibility.py`
   - `validate_columns`
   - `coords`
   - `match_catalog`
   - `run_matches`
   - `main`
-- `calder/lc_peaks.py`
-- `calder/test.py`
+- `src/lc_peaks.py`
+- `src/test.py`
   - `all_candidate_ids`
   - `pick_id_column`
   - `locate_targets`

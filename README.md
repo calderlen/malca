@@ -3,26 +3,26 @@
 Pipeline to search for peaks and dips in ASAS-SN light curves
 
 ## How to use
-- `calder/lc_manifest.py`  
+- `scripts/lc_manifest.py`  
   Build a csv/parquet file mapping ASAS-SN IDs to LC paths:  
-  `python calder/lc_manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.csv [--mag-bin 12_12.5 ...]`
+  `python scripts/lc_manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.csv [--mag-bin 12_12.5 ...]`
 
-- `calder/lc_excursions.py`  
-  Run dip/peak search (writes CSV/Parquet), with optional baseline override from `calder/lc_baseline.py`:  
-  `python calder/lc_excursions.py --mode dips|peaks --out-dir ./results_dips --format csv --n-workers 10 --chunk-size 250000 [--mag-bin 12_12.5 ...]`  
-  Example with a baseline: `--baseline-func lc_baseline:per_camera_median_baseline`
+- `src/excursions_bayes.py`  
+  Bayesian dip/peak search (writes CSV/Parquet), with optional baseline override from `src/baseline.py`:  
+  `python src/excursions_bayes.py --mode dips|peaks --out-dir ./results_bayes --chunk-size 5000 [--mag-bin 12_12.5 ...]`  
+  Example with a baseline: `--baseline-func baseline:per_camera_median_baseline`
 
-- `calder/reproduce_candidates.py`  
-  Search for peaks/dips from a list of candidates (default: brayden list):  
-  `python calder/reproduce_candidates.py --method biweight|naive --manifest ./lc_manifest.csv --out-dir ./results_repro --out-format csv [--candidates <file_or_builtin>] [--n-workers 8]`
+- `scripts/reproduce_candidates.py`  
+  Search for peaks/dips from a list of candidates (default: Brayden list):  
+  `python scripts/reproduce_candidates.py --method biweight|naive --manifest ./lc_manifest.csv --out-dir ./results_repro --out-format csv [--candidates <file_or_builtin>] [--n-workers 8]`
 
-- `calder/df_filter.py`  
-  Filter the list of peaks/dips
-  `python calder/df_filter.py <peaks_csv_or_dir> [--biweight] [--band g|v|both|either] [--latest-per-bin] [--output <csv>] [--output-dir <dir>]`
+- `src/filter.py`  
+  Filter the list of peaks/dips:  
+  `python src/filter.py <peaks_csv_or_dir> [--biweight] [--band g|v|both|either] [--latest-per-bin] [--output <csv>] [--output-dir <dir>]`
 
-- `calder/fp_analysis.py`  
+- `scripts/fp_analysis.py`  
   Summarize false-positive reduction (pre vs post filter retention):  
-  `python calder/fp_analysis.py --pre <pre_csv_or_dir> --post <post_csv_or_dir> [--id-col asas_sn_id]`
+  `python scripts/fp_analysis.py --pre <pre_csv_or_dir> --post <post_csv_or_dir> [--id-col asas_sn_id]`
 
 ## Dependencies
 - numpy
@@ -32,3 +32,44 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 - tqdm
 - celerite2
 - pyarrow (optional; required for Parquet outputs)
+
+## Project layout
+```
+.
+├── docs
+│   ├── ARCHITECTURE.md
+│   ├── NOTES.md
+│   └── TODO.md
+├── environment.yml
+├── .gitignore
+├── pyproject.toml
+├── README.md
+├── scripts
+│   ├── fp_analysis.py
+│   ├── lc_manifest.py
+│   ├── plot_results_bayes.py
+│   ├── plot_results.py
+│   └── reproduce_candidates.py
+├── src
+│   ├── baseline.py
+│   ├── df_utils.py
+│   ├── excursions_bayes.py
+│   ├── filter.py
+│   ├── lc_utils.py
+│   ├── old
+│   │   ├── __init__.py
+│   │   ├── lc_excursions_naive.py
+│   │   ├── lc_excursions.py
+│   │   └── lc_metrics.py
+│   ├── plot.py
+│   ├── stats.py
+│   ├── test
+│   │   ├── test.py
+│   │   └── test_skypatrol.py
+│   └── vsx
+│       ├── crossmatch.py
+│       ├── filter.py
+│       └── reproducibility.py
+└── .vscode
+    └── extensions.json
+```

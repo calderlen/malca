@@ -9,11 +9,11 @@ import pandas as pd
 from scipy import stats
 import matplotlib.pyplot as pl
 
-from calder.lc_excursions_naive import dip_finder_naive
-from calder.lc_excursions import excursion_finder
-from calder.lc_excursions_bayes import run_bayesian_significance
-from calder.lc_utils import read_lc_dat2
-from calder.lc_baseline import per_camera_gp_baseline
+from lc_excursions_naive import dip_finder_naive
+from lc_excursions import excursion_finder
+from excursions_bayes import run_bayesian_significance
+from lc_utils import read_lc_dat2
+from baseline import per_camera_gp_baseline
 
 
 brayden_candidates: list[dict[str, object]] = [
