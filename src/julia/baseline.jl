@@ -8,6 +8,7 @@ using LinearAlgebra
 const DEFAULT_JITTER = 0.006
 
 function global_mean_baseline(df::DataFrame; t_col::Symbol=:JD, mag_col::Symbol=:mag, err_col::Symbol=:error)
+    
     out = copy(df)
     for col in (:baseline, :resid, :sigma_resid)
         if !(col in names(out))

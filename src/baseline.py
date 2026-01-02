@@ -145,8 +145,7 @@ def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0, past_
 
 def rolling_time_mad(jd, resid, days=200.0, min_points=10, min_days=20.0, past_only=True, add_err=None):
     """
-    Rolling robust scatter (MAD) using pure NumPy optimization.
-    1.4826 * median(|resid - median(resid)|)
+    Rolling robust scatter (MAD) = 1.4826 * median(|resid - median(resid)|)
     """
     n = len(jd)
     out = np.full(n, np.nan, dtype=float)

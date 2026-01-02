@@ -1,670 +1,703 @@
-module Baseline
+module ExcursionsBayes
 
+import Base: @kwdef
 using DataFrames
 using Statistics
 using StatsBase: mad
+using LogExpFunctions: logsumexp
+using LsqFit
 using LinearAlgebra
 
-const DEFAULT_JITTER = 0.006
+include("baseline.jl")
+include("df_utils.jl")
+include("lc_utils.jl")
+using .Baseline: per_camera_gp_baseline, DEFAULT_JITTER
+using .DfUtils: clean_lc, biweight_location, biweight_scale
+using .LcUtils: read_lc_dat2
 
-function global_mean_baseline(df::DataFrame; t_col::Symbol=:JD, mag_col::Symbol=:mag, err_col::Symbol=:error)
-    out = copy(df)
-    for col in (:baseline, :resid, :sigma_resid)
-        if !(col in names(out))
-            out[!, col] = fill(NaN, nrow(out))
-        end
-    end
+const MAG_BINS = ["12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15"]
 
-    m = Float64.(out[!, mag_col])
-    e = Float64.(out[!, err_col])
-
-    baseline = fill(NaN, length(m))
-    resid = fill(NaN, length(m))
-
-    good = isfinite.(m)
-    if any(good)
-        mean_mag = mean(m[good])
-        baseline .= mean_mag
-        resid .= m .- mean_mag
-    end
-
-    resid_good = isfinite.(resid)
-    med_resid = any(resid_good) ? median(resid[resid_good]) : NaN
-    mad_resid = any(resid_good) ? mad(resid[resid_good]; center=med_resid, normalize=true) : NaN
-
-    e_good = isfinite.(e)
-    e_med = any(e_good) ? median(e[e_good]) : NaN
-
-    mad_num = isfinite(mad_resid) ? mad_resid : 0.0
-    e_med_num = isfinite(e_med) ? e_med : 0.0
-    robust_std = max(sqrt(mad_num^2 + e_med_num^2), 1e-6)
-
-    sigma_resid = resid ./ robust_std
-
-    out[!, :baseline] .= baseline
-    out[!, :resid] .= resid
-    out[!, :sigma_resid] .= sigma_resid
-    out
-end
-
-function global_median_baseline(df::DataFrame; t_col::Symbol=:JD, mag_col::Symbol=:mag, err_col::Symbol=:error)
-    out = copy(df)
-    for col in (:baseline, :resid, :sigma_resid)
-        if !(col in names(out))
-            out[!, col] = fill(NaN, nrow(out))
-        end
-    end
-
-    m = Float64.(out[!, mag_col])
-    e = Float64.(out[!, err_col])
-
-    baseline = fill(NaN, length(m))
-    resid = fill(NaN, length(m))
-
-    good = isfinite.(m)
-    if any(good)
-        median_mag = median(m[good])
-        baseline .= median_mag
-        resid .= m .- median_mag
-    end
-
-    resid_good = isfinite.(resid)
-    med_resid = any(resid_good) ? median(resid[resid_good]) : NaN
-    mad_resid = any(resid_good) ? mad(resid[resid_good]; center=med_resid, normalize=true) : NaN
-
-    e_good = isfinite.(e)
-    e_med = any(e_good) ? median(e[e_good]) : NaN
-
-    mad_num = isfinite(mad_resid) ? mad_resid : 0.0
-    e_med_num = isfinite(e_med) ? e_med : 0.0
-    robust_std = max(sqrt(mad_num^2 + e_med_num^2), 1e-6)
-
-    sigma_resid = resid ./ robust_std
-
-    out[!, :baseline] .= baseline
-    out[!, :resid] .= resid
-    out[!, :sigma_resid] .= sigma_resid
-    out
-end
-
-function rolling_time_median(jd, mag; days::Float64=300.0, min_points::Int=10, min_days::Float64=30.0, past_only::Bool=true)
-    n = length(jd)
-    out = fill(NaN, n)
-    jd_f = Float64.(jd)
-    mag_f = Float64.(mag)
-
-    for i in 1:n
-        t0 = jd_f[i]
-        window = days
-        while window >= min_days
-            lo_val, hi_val = if past_only
-                t0 - window, t0
-            else
-                half = window / 2.0
-                t0 - half, t0 + half
-            end
-            idx_start = searchsortedfirst(jd_f, lo_val)
-            idx_end = searchsortedlast(jd_f, hi_val)
-            vals = mag_f[idx_start:idx_end]
-            finite_vals = vals[isfinite.(vals)]
-            if length(finite_vals) >= min_points
-                out[i] = median(finite_vals)
-                break
-            end
-            window /= 2.0
-        end
-    end
-    out
-end
-
-function rolling_time_mad(jd, resid; days::Float64=200.0, min_points::Int=10, min_days::Float64=20.0, past_only::Bool=true, add_err=nothing)
-    n = length(jd)
-    out = fill(NaN, n)
-    jd_f = Float64.(jd)
-    resid_f = Float64.(resid)
-
-    err_is_array = add_err !== nothing && ndims(add_err) > 0
-    err_array = err_is_array ? Float64.(add_err) : nothing
-    err_scalar = add_err === nothing ? 0.0 : (err_is_array ? 0.0 : float(add_err))
-
-    for i in 1:n
-        t0 = jd_f[i]
-        window = days
-        while window >= min_days
-            lo_val, hi_val = if past_only
-                t0 - window, t0
-            else
-                half = window / 2.0
-                t0 - half, t0 + half
-            end
-            idx_start = searchsortedfirst(jd_f, lo_val)
-            idx_end = searchsortedlast(jd_f, hi_val)
-            vals = resid_f[idx_start:idx_end]
-            finite_vals = vals[isfinite.(vals)]
-            if length(finite_vals) >= min_points
-                med = median(finite_vals)
-                mad_val = mad(finite_vals; center=med, normalize=true)
-                if add_err !== nothing
-                    err_here = err_is_array ? err_array[i] : err_scalar
-                    mad_val = sqrt(mad_val^2 + err_here^2)
-                end
-                out[i] = max(mad_val, 1e-6)
-                break
-            end
-            window /= 2.0
-        end
-    end
-    out
-end
-
-function global_rolling_median_baseline(df::DataFrame; days::Float64=1000.0, min_points::Int=10, t_col::Symbol=:JD, mag_col::Symbol=:mag, err_col::Symbol=:error)
-    out = copy(df)
-    for col in (:baseline, :resid, :sigma_resid)
-        if !(col in names(out))
-            out[!, col] = fill(NaN, nrow(out))
-        end
-    end
-
-    t = Float64.(out[!, t_col])
-    m = Float64.(out[!, mag_col])
-    e = Float64.(out[!, err_col])
-
-    base = rolling_time_median(t, m; days=days, min_points=min_points)
-    resid = m .- base
-
-    resid_good = isfinite.(resid)
-    med_resid = any(resid_good) ? median(resid[resid_good]) : NaN
-    mad_resid = any(resid_good) ? mad(resid[resid_good]; center=med_resid, normalize=true) : NaN
-
-    e_good = isfinite.(e)
-    e_med = any(e_good) ? median(e[e_good]) : NaN
-
-    mad_num = isfinite(mad_resid) ? mad_resid : 0.0
-    e_med_num = isfinite(e_med) ? e_med : 0.0
-    robust_std = max(sqrt(mad_num^2 + e_med_num^2), 1e-6)
-
-    sigma_resid = resid ./ robust_std
-
-    out[!, :baseline] .= base
-    out[!, :resid] .= resid
-    out[!, :sigma_resid] .= sigma_resid
-    out
-end
-
-function global_rolling_mean_baseline(df::DataFrame; days::Float64=1000.0, min_points::Int=10, t_col::Symbol=:JD, mag_col::Symbol=:mag, err_col::Symbol=:error)
-    out = copy(df)
-    for col in (:baseline, :resid, :sigma_resid)
-        if !(col in names(out))
-            out[!, col] = fill(NaN, nrow(out))
-        end
-    end
-
-    t = Float64.(out[!, t_col])
-    m = Float64.(out[!, mag_col])
-    e = Float64.(out[!, err_col])
-
-    baseline = fill(NaN, length(m))
-    order = sortperm(t)
-    t_sorted = t[order]
-    m_sorted = m[order]
-
-    for (idx_sorted, i) in enumerate(order)
-        t0 = t_sorted[idx_sorted]
-        window = days
-        while window >= min_points
-            lo = t0 - window
-            hi = t0
-            start = searchsortedfirst(t_sorted, lo)
-            ending = searchsortedlast(t_sorted, hi)
-            vals = m_sorted[start:ending]
-            finite = vals[isfinite.(vals)]
-            if length(finite) >= min_points
-                baseline[i] = mean(finite)
-                break
-            end
-            window /= 2.0
-        end
-    end
-
-    resid = m .- baseline
-
-    resid_good = isfinite.(resid)
-    med_resid = any(resid_good) ? median(resid[resid_good]) : NaN
-    mad_resid = any(resid_good) ? mad(resid[resid_good]; center=med_resid, normalize=true) : NaN
-
-    e_good = isfinite.(e)
-    e_med = any(e_good) ? median(e[e_good]) : NaN
-
-    mad_num = isfinite(mad_resid) ? mad_resid : 0.0
-    e_med_num = isfinite(e_med) ? e_med : 0.0
-    robust_std = max(sqrt(mad_num^2 + e_med_num^2), 1e-6)
-
-    sigma_resid = resid ./ robust_std
-
-    out[!, :baseline] .= baseline
-    out[!, :resid] .= resid
-    out[!, :sigma_resid] .= sigma_resid
-    out
-end
-
-function per_camera_mean_baseline(df::DataFrame; t_col::Symbol=:JD, mag_col::Symbol=:mag, err_col::Symbol=:error, cam_col::Symbol=Symbol("camera#"))
-    out = copy(df)
-    for col in (:baseline, :resid, :sigma_resid)
-        if !(col in names(out))
-            out[!, col] = fill(NaN, nrow(out))
-        end
-    end
-
-    groups = cam_col in names(out) ? groupby(out, cam_col; sort=true) : [out]
-    for sub in groups
-        idx = parentindices(sub)[1]
-        m = Float64.(sub[!, mag_col])
-        e = Float64.(sub[!, err_col])
-
-        baseline = fill(NaN, length(idx))
-        resid = fill(NaN, length(idx))
-
-        good = isfinite.(m)
-        if any(good)
-            cam_mean = mean(m[good])
-            baseline .= cam_mean
-            resid .= m .- cam_mean
-        end
-
-        resid_good = isfinite.(resid)
-        med_resid = any(resid_good) ? median(resid[resid_good]) : NaN
-        mad_resid = any(resid_good) ? mad(resid[resid_good]; center=med_resid, normalize=true) : NaN
-
-        e_good = isfinite.(e)
-        e_med = any(e_good) ? median(e[e_good]) : NaN
-
-        mad_num = isfinite(mad_resid) ? mad_resid : 0.0
-        e_med_num = isfinite(e_med) ? e_med : 0.0
-        robust_std = max(sqrt(mad_num^2 + e_med_num^2), 1e-6)
-
-        sigma_resid = resid ./ robust_std
-
-        out[idx, :baseline] .= baseline
-        out[idx, :resid] .= resid
-        out[idx, :sigma_resid] .= sigma_resid
-    end
-    out
-end
-
-function per_camera_median_baseline(df::DataFrame; days::Float64=300.0, min_points::Int=10, t_col::Symbol=:JD, mag_col::Symbol=:mag, err_col::Symbol=:error, cam_col::Symbol=Symbol("camera#"))
-    out = copy(df)
-    for col in (:baseline, :resid, :sigma_resid)
-        if !(col in names(out))
-            out[!, col] = fill(NaN, nrow(out))
-        end
-    end
-
-    groups = cam_col in names(out) ? groupby(out, cam_col; sort=true) : [out]
-    for sub in groups
-        idx = parentindices(sub)[1]
-        t = Float64.(sub[!, t_col])
-        m = Float64.(sub[!, mag_col])
-        e = Float64.(sub[!, err_col])
-
-        base = rolling_time_median(t, m; days=days, min_points=min_points)
-        resid = m .- base
-
-        resid_good = isfinite.(resid)
-        med_resid = any(resid_good) ? median(resid[resid_good]) : NaN
-        mad_resid = any(resid_good) ? mad(resid[resid_good]; center=med_resid, normalize=true) : NaN
-
-        e_good = isfinite.(e)
-        e_med = any(e_good) ? median(e[e_good]) : NaN
-
-        mad_num = isfinite(mad_resid) ? mad_resid : 0.0
-        e_med_num = isfinite(e_med) ? e_med : 0.0
-        robust_std = max(sqrt(mad_num^2 + e_med_num^2), 1e-6)
-
-        sigma_resid = resid ./ robust_std
-
-        out[idx, :baseline] .= base
-        out[idx, :resid] .= resid
-        out[idx, :sigma_resid] .= sigma_resid
-    end
-    out
-end
-
-function per_camera_trend_baseline(
-    df::DataFrame;
-    days_short::Float64=50.0,
-    days_long::Float64=800.0,
-    min_points::Int=10,
-    last_window_guard::Float64=120.0,
-    t_col::Symbol=:JD,
-    mag_col::Symbol=:mag,
-    err_col::Symbol=:error,
-    cam_col::Symbol=Symbol("camera#"),
+const DEFAULT_BASELINE_KWARGS = Dict(
+    :S0 => 0.0005,
+    :w0 => 0.0031415926535897933,
+    :q => 0.7,
+    :jitter => DEFAULT_JITTER,
+    :sigma_floor => nothing,
+    :add_sigma_eff_col => true,
 )
-    out = copy(df)
-    for col in (:baseline, :resid, :sigma_resid)
-        if !(col in names(out))
-            out[!, col] = fill(NaN, nrow(out))
-        end
-    end
 
-    groups = cam_col in names(out) ? groupby(out, cam_col; sort=true) : [out]
-    for sub in groups
-        idx = sort(parentindices(sub)[1])
-        t = Float64.(out[idx, t_col])
-        m = Float64.(out[idx, mag_col])
-        e = Float64.(out[idx, err_col])
+gaussian(t, amp, t0, sigma, baseline) = baseline .+ amp .* exp.(-0.5 .* ((t .- t0) ./ sigma) .^ 2)
 
-        base_s = rolling_time_median(t, m; days=days_short, min_points=min_points, past_only=true)
-        base_l = rolling_time_median(t, m; days=days_long, min_points=min_points, past_only=true)
-
-        choose_short = isfinite.(base_s) .& isfinite.(base_l) .& (abs.(base_s .- base_l) .> 0.05)
-        baseline = similar(base_s)
-        for i in eachindex(baseline)
-            if choose_short[i] && isfinite(base_s[i])
-                baseline[i] = base_s[i]
-            elseif isfinite(base_l[i])
-                baseline[i] = base_l[i]
-            else
-                baseline[i] = base_s[i]
-            end
-        end
-
-        resid = m .- baseline
-
-        e_med = isfinite.(e) |> any ? median(e[isfinite.(e)]) : 0.0
-        sigma_loc = rolling_time_mad(t, resid; days=days_short, min_points=max(8, div(min_points, 2)), past_only=true, add_err=e_med)
-
-        tmax = maximum(t[isfinite.(t)])
-        near_end = (tmax .- t) .<= last_window_guard
-        if any(isnan, sigma_loc[near_end])
-            r_good = isfinite.(resid)
-            if any(r_good)
-                med_r = median(resid[r_good])
-                mad_r = mad(resid[r_good]; center=med_r, normalize=true)
-                robust = sqrt(max(mad_r, 0.0)^2 + max(e_med, 0.0)^2)
-                sigma_loc[near_end .& .!isfinite.(sigma_loc)] .= max(robust, 1e-6)
-            end
-        end
-
-        sigma_loc = isfinite.(sigma_loc) .* sigma_loc .+ .!isfinite.(sigma_loc) .* 1e-6
-        sigma_resid = resid ./ sigma_loc
-
-        out[idx, :baseline] .= baseline
-        out[idx, :resid] .= resid
-        out[idx, :sigma_resid] .= sigma_resid
-    end
-    out
+function paczynski(t, amp, t0, tE, baseline)
+    tE = max.(abs.(tE), 1e-5)
+    baseline .+ amp ./ sqrt.(1 .+ ((t .- t0) ./ tE) .^ 2)
 end
 
-"""
-per-camera GP baseline with a simple SE kernel approximation.
+function log_gaussian(x, μ, σ)
+    x = Float64.(x)
+    μ = Float64.(μ)
+    σ = clamp.(Float64.(σ), 1e-12, Inf)
+    z = (x .- μ) ./ σ
+    -0.5 .* z .^ 2 .- log.(σ) .- 0.5 .* log(2π)
+end
 
-Requires GaussianProcesses.jl. If unavailable or the fit fails, falls back to per-camera median.
-"""
-function per_camera_gp_baseline(
-    df::DataFrame;
-    sigma::Union{Nothing, Float64}=nothing,
-    rho::Union{Nothing, Float64}=nothing,
-    q::Float64=0.7, # unused in this simplified kernel
-    S0::Union{Nothing, Float64}=nothing,
-    w0::Union{Nothing, Float64}=nothing,
-    jitter::Float64=DEFAULT_JITTER,
-    t_col::Symbol=:JD,
-    mag_col::Symbol=:mag,
-    err_col::Symbol=:error,
-    cam_col::Symbol=Symbol("camera#"),
-    sigma_floor::Union{Nothing, Float64}=nothing,
-    floor_clip::Float64=3.0,
-    floor_iters::Int=3,
-    min_floor_points::Int=30,
-    add_sigma_eff_col::Bool=true,
+function logit_spaced_grid(; p_min=1e-4, p_max=1 - 1e-4, n=80)
+    p_min = clamp(float(p_min), 1e-12, 1 - 1e-12)
+    p_max = clamp(float(p_max), 1e-12, 1 - 1e-12)
+    q_min = log(p_min / (1 - p_min))
+    q_max = log(p_max / (1 - p_max))
+    q = range(q_min, q_max; length=n)
+    1.0 ./ (1 .+ exp.(-q))
+end
+
+function default_mag_grid(baseline_mag::Float64, mags::AbstractVector, kind::String; n=60)
+    mags_finite = filter(isfinite, mags)
+    isempty(mags_finite) && throw(ArgumentError("No finite magnitude values for grid construction"))
+    lo, hi = quantile(mags_finite, [0.05, 0.95])
+    if !(isfinite(lo) && isfinite(hi))
+        med = median(mags_finite)
+        lo, hi = med - 0.5, med + 0.5
+    end
+    spread = max(hi - lo, 0.05)
+
+    start = stop = baseline_mag
+    if kind == "dip"
+        start = baseline_mag + 0.02
+        stop = max(baseline_mag + 0.02, hi + 0.5 * spread)
+    elseif kind == "jump"
+        start = min(baseline_mag - 0.02, lo - 0.5 * spread)
+        stop = baseline_mag - 0.02
+    else
+        throw(ArgumentError("kind must be 'dip' or 'jump'"))
+    end
+
+    if start == stop
+        stop = start + (kind == "dip" ? 0.1 : -0.1)
+    end
+
+    collect(range(start, stop; length=n))
+end
+
+function robust_median_dt_days(jd)
+    jd = Float64.(jd)
+    length(jd) < 2 && return NaN
+    dt = diff(jd)
+    dt = dt[isfinite.(dt) .& (dt .> 0)]
+    isempty(dt) && return NaN
+    median(dt)
+end
+
+function bic(resid, err, n_params)
+    err = clamp.(Float64.(err), 1e-9, Inf)
+    chi2 = sum((resid ./ err) .^ 2; init=0.0)
+    n_points = length(resid)
+    n_points == 0 && return Inf
+    chi2 + n_params * log(n_points)
+end
+
+function classify_run_morphology(jd, mag, err, run_idx; kind::String="dip")
+    pad = 5
+    start_i = max(1, first(run_idx) - pad)
+    end_i = min(length(jd), last(run_idx) + pad + 1)
+    t_seg = jd[start_i:end_i]
+    y_seg = mag[start_i:end_i]
+    e_seg = err[start_i:end_i]
+
+    if length(t_seg) < 4
+        return Dict("morphology" => "none", "bic" => NaN, "delta_bic_null" => 0.0, "params" => Dict())
+    end
+
+    baseline_guess = median(y_seg)
+    abs_diff = abs.(y_seg .- baseline_guess)
+    peak_local_idx = argmax(abs_diff)
+
+    t0_guess = t_seg[peak_local_idx]
+    amp_guess = y_seg[peak_local_idx] - baseline_guess
+    sigma_guess = max((t_seg[end] - t_seg[1]) / 4.0, 0.01)
+
+    resid_null = y_seg .- baseline_guess
+    bic_null = bic(resid_null, e_seg, 1)
+
+    best_bic = bic_null
+    best_model = "noise"
+    best_params = Dict{String, Float64}()
+
+    # Gaussian fit
+    try
+        model_g(p, t) = gaussian(t, p[1], p[2], p[3], p[4])
+        p0 = [amp_guess, t0_guess, sigma_guess, baseline_guess]
+        fit_g = curve_fit(model_g, t_seg, y_seg, p0; weights=1 ./ e_seg, maxIter=2000)
+        popt_g = coef(fit_g)
+        resid_g = y_seg .- model_g(popt_g, t_seg)
+        bic_g = bic(resid_g, e_seg, 4)
+        is_valid = kind == "dip" ? (popt_g[1] > 0) : (popt_g[1] < 0)
+        if is_valid && bic_g < (best_bic - 10)
+            best_bic = bic_g
+            best_model = "gaussian"
+            best_params = Dict(
+                "amp" => popt_g[1],
+                "t0" => popt_g[2],
+                "sigma" => popt_g[3],
+                "baseline" => popt_g[4],
+            )
+        end
+    catch
+    end
+
+    if kind == "jump"
+        try
+            model_p(p, t) = paczynski(t, p[1], p[2], p[3], p[4])
+            p0 = [-abs(amp_guess), t0_guess, sigma_guess, baseline_guess]
+            fit_p = curve_fit(model_p, t_seg, y_seg, p0; weights=1 ./ e_seg, maxIter=2000)
+            popt_p = coef(fit_p)
+            resid_p = y_seg .- model_p(popt_p, t_seg)
+            bic_p = bic(resid_p, e_seg, 4)
+            is_valid_p = popt_p[1] < 0
+            if is_valid_p && bic_p < (best_bic - 10)
+                best_bic = bic_p
+                best_model = "paczynski"
+                best_params = Dict(
+                    "amp" => popt_p[1],
+                    "t0" => popt_p[2],
+                    "tE" => popt_p[3],
+                    "baseline" => popt_p[4],
+                )
+            end
+        catch
+        end
+    end
+
+    Dict(
+        "morphology" => best_model,
+        "bic" => float(best_bic),
+        "delta_bic_null" => float(bic_null - best_bic),
+        "params" => best_params,
+    )
+end
+
+function build_runs(trig_idx, jd; allow_gap_points::Int=1, max_gap_days=nothing)
+    jd = Float64.(jd)
+    trig_idx = Int.(trig_idx[(trig_idx .>= 1) .& (trig_idx .<= length(jd))])
+    isempty(trig_idx) && return Vector{Vector{Int}}()
+
+    trig_idx = sort(unique(trig_idx))
+    cad = robust_median_dt_days(jd)
+    if max_gap_days === nothing
+        max_gap_days = isfinite(cad) ? max(5.0 * cad, 5.0) : 5.0
+    end
+    max_index_step = allow_gap_points + 1
+
+    runs = Vector{Vector{Int}}()
+    cur = [trig_idx[1]]
+    for k in 2:length(trig_idx)
+        i_prev = cur[end]
+        i = trig_idx[k]
+        idx_step = i - i_prev
+        dt = jd[i] - jd[i_prev]
+        if (idx_step <= max_index_step) && isfinite(dt) && (dt <= max_gap_days)
+            push!(cur, i)
+        else
+            push!(runs, copy(cur))
+            cur = [i]
+        end
+    end
+    push!(runs, cur)
+    runs
+end
+
+function filter_runs(
+    runs::Vector{Vector{Int}},
+    jd,
+    score_vec;
+    min_points::Int=3,
+    min_duration_days=nothing,
+    per_point_threshold=nothing,
+    sum_threshold=nothing,
 )
-    out = copy(df)
-    cols = (:baseline, :resid, :sigma_resid, :baseline_source)
-    for col in cols
-        if !(col in names(out))
-            out[!, col] = col == :baseline_source ? fill("unknown", nrow(out)) : fill(NaN, nrow(out))
-        end
+    jd = Float64.(jd)
+    score_vec = Float64.(score_vec)
+
+    cad = robust_median_dt_days(jd)
+    if min_duration_days === nothing
+        min_duration_days = isfinite(cad) ? max(2.0 * cad, 2.0) : 2.0
     end
-    if add_sigma_eff_col && !(:sigma_eff in names(out))
-        out[!, :sigma_eff] = fill(NaN, nrow(out))
-    end
+    min_duration_days = float(min_duration_days)
 
-    function _robust_sigma_floor(resid, yerr_here, var_here)
-        finite0 = isfinite.(resid) .& isfinite.(yerr_here) .& isfinite.(var_here)
-        if count(finite0) < max(10, min_floor_points)
-            return 0.0
-        end
-        r = copy(resid[finite0])
-        keep = trues(length(r))
-        for _ in 1:max(floor_iters, 1)
-            rr = r[keep]
-            if length(rr) < max(10, min_floor_points)
-                break
-            end
-            med = median(rr)
-            mad_val = mad(rr; center=med, normalize=true)
-            mad_val = max(mad_val, 1e-12)
-            keep = abs.(r .- med) .<= floor_clip * mad_val
-        end
-        rr = r[keep]
-        if length(rr) < max(10, min_floor_points)
-            rr = r
-        end
-        s_quiet = mad(rr; center=median(rr), normalize=true)
-        s_quiet = max(s_quiet, 1e-12)
+    kept = Vector{Vector{Int}}()
+    summaries = Vector{Dict{Symbol, Any}}()
 
-        yerr2_med = median((yerr_here[finite0][keep]).^2)
-        var_med = median(var_here[finite0][keep])
-        floor2 = max(s_quiet^2 - yerr2_med - var_med, 0.0)
-        sqrt(floor2)
-    end
-
-    groups = cam_col in names(out) ? groupby(out, cam_col; sort=true) : [out]
-    for sub in groups
-        idx = sort(parentindices(sub)[1])
-        t = Float64.(out[idx, t_col])
-        y = Float64.(out[idx, mag_col])
-        yerr = err_col in names(out) ? Float64.(out[idx, err_col]) : fill(NaN, length(idx))
-
-        finite = isfinite.(t) .& isfinite.(y)
-        if count(finite) < 5
-            if any(isfinite.(y))
-                baseline_val = median(y[isfinite.(y)])
-                baseline = fill(baseline_val, length(y))
-                resid = y .- baseline
-                med_yerr_all = any(isfinite.(yerr)) ? median(yerr[isfinite.(yerr)]) : jitter
-                yerr_full = replace(yerr, x -> isfinite(x) ? x : med_yerr_all)
-                yerr_full = max.(yerr_full, 0.0)
-                sigma_eff = sqrt.(yerr_full .^ 2 .+ jitter^2)
-                sigma_resid = resid ./ sigma_eff
-                out[idx, :baseline] .= baseline
-                out[idx, :resid] .= resid
-                out[idx, :sigma_resid] .= sigma_resid
-                if add_sigma_eff_col
-                    out[idx, :sigma_eff] .= sigma_eff
-                end
-                out[idx, :baseline_source] .= "median_fallback"
-            end
+    for r in runs
+        if isempty(r)
             continue
         end
+        n = length(r)
+        dur = n >= 2 ? (jd[r[end]] - jd[r[1]]) : 0.0
+        vals = score_vec[r]
+        run_max = any(isfinite.(vals)) ? maximum(filter(isfinite, vals)) : NaN
+        run_sum = any(isfinite.(vals)) ? sum(filter(isfinite, vals)) : NaN
 
-        finite_idx = findall(finite)
-        t_fit = t[finite_idx]
-        y_fit = y[finite_idx]
-        y_mean = mean(y_fit)
-        y_centered = y_fit .- y_mean
-
-        yerr_fit = yerr[finite_idx]
-        if !any(isfinite.(yerr_fit))
-            yerr_fit = fill(jitter, length(y_fit))
-        else
-            med_yerr = median(yerr_fit[isfinite.(yerr_fit)])
-            med_yerr = isfinite(med_yerr) ? med_yerr : jitter
-            yerr_fit = replace(yerr_fit, x -> isfinite(x) ? x : med_yerr)
+        ok = true
+        if n < min_points
+            ok = false
         end
-        yerr_fit = max.(yerr_fit, 0.0)
-
-        baseline = fill(NaN, length(y))
-        var = zeros(length(y))
-        baseline_flag = "median_fallback"
-
-        try
-            @eval using GaussianProcesses
-            ell = rho === nothing ? 200.0 : rho
-            amp = sigma === nothing ? 0.05 : sigma
-            k = GaussianProcesses.SEIso(amp, ell)
-            X = reshape(t_fit, :, 1)
-            gp = GaussianProcesses.GP(X, y_centered, GaussianProcesses.MeanZero(), k, yerr_fit .^ 2 .+ jitter^2)
-            μ, Σ = GaussianProcesses.predict_f(gp, reshape(t, :, 1))
-            baseline .= vec(μ) .+ y_mean
-            var .= clamp.(diag(Σ), 0.0, Inf)
-            baseline_flag = "gp_se"
-        catch err
-            @warn "GP fit failed; falling back to median baseline" err
-            y_med = median(y[finite])
-            baseline .= y_med
-            var .= 0.0
-            baseline_flag = "median_fallback"
+        if dur < min_duration_days
+            ok = false
+        end
+        if per_point_threshold !== nothing
+            ok &= isfinite(run_max) && (run_max >= float(per_point_threshold))
+        end
+        if sum_threshold !== nothing
+            ok &= isfinite(run_sum) && (run_sum >= float(sum_threshold))
         end
 
-        resid = y .- baseline
+        push!(summaries, Dict(
+            :start_idx => r[1],
+            :end_idx => r[end],
+            :n_points => n,
+            :start_jd => jd[r[1]],
+            :end_jd => jd[r[end]],
+            :duration_days => dur,
+            :run_max => run_max,
+            :run_sum => run_sum,
+            :kept => ok,
+        ))
 
-        med_yerr_all = any(isfinite.(yerr)) ? median(yerr[isfinite.(yerr)]) : jitter
-        yerr_full = replace(yerr, x -> isfinite(x) ? x : med_yerr_all)
-        yerr_full = max.(yerr_full, 0.0)
-
-        floor_here = sigma_floor === nothing ? _robust_sigma_floor(resid, yerr_full, var) : max(sigma_floor, 0.0)
-        sigma_eff = sqrt.(max.(yerr_full .^ 2 .+ floor_here^2 .+ var, 1e-12))
-        sigma_resid = resid ./ sigma_eff
-
-        out[idx, :baseline] .= baseline
-        out[idx, :resid] .= resid
-        out[idx, :sigma_resid] .= sigma_resid
-        if add_sigma_eff_col
-            out[idx, :sigma_eff] .= sigma_eff
-        end
-        out[idx, :baseline_source] .= baseline_flag
+        ok && push!(kept, r)
     end
-    out
+
+    kept, summaries
 end
 
-"""
-Masked per-camera GP baseline: drops dip windows before fitting GP (simplified kernel).
-"""
-function per_camera_gp_baseline_masked(
+function summarize_kept_runs(kept_runs::Vector{Vector{Int}}, jd, score_vec)
+    jd = Float64.(jd)
+    score_vec = Float64.(score_vec)
+
+    if isempty(kept_runs)
+        return Dict(
+            :n_runs => 0,
+            :max_run_points => 0,
+            :max_run_duration => NaN,
+            :max_run_sum => NaN,
+            :max_run_max => NaN,
+        )
+    end
+
+    max_pts = 0
+    max_dur = -Inf
+    max_sum = -Inf
+    max_max = -Inf
+
+    for r in kept_runs
+        max_pts = max(max_pts, length(r))
+        if length(r) >= 2
+            max_dur = max(max_dur, jd[r[end]] - jd[r[1]])
+        else
+            max_dur = max(max_dur, 0.0)
+        end
+        vals = score_vec[r]
+        if any(isfinite.(vals))
+            max_sum = max(max_sum, sum(filter(isfinite, vals)))
+            max_max = max(max_max, maximum(filter(isfinite, vals)))
+        end
+    end
+
+    Dict(
+        :n_runs => max_pts == 0 ? 0 : length(kept_runs),
+        :max_run_points => max_pts,
+        :max_run_duration => isfinite(max_dur) ? max_dur : NaN,
+        :max_run_sum => isfinite(max_sum) ? max_sum : NaN,
+        :max_run_max => isfinite(max_max) ? max_max : NaN,
+    )
+end
+
+function bayesian_excursion_significance(
     df::DataFrame;
-    dip_sigma_thresh::Float64=-1.0,
-    pad_days::Float64=100.0,
-    S0::Float64=0.0005,
-    w0::Float64=0.0031415926535897933,
-    Q::Float64=0.7,
-    a1=nothing, rho1=nothing, a2=nothing, rho2=nothing,
-    jitter::Float64=DEFAULT_JITTER,
-    use_yerr::Bool=true,
-    t_col::Symbol=:JD,
+    kind::String="dip",
     mag_col::Symbol=:mag,
     err_col::Symbol=:error,
-    cam_col::Symbol=Symbol("camera#"),
-    min_gp_points::Int=10,
+    baseline_func=per_camera_gp_baseline,
+    baseline_kwargs::Dict=DEFAULT_BASELINE_KWARGS,
+    df_base::Union{Nothing, DataFrame}=nothing,
+    use_sigma_eff::Bool=true,
+    require_sigma_eff::Bool=false,
+    p_min=nothing,
+    p_max=nothing,
+    p_points::Int=80,
+    mag_grid::Union{Nothing, AbstractVector}=nothing,
+    trigger_mode::String="logbf",
+    logbf_threshold::Float64=5.0,
+    significance_threshold::Float64=99.99997,
+    run_min_points::Int=3,
+    run_allow_gap_points::Int=1,
+    run_max_gap_days=nothing,
+    run_min_duration_days=nothing,
+    run_sum_threshold=nothing,
+    run_sum_multiplier::Float64=2.5,
+    compute_event_prob::Bool=true,
 )
-    out = copy(df)
-    for col in (:baseline, :resid, :sigma_resid)
-        if !(col in names(out))
-            out[!, col] = fill(NaN, nrow(out))
+    df = clean_lc(df)
+    jd = Float64.(df[!, :JD])
+    mags = Float64.(df[!, mag_col])
+
+    mags_finite = count(isfinite, mags)
+    if mags_finite == 0
+        error("All magnitudes are NaN/inf after reading")
+    end
+
+    errs = err_col in names(df) ? Float64.(df[!, err_col]) : fill(0.05, length(mags))
+    errs_finite = count(isfinite, errs)
+    errs_positive = count(>(0), errs[isfinite.(errs)])
+    if errs_finite == 0
+        error("All errors are NaN/inf")
+    end
+    if errs_positive == 0
+        error("All errors are non-positive")
+    end
+
+    used_sigma_eff = false
+
+    if df_base === nothing && baseline_func !== nothing
+        df_base = baseline_func(df; baseline_kwargs...)
+    end
+
+    baseline_mags = similar(mags)
+    baseline_sources = fill("unknown", length(mags))
+    if df_base === nothing
+        baseline_mags .= median(filter(isfinite, mags))
+        baseline_sources .= "global_median"
+    else
+        if :baseline in names(df_base)
+            baseline_mags = Float64.(df_base[!, :baseline])
+        else
+            baseline_mags = Float64.(df_base[!, mag_col])
+        end
+        if :baseline_source in names(df_base)
+            baseline_sources = string.(df_base[!, :baseline_source])
+        end
+        if use_sigma_eff && (:sigma_eff in names(df_base))
+            errs_new = Float64.(df_base[!, :sigma_eff])
+            errs_new_finite = count(isfinite, errs_new)
+            errs_new_positive = count(>(0), errs_new[isfinite.(errs_new)])
+            errs_new_finite == 0 && error("Baseline returned all NaN/inf sigma_eff")
+            errs_new_positive == 0 && error("Baseline returned all non-positive sigma_eff")
+            errs = errs_new
+            used_sigma_eff = true
+        elseif require_sigma_eff
+            error("require_sigma_eff=true but baseline did not return sigma_eff")
         end
     end
 
-    groups = cam_col in names(out) ? groupby(out, cam_col; sort=true) : [out]
-    for sub in groups
-        idx = sort(parentindices(sub)[1])
-        t = Float64.(out[idx, t_col])
-        y = Float64.(out[idx, mag_col])
-        yerr = if use_yerr && err_col in names(out)
-            Float64.(out[idx, err_col])
+    baseline_finite = count(isfinite, baseline_mags)
+    baseline_finite == 0 && error("Baseline function returned all NaN/inf values")
+
+    errs_finite_final = count(isfinite, errs)
+    errs_positive_final = count(>(0), errs[isfinite.(errs)])
+    errs_finite_final == 0 && error("All errors are NaN/inf after baseline")
+    errs_positive_final == 0 && error("All errors are non-positive after baseline")
+
+    valid_mask = isfinite.(mags) .& isfinite.(errs) .& (errs .> 0) .& isfinite.(baseline_mags)
+    n_valid = count(valid_mask)
+    n_valid == 0 && error("No valid points after baseline/error filtering")
+
+    if n_valid < length(mags)
+        mags = mags[valid_mask]
+        errs = errs[valid_mask]
+        baseline_mags = baseline_mags[valid_mask]
+        baseline_sources = baseline_sources[valid_mask]
+        jd = jd[valid_mask]
+    end
+
+    baseline_mag = median(filter(isfinite, baseline_mags))
+
+    if p_min === nothing && p_max === nothing
+        if kind == "dip"
+            p_min, p_max = 0.5, 1 - 1e-4
+        elseif kind == "jump"
+            p_min, p_max = 1e-4, 0.5
         else
-            fill(NaN, length(idx))
+            error("kind must be 'dip' or 'jump'")
         end
+    end
 
-        finite = isfinite.(t) .& isfinite.(y)
+    p_grid = logit_spaced_grid(p_min=p_min, p_max=p_max, n=p_points)
+    mag_grid = mag_grid === nothing ? default_mag_grid(baseline_mag, mags, kind; n=60) : Float64.(mag_grid)
 
-        y_med = median(y[finite])
-        r0 = y .- y_med
-        r0_f = r0[finite]
-        med_r = median(r0_f)
-        mad_r = mad(r0_f; center=med_r, normalize=true)
+    M = length(mag_grid)
+    N = length(mags)
 
-        e_med = if use_yerr && any(isfinite.(yerr))
-            median(yerr[finite .& isfinite.(yerr)])
+    if kind == "dip"
+        log_Pb_vec = log_gaussian(mags, baseline_mags, errs)
+        log_Pb_grid = repeat(log_Pb_vec', M, 1)
+        log_Pf_grid = log_gaussian(mags', mag_grid, errs')
+        excursion_component = "faint"
+    elseif kind == "jump"
+        log_Pb_grid = log_gaussian(mags', mag_grid, errs')
+        log_Pf_vec = log_gaussian(mags, baseline_mags, errs)
+        log_Pf_grid = repeat(log_Pf_vec', M, 1)
+        excursion_component = "bright"
+        !any(isfinite.(log_Pf_vec)) && error("All baseline likelihood values are NaN/inf")
+        !any(isfinite.(log_Pb_grid)) && error("All excursion likelihood values are NaN/inf")
+    else
+        error("kind must be 'dip' or 'jump'")
+    end
+
+    valid_points = mapslices(any, isfinite.(log_Pb_grid); dims=1)[:] .| mapslices(any, isfinite.(log_Pf_grid); dims=1)[:]
+    n_valid_points = count(valid_points)
+    total_points = size(log_Pb_grid, 2)
+    n_valid_points == 0 && error("No valid likelihood contributions after baseline")
+
+    if n_valid_points < total_points
+        mags = mags[valid_points]
+        errs = errs[valid_points]
+        baseline_mags = baseline_mags[valid_points]
+        baseline_sources = baseline_sources[valid_points]
+        jd = jd[valid_points]
+        log_Pb_grid = log_Pb_grid[:, valid_points]
+        log_Pf_grid = log_Pf_grid[:, valid_points]
+        if kind == "dip"
+            log_Pb_vec = log_Pb_vec[valid_points]
         else
-            jitter
+            log_Pf_vec = log_Pf_vec[valid_points]
         end
+        N = n_valid_points
+    end
 
-        s0 = sqrt(max(mad_r, 0.0)^2 + max(e_med, 0.0)^2)
-        s0 = max(s0, 1e-6)
+    if kind == "dip"
+        loglik_baseline_only = sum(log_Pb_vec)
+        log_px_baseline = log_Pb_vec
+        log_px_event = vec(logsumexp(log_Pf_grid; dims=1)) .- log(M)
+    else
+        loglik_baseline_only = sum(log_Pf_vec)
+        log_px_baseline = log_Pf_vec
+        log_px_event = vec(logsumexp(log_Pb_grid; dims=1)) .- log(M)
+    end
 
-        sig0 = r0 ./ s0
-        dip_flag = finite .& isfinite.(sig0) .& (sig0 .< dip_sigma_thresh)
+    log_bf_local = log_px_event .- log_px_baseline
+    max_log_bf_local = any(isfinite.(log_bf_local)) ? maximum(filter(isfinite, log_bf_local)) : NaN
 
-        keep = copy(finite)
-        if any(dip_flag)
-            t_dip = t[dip_flag]
-            bad = falses(length(keep))
-            for td in t_dip
-                bad .|= abs.(t .- td) .<= pad_days
+    log_p = log.(p_grid)
+    log_1mp = log1p.(-p_grid)
+
+    log_Pb_weighted = reshape(log_Pb_grid, M, 1, N) .+ reshape(log_p, 1, length(log_p), 1)
+    log_Pf_weighted = reshape(log_Pf_grid, M, 1, N) .+ reshape(log_1mp, 1, length(log_1mp), 1)
+    log_Pb_weighted .= ifelse.(isfinite.(log_Pb_weighted), log_Pb_weighted, -Inf)
+    log_Pf_weighted .= ifelse.(isfinite.(log_Pf_weighted), log_Pf_weighted, -Inf)
+
+    log_mix = log.(exp.(log_Pb_weighted) .+ exp.(log_Pf_weighted))
+    log_mix_finite = count(isfinite, log_mix)
+    log_mix_finite == 0 && error("All log_mix values are NaN/inf")
+
+    loglik = sum(log_mix; dims=3)
+    loglik_finite = count(isfinite, loglik)
+    loglik_total = length(loglik)
+    if loglik_finite == 0
+        error("All loglik values are NaN/inf before normalization")
+    end
+
+    loglik_sum = logsumexp(vec(loglik))
+    isfinite(loglik_sum) || error("logsumexp(loglik) is NaN/inf")
+    log_post_norm = loglik .- loglik_sum
+    log_post_finite = count(isfinite, log_post_norm)
+    log_post_finite == 0 && error("All log_posterior values are NaN/inf after normalization")
+
+    best_idx = argmax(vec(log_post_norm))
+    best_m_idx = rem(best_idx - 1, M) + 1
+    best_p_idx = div(best_idx - 1, M) + 1
+    best_mag_event = mag_grid[best_m_idx]
+    best_p = p_grid[best_p_idx]
+
+    K = length(loglik)
+    log_evidence_mixture = logsumexp(vec(loglik)) - log(K)
+    bayes_factor = log_evidence_mixture - loglik_baseline_only
+
+    event_prob = compute_event_prob ? zeros(Float64, N) : nothing
+    if compute_event_prob
+        for j in 1:N
+            loglik_excl = loglik .- log_mix[:, :, j]
+            bright_num = loglik_excl .+ log_p' .+ reshape(log_Pb_grid[:, j], M, 1, 1)
+            faint_num = loglik_excl .+ log_1mp' .+ reshape(log_Pf_grid[:, j], M, 1, 1)
+            log_bright = logsumexp(vec(bright_num))
+            log_faint = logsumexp(vec(faint_num))
+            log_norm = logsumexp([log_bright, log_faint])
+            bright_prob = exp(log_bright - log_norm)
+            faint_prob = exp(log_faint - log_norm)
+            if excursion_component == "faint"
+                event_prob[j] = faint_prob
+            else
+                event_prob[j] = bright_prob
             end
-            keep .&= .!bad
         end
-
-        if count(keep) < min_gp_points
-            baseline = fill(y_med, length(y))
-            resid = y .- baseline
-            out[idx, :baseline] .= baseline
-            out[idx, :resid] .= resid
-            out[idx, :sigma_resid] .= resid ./ s0
-            continue
-        end
-
-        t_fit = t[keep]
-        y_fit = y[keep]
-
-        yerr_fit = if use_yerr && any(isfinite.(yerr[keep]))
-            yerr_tmp = yerr[keep]
-            med = median(yerr_tmp[isfinite.(yerr_tmp)])
-            replace(yerr_tmp, x -> isfinite(x) ? x : med)
-        else
-            fill(jitter, length(y_fit))
-        end
-        yerr_fit = replace(yerr_fit, x -> isfinite(x) ? x : jitter)
-
-        y_mean = mean(y_fit)
-        y_fit0 = y_fit .- y_mean
-
-        baseline = similar(y)
-        sigma_resid = similar(y)
-        try
-            @eval using GaussianProcesses
-            ell = rho1 === nothing ? 200.0 : rho1
-            amp = a1 === nothing ? 0.05 : a1
-            k = GaussianProcesses.SEIso(amp, ell)
-            gp = GaussianProcesses.GP(reshape(t_fit, :, 1), y_fit0, GaussianProcesses.MeanZero(), k, yerr_fit .^ 2 .+ jitter^2)
-            μ, Σ = GaussianProcesses.predict_f(gp, reshape(t, :, 1))
-            baseline .= vec(μ) .+ y_mean
-            var = clamp.(diag(Σ), 0.0, Inf)
-            med_err = median(yerr_fit)
-            scale = sqrt.(max.(var .+ med_err^2, 1e-12))
-            sigma_resid .= (y .- baseline) ./ scale
-        catch err
-            baseline .= y_med
-            resid = y .- baseline
-            sigma_resid .= resid ./ s0
-        end
-
-        out[idx, :baseline] .= baseline
-        out[idx, :resid] .= y .- baseline
-        out[idx, :sigma_resid] .= sigma_resid
     end
-    out
+
+    raw_idx = Int[]
+    trigger_threshold_used = NaN
+    trigger_value_max = NaN
+    run_sum_threshold_eff = run_sum_threshold
+
+    if trigger_mode == "logbf"
+        per_point_thr = logbf_threshold
+        score_vec = log_bf_local
+        raw_idx = findall(i -> isfinite(score_vec[i]) && score_vec[i] >= per_point_thr, 1:length(score_vec))
+        trigger_threshold_used = per_point_thr
+        trigger_value_max = max_log_bf_local
+        if run_sum_threshold === nothing
+            run_sum_threshold_eff = run_sum_multiplier * per_point_thr
+        end
+    elseif trigger_mode == "posterior_prob"
+        compute_event_prob || error("trigger_mode=posterior_prob requires compute_event_prob=true")
+        thr_prob = significance_threshold > 1 ? significance_threshold / 100.0 : significance_threshold
+        score_vec = event_prob
+        raw_idx = findall(i -> isfinite(score_vec[i]) && score_vec[i] >= thr_prob, 1:length(score_vec))
+        trigger_threshold_used = thr_prob
+        trigger_value_max = maximum(score_vec)
+        if run_sum_threshold === nothing
+            run_sum_threshold_eff = run_min_points * thr_prob
+        end
+    else
+        error("trigger_mode must be 'logbf' or 'posterior_prob'")
+    end
+
+    kept_runs = Vector{Vector{Int}}()
+    run_summaries = Vector{Dict{Symbol, Any}}()
+    event_indices = Int[]
+    significant = false
+    run_stats = Dict{Symbol, Any}()
+
+    if isempty(raw_idx)
+        run_stats = summarize_kept_runs(Vector{Vector{Int}}(), jd, score_vec)
+    else
+        runs = build_runs(raw_idx, jd; allow_gap_points=run_allow_gap_points, max_gap_days=run_max_gap_days)
+        kept_runs, initial_summaries = filter_runs(
+            runs,
+            jd,
+            score_vec;
+            min_points=run_min_points,
+            min_duration_days=run_min_duration_days,
+            per_point_threshold=trigger_threshold_used,
+            sum_threshold=run_sum_threshold_eff,
+        )
+
+        for (i, r) in enumerate(kept_runs)
+            summary = initial_summaries[i]
+            morph_res = classify_run_morphology(jd, mags, errs, r; kind=kind)
+            merge!(summary, Dict(Symbol(k) => v for (k, v) in morph_res))
+            push!(run_summaries, summary)
+        end
+
+        if !isempty(kept_runs)
+            event_indices = unique(vcat(kept_runs...))
+            significant = true
+        end
+        run_stats = summarize_kept_runs(kept_runs, jd, score_vec)
+    end
+
+    Dict(
+        "kind" => string(kind),
+        "baseline_mag" => float(baseline_mag),
+        "best_mag_event" => float(best_mag_event),
+        "best_p" => float(best_p),
+        "log_bf_local" => log_bf_local,
+        "max_log_bf_local" => float(isfinite(max_log_bf_local) ? max_log_bf_local : NaN),
+        "event_probability" => event_prob,
+        "used_sigma_eff" => used_sigma_eff,
+        "trigger_mode" => string(trigger_mode),
+        "trigger_threshold" => float(trigger_threshold_used),
+        "trigger_max" => float(isfinite(trigger_value_max) ? trigger_value_max : NaN),
+        "event_indices" => event_indices,
+        "significant" => significant,
+        "run_sum_threshold" => float(run_sum_threshold_eff),
+        "run_summaries" => run_summaries,
+        :n_runs => get(run_stats, :n_runs, 0),
+        :max_run_points => get(run_stats, :max_run_points, 0),
+        :max_run_duration => get(run_stats, :max_run_duration, NaN),
+        :max_run_sum => get(run_stats, :max_run_sum, NaN),
+        :max_run_max => get(run_stats, :max_run_max, NaN),
+        "bayes_factor" => float(bayes_factor),
+        "log_evidence_mixture" => float(log_evidence_mixture),
+        "log_evidence_baseline" => float(loglik_baseline_only),
+        "baseline_source" => isempty(baseline_sources) ? "unknown" : join(sort(unique(string.(baseline_sources))), ","),
+        "p_grid" => p_grid,
+        "mag_grid" => mag_grid,
+    )
+end
+
+function run_bayesian_significance(
+    df::DataFrame;
+    baseline_func=per_camera_gp_baseline,
+    baseline_kwargs::Dict=DEFAULT_BASELINE_KWARGS,
+    p_points::Int=80,
+    p_min_dip=nothing,
+    p_max_dip=nothing,
+    p_min_jump=nothing,
+    p_max_jump=nothing,
+    mag_grid_dip=nothing,
+    mag_grid_jump=nothing,
+    trigger_mode::String="logbf",
+    logbf_threshold_dip::Float64=5.0,
+    logbf_threshold_jump::Float64=5.0,
+    significance_threshold::Float64=99.99997,
+    run_min_points::Int=3,
+    run_allow_gap_points::Int=1,
+    run_max_gap_days=nothing,
+    run_min_duration_days=nothing,
+    run_sum_threshold=nothing,
+    run_sum_multiplier::Float64=2.5,
+    use_sigma_eff::Bool=true,
+    require_sigma_eff::Bool=true,
+    compute_event_prob::Bool=true,
+)
+    df = clean_lc(df)
+    df_base = baseline_func !== nothing ? baseline_func(df; baseline_kwargs...) : nothing
+
+    dip = bayesian_excursion_significance(
+        df;
+        kind="dip",
+        baseline_func=nothing,
+        baseline_kwargs=baseline_kwargs,
+        df_base=df_base,
+        use_sigma_eff=use_sigma_eff,
+        require_sigma_eff=require_sigma_eff,
+        p_min=p_min_dip,
+        p_max=p_max_dip,
+        p_points=p_points,
+        mag_grid=mag_grid_dip,
+        trigger_mode=trigger_mode,
+        logbf_threshold=logbf_threshold_dip,
+        significance_threshold=significance_threshold,
+        run_min_points=run_min_points,
+        run_allow_gap_points=run_allow_gap_points,
+        run_max_gap_days=run_max_gap_days,
+        run_min_duration_days=run_min_duration_days,
+        run_sum_threshold=run_sum_threshold,
+        run_sum_multiplier=run_sum_multiplier,
+        compute_event_prob=compute_event_prob,
+    )
+
+    jump = bayesian_excursion_significance(
+        df;
+        kind="jump",
+        baseline_func=nothing,
+        baseline_kwargs=baseline_kwargs,
+        df_base=df_base,
+        use_sigma_eff=use_sigma_eff,
+        require_sigma_eff=require_sigma_eff,
+        p_min=p_min_jump,
+        p_max=p_max_jump,
+        p_points=p_points,
+        mag_grid=mag_grid_jump,
+        trigger_mode=trigger_mode,
+        logbf_threshold=logbf_threshold_jump,
+        significance_threshold=significance_threshold,
+        run_min_points=run_min_points,
+        run_allow_gap_points=run_allow_gap_points,
+        run_max_gap_days=run_max_gap_days,
+        run_min_duration_days=run_min_duration_days,
+        run_sum_threshold=run_sum_threshold,
+        run_sum_multiplier=run_sum_multiplier,
+        compute_event_prob=compute_event_prob,
+    )
+
+    Dict(:dip => dip, :jump => jump)
 end
 
 end # module
