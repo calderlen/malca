@@ -17,6 +17,7 @@ dependencies = [
     "matplotlib",
     "astropy",
     "celerite2",
+    "pyarrow",
 ]
 
 [tool.setuptools.packages.find]
@@ -29,7 +30,7 @@ py-modules = [
     "df_filter",
     "df_plot",
     "df_utils",
-    "lc_baseline",
+    "baseline",
     "lc_excursions",
     "lc_excursions_bayes",
     "lc_excursions_naive",

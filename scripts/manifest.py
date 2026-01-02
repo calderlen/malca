@@ -145,8 +145,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("./lc_manifest.csv"),
-        help="Output file path (.csv or .parquet). Default: %(default)s",
+        default=Path("./lc_manifest.parquet"),
+        help="Output Parquet file path. Default: %(default)s",
     )
     parser.add_argument(
         "--mag-bin",
@@ -189,13 +189,7 @@ def main() -> None:
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    suffix = out_path.suffix.lower()
-    if suffix == ".csv":
-        df.to_csv(out_path, index=False)
-    elif suffix in {".parquet", ".pq"}:
-        df.to_parquet(out_path, index=False)
-    else:
-        raise SystemExit(f"Unsupported output format for {out_path}; use .csv or .parquet")
+    df.to_parquet(out_path, index=False, compression="brotli")
 
     print(f"Wrote {len(df):,} entries to {out_path}")
 

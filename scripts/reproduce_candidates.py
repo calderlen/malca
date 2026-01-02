@@ -802,7 +802,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         if ":" in args.baseline_func:
             mod_name, func_name = args.baseline_func.split(":", 1)
         else:
-            mod_name, func_name = "lc_baseline", args.baseline_func
+            mod_name, func_name = "baseline", args.baseline_func
         mod = __import__(mod_name, fromlist=[func_name])
         kwargs["metrics_baseline_func"] = getattr(mod, func_name)
 

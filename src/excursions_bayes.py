@@ -7,7 +7,6 @@ _os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 import argparse
 import glob
 import os
-import shutil
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -18,13 +17,15 @@ from scipy.special import logsumexp
 from scipy.optimize import curve_fit
 from tqdm import tqdm
 import warnings
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 warnings.filterwarnings("ignore", message=".*Covariance of the parameters could not be estimated.*")
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
 from lc_utils import read_lc_dat2
-from lc_baseline import per_camera_gp_baseline
+from baseline import per_camera_gp_baseline
 from df_utils import clean_lc
 
 
@@ -1183,25 +1184,14 @@ def main():
     parser.add_argument(
         "--output",
         type=str,
-        default="/home/lenhart.106/Documents/asassn-variability/outputs/lc_excursions_bayes_results.csv",
-        help="CSV path for results (default: /home/lenhart.106/Documents/asassn-variability/outputs/lc_excursions_bayes_results.csv).",
+        default="/home/lenhart.106/Documents/asassn-variability/outputs/lc_excursions_bayes_results.parquet",
+        help="Parquet path for results. If --mag-bin is set, the bin name is appended to the filename.",
     )
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=5000,
-        help="Write CSV in chunks of this many results (default: 5000). Set to 0 to disable chunking; use None for auto.",
-    )
-    parser.add_argument(
-        "--tmp-dir",
-        type=str,
-        default=None,
-        help="Directory for temporary per-chunk CSVs when using --temp-merge (defaults to output dir sibling 'tmp_lc_bayes').",
-    )
-    parser.add_argument(
-        "--temp-merge",
-        action="store_true",
-        help="Write each chunk to a unique temp CSV and concatenate at the end (avoids concurrent appends).",
+        default=10000,
+        help="Write Parquet in chunks of this many results (default: 10000). Set to 0 to disable chunking; use None for auto.",
     )
 
     args = parser.parse_args()
@@ -1256,7 +1246,6 @@ def main():
 
     results = []
     errors = []
-    temp_files = []
     
     if args.chunk_size is None:
         if len(expanded_inputs) < 10000:
@@ -1271,44 +1260,31 @@ def main():
     else:
         chunk_size = None
 
-    use_temp_merge = bool(args.temp_merge)
     total_written = 0
-    out_fh = None
+    writer = None
     output_path = Path(args.output) if args.output else None
-    temp_dir = None
-    if use_temp_merge:
-        if output_path is None:
-            raise SystemExit("--temp-merge requires --output")
-        base_dir = Path(args.tmp_dir) if args.tmp_dir else output_path.parent
-        temp_dir = base_dir / "tmp_lc_bayes"
-        temp_dir.mkdir(parents=True, exist_ok=True)
+    if output_path and args.mag_bins:
+        # Append mag-bin to the filename for clarity; use first bin if multiple
+        bin_tag = args.mag_bins[0] if len(args.mag_bins) == 1 else "multi"
+        output_path = output_path.with_name(f"{output_path.stem}_{bin_tag}{output_path.suffix}")
+        args.output = str(output_path)
 
     def _write_chunk(chunk_results, is_final=False):
-        """Write a chunk of results to CSV."""
+        """Write a chunk of results to Parquet."""
         if not chunk_results or not args.output:
             return
-        nonlocal total_written, out_fh
+        nonlocal total_written, writer
         df_chunk = pd.DataFrame(chunk_results)
-        
-        if use_temp_merge:
-            part_path = temp_dir / f"{output_path.stem}_part_{len(temp_files):05d}.csv"
-            df_chunk.to_csv(part_path, index=False)
-            temp_files.append(part_path)
-        else:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            if out_fh is None:
-                file_exists = output_path.exists()
-                mode = "a" if file_exists else "w"
-                out_fh = open(output_path, mode, newline="")
-                header = not file_exists
-            else:
-                header = False
-
-            df_chunk.to_csv(out_fh, index=False, header=header)
-            out_fh.flush()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+        if writer is None:
+            writer = pq.ParquetWriter(output_path, table.schema, compression="brotli")
+        writer.write_table(table)
 
         total_written += len(chunk_results)
         if is_final:
+            if writer is not None:
+                writer.close()
             print(f"Wrote {total_written} total rows to {args.output}", flush=True)
         else:
             print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})", flush=True)
@@ -1353,7 +1329,7 @@ def main():
 
     if results:
         _write_chunk(results, is_final=True)
-    elif args.output and total_written == 0 and not use_temp_merge:
+    elif args.output and total_written == 0:
         pass
     else:
         for row in results:
@@ -1364,26 +1340,8 @@ def main():
                 f"jump_sig={row['jump_significant']} ({row['jump_best_morph']}) jump_dBIC={row['jump_best_delta_bic']:.1f}"
             )
 
-    if use_temp_merge and temp_files:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", newline="") as fout:
-            for i, part_path in enumerate(temp_files):
-                with open(part_path, "r") as fin:
-                    if i > 0:
-                        next(fin, None)
-                    shutil.copyfileobj(fin, fout)
-        print(f"Merged {len(temp_files)} temp chunks into {args.output}", flush=True)
-        for part_path in temp_files:
-            try:
-                part_path.unlink()
-            except OSError:
-                pass
-
     if errors:
         print(f"Completed with {len(errors)} failures.", flush=True)
-
-    if out_fh is not None:
-        out_fh.close()
 
 
 if __name__ == "__main__":
