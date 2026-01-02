@@ -1,4 +1,4 @@
-name: asassn-variability
+name: malca
 
 channels:
   - conda-forge

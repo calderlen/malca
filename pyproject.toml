@@ -21,11 +21,11 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["malca"]
 include = ["*"]
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = {"" = "malca"}
 py-modules = [
     "baseline",
     "df_utils",

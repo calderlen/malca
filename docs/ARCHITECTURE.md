@@ -1,25 +1,35 @@
 
 ## MALCA (Multi-timescale ASAS-SN Light Curve Analysis)
 
-## Modules
-- `src/old/lc_events.py`
-  - `clean_lc`
-    - removes saturated light curves
-    - mask any NaN's in JD and mag (may be unnecessary?)
-    - sort light curves by JD (may be unnecessary?)
-  - `empty_metrics`
-    - creates empty dict for dip metrics for a single band
-  - `mag_to_delta`
-    - transforms the light curve to delta space with the biweight magntiude deviation, as done in https://arxiv.org/pdf/2508.03964
-  - `gaussian`
-  - `score_dips_gaussian`
-      - fits Gaussians to peaks of light curve in delta space, then scores the light curve using $ S = \frac{1}{\ln (N+1)^N} \sum_{n=i}^{N} \left( \frac{\delta_i}{2} \times \Phi_i \times N_{\mathrm{det},i} \times \frac{1}{\chi_i^2} \right) $. This metric is adopted from https://iopscience.iop.org/article/10.3847/1538-4357/adf5bb
-  - `paczynski`
-    - see https://en.wikipedia.org/wiki/Gravitational_microlensing
-  - `score_peaks_paczynski`
-    - fits Paczynski curve to brightenings of the light curve in delta space
-    - scores the light curve using the same metric as above.
-  - `lc_band_proc`
+## Modules (Python)
+- `malca/events.py`
+  - orchestration and CLI for Bayesian event (dip/jump) scoring
+  - uses `malca/baseline.py`, `malca/df_utils.py`, `malca/lc_utils.py`
+- `malca/events_bayes.py`
+  - Bayesian event scoring internals (formerly excursions_bayes)
+- `malca/baseline.py`
+  - baseline computation: global/rolling mean/median, per-camera variants, GP baseline
+- `malca/df_utils.py`
+  - cleaning, peak search utilities, metrics helpers
+- `malca/lc_utils.py`
+  - light-curve I/O and parsing helpers
+- `malca/plot.py`
+  - plotting/light-curve helpers
+- `malca/stats.py`
+  - statistical helpers
+- `malca/filter.py`
+  - post-processing/filtering of detected events
+- `malca/vsx/`
+  - `crossmatch.py`, `filter.py`, `reproducibility.py` for VSX integration
+- `malca/old/`
+  - legacy pipeline: `lc_events.py`, `lc_events_naive.py`, `lc_metrics.py`
+
+## Modules (Julia)
+- `malca/julia/baseline.jl`
+- `malca/julia/df_utils.jl`
+- `malca/julia/events.jl`
+- `malca/julia/events_bayes.jl`
+- `malca/julia/lc_utils.jl`
     - since the ASAS-SN light curves are in two bands, V and G which have offsets, we analyze them separately. this function looks at only one of the two bands of the light curve at a time, converts the mag to delta, and finds dips/peaks a minimum distance of 50 data points apart (~1 data point per day), scores the light curve band and computes other metrics
   - `prefix_metrics`
   - `lc_proc`
