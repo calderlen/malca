@@ -10,6 +10,7 @@ import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -1077,184 +1078,93 @@ def _process_one(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Run Bayesian event scoring on light curves in parallel."
-    )
-    parser.add_argument(
-        "inputs",
-        nargs="*",
-        help="Paths to light-curve files (optional if using --mag-bin)",
-    )
-    parser.add_argument(
-        "--mag-bin",
-        dest="mag_bins",
-        action="append",
-        choices=MAG_BINS,
-        help="Process all light curves in this magnitude bin (can specify multiple times). "
-             "Light curves are found in <lc-path>/<mag_bin>/lc*_cal/*.dat2",
-    )
-    parser.add_argument(
-        "--lc-path",
-        type=str,
-        default="/data/poohbah/1/assassin/rowan.90/lcsv2",
-        help="Base path to light curve directories (default: /data/poohbah/1/assassin/rowan.90/lcsv2)",
-    )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        default=max(1, (mp.cpu_count() or 1) - 20),
-        help="Number of worker processes (default: cpu_count-20)",
-    )
-
-    parser.add_argument(
-        "--trigger-mode",
-        type=str,
-        default="logbf",
-        choices=["logbf", "posterior_prob"],
-        help="Triggering mode: 'logbf' (default) or 'posterior_prob' (slow)",
-    )
-    parser.add_argument(
-        "--logbf-threshold-dip",
-        type=float,
-        default=5.0,
-        help="Per-point dip trigger: log BF_j >= this (default 5.0 ~ BF>150)",
-    )
-    parser.add_argument(
-        "--logbf-threshold-jump",
-        type=float,
-        default=5.0,
-        help="Per-point jump trigger: log BF_j >= this (default 5.0 ~ BF>150)",
-    )
-    parser.add_argument(
-        "--significance-threshold",
-        type=float,
-        default=99.99997,
-        help="Only used if --trigger-mode posterior_prob (default ~ 5-sigma)",
-    )
-    parser.add_argument(
-        "--p-points",
-        type=int,
-        default=80,
-        help="Number of points in the logit-spaced p grid (default 80)",
-    )
-
-    parser.add_argument(
-        "--run-min-points",
-        type=int,
-        default=3,
-        help="Min triggered points in a run (default 3)",
-    )
-    parser.add_argument(
-        "--run-allow-gap-points",
-        type=int,
-        default=1,
-        help="Allow up to this many missing indices inside a run (default 1)",
-    )
-    parser.add_argument(
-        "--run-max-gap-days",
-        type=float,
-        default=None,
-        help="Break runs if JD gap exceeds this (default cadence-adaptive)",
-    )
-    parser.add_argument(
-        "--run-min-duration-days",
-        type=float,
-        default=None,
-        help="Require run duration >= this (default cadence-adaptive)",
-    )
-    parser.add_argument(
-        "--run-sum-threshold",
-        type=float,
-        default=None,
-        help="Require run sum-score >= this (default derived from per-point threshold)",
-    )
-    parser.add_argument(
-        "--run-sum-multiplier",
-        type=float,
-        default=2.5,
-        help="If --run-sum-threshold is None: sum_thr = multiplier * per_point_thr (logbf mode)",
-    )
-
-    parser.add_argument(
-        "--no-event-prob",
-        action="store_true",
-        help="Skip LOO event responsibilities (faster). Required unless using posterior_prob triggering.",
-    )
-
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="/home/lenhart.106/Documents/asassn-variability/outputs/lc_events_bayes_results.parquet",
-        help="Parquet path for results. If --mag-bin is set, the bin name is appended to the filename.",
-    )
-    parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=10000,
-        help="Write Parquet in chunks of this many results (default: 10000). Set to 0 to disable chunking; use None for auto.",
-    )
+    parser = argparse.ArgumentParser(description="Run Bayesian event scoring on light curves in parallel.")
+    parser.add_argument("inputs", nargs="*", help="Paths to light-curve files (optional if using --mag-bin)")
+    parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin.")
+    parser.add_argument("--lc-path", type=str, default="/data/poohbah/1/assassin/rowan.90/lcsv2", help="Base path to light curve directories")
+    parser.add_argument("--workers", type=int, default=max(1, (mp.cpu_count() or 1) - 20), help="Number of worker processes")
+    parser.add_argument("--trigger-mode", type=str, default="logbf", choices=["logbf", "posterior_prob"], help="Triggering mode")
+    parser.add_argument("--logbf-threshold-dip", type=float, default=5.0, help="Per-point dip trigger")
+    parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger")
+    parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Only used if --trigger-mode posterior_prob")
+    parser.add_argument("--p-points", type=int, default=80, help="Number of points in the logit-spaced p grid")
+    parser.add_argument("--run-min-points", type=int, default=3, help="Min triggered points in a run")
+    parser.add_argument("--run-allow-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
+    parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
+    parser.add_argument("--run-min-duration-days", type=float, default=None, help="Require run duration >= this")
+    parser.add_argument("--run-sum-threshold", type=float, default=None, help="Require run sum-score >= this")
+    parser.add_argument("--run-sum-multiplier", type=float, default=2.5, help="sum_thr = multiplier * per_point_thr")
+    parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
+    parser.add_argument("--output", type=str, default="/home/lenhart.106/Documents/asassn-variability/outputs/lc_events_bayes_results.parquet", help="Parquet path for results.")
+    parser.add_argument("--chunk-size", type=int, default=10000, help="Write Parquet in chunks of this many results.")
 
     args = parser.parse_args()
+    ts = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S%z")
 
     if args.trigger_mode == "posterior_prob" and args.no_event_prob:
         raise SystemExit("posterior_prob triggering requires event_prob; remove --no-event-prob")
 
     compute_event_prob = (not args.no_event_prob)
 
+    # checkpoint
+    base_output_path = Path(args.output).expanduser()
+    if args.mag_bins:
+        # pick the bin name if only one was give; otherwise use the "multi" tag
+        bin_tag = args.mag_bins[0] if len(args.mag_bins) == 1 else "multi"
+        checkpoint_log = base_output_path.with_name(f"{base_output_path.stem}_{bin_tag}_PROCESSED.txt")
+    else:
+        checkpoint_log = base_output_path.with_name(f"{base_output_path.stem}_PROCESSED.txt")
+
+    processed_files = set()
+    if checkpoint_log.exists():
+        print(f"--- RESUME DETECTED ---", flush=True)
+        print(f"Reading processed files from: {checkpoint_log}", flush=True)
+        try:
+            with open(checkpoint_log, "r") as f:
+                processed_files = set(line.strip() for line in f)
+            print(f"Found {len(processed_files)} previously processed files.", flush=True)
+        except Exception as e:
+            print(f"Warning: Could not read checkpoint file ({e}). Starting fresh.", flush=True)
+
     expanded_inputs = []
-    
     if args.mag_bins:
         lc_path = args.lc_path
         for mag_bin in args.mag_bins:
             mag_bin_dir = os.path.join(lc_path, mag_bin)
-            if not os.path.exists(mag_bin_dir):
-                print(f"Warning: mag_bin directory does not exist: {mag_bin_dir}", flush=True)
-                continue
-            
             lc_dirs = sorted(glob.glob(os.path.join(mag_bin_dir, "lc*_cal")))
-            if not lc_dirs:
-                print(f"Warning: No lc*_cal directories found in {mag_bin_dir}", flush=True)
-                continue
-            
-            print(f"Found {len(lc_dirs)} lc*_cal directories in {mag_bin}...", flush=True)
-            
             for lc_dir in lc_dirs:
                 dat2_files = sorted(glob.glob(os.path.join(lc_dir, "*.dat2")))
-                if dat2_files:
-                    expanded_inputs.extend(dat2_files)
-                    print(f"  {os.path.basename(lc_dir)}: {len(dat2_files)} .dat2 files", flush=True)
-            
-            print(f"Total .dat2 files in {mag_bin}: {len([f for f in expanded_inputs if mag_bin in f])}", flush=True)
+                if dat2_files: expanded_inputs.extend(dat2_files)
     
     for pattern in args.inputs:
         if '*' in pattern or '?' in pattern or '[' in pattern:
             matches = glob.glob(pattern)
-            if matches:
-                expanded_inputs.extend(sorted(matches))
-            else:
-                print(f"Warning: glob pattern '{pattern}' matched no files", flush=True)
-        else:
-            expanded_inputs.append(pattern)
+            if matches: expanded_inputs.extend(sorted(matches))
+            else: print(f"Warning: glob pattern '{pattern}' matched no files", flush=True)
+        else: expanded_inputs.append(pattern)
     
     seen = set()
     expanded_inputs = [x for x in expanded_inputs if not (x in seen or seen.add(x))]
     
-    if not expanded_inputs:
-        raise SystemExit("No input files found. Specify --mag-bin or provide input file paths.")
+    if not expanded_inputs: raise SystemExit("No input files found.")
     
-    print(f"Processing {len(expanded_inputs)} light curve file(s)...", flush=True)
+    # --- CHECKPOINT FILTERING ---
+    original_count = len(expanded_inputs)
+    expanded_inputs = [x for x in expanded_inputs if str(x) not in processed_files]
+    print(f"Processing {len(expanded_inputs)} light curve file(s) (Filtered from {original_count})...", flush=True)
+    
+    if len(expanded_inputs) == 0:
+        print("All files have been processed according to checkpoint! Exiting.", flush=True)
+        return
 
     results = []
     errors = []
     
     if args.chunk_size is None:
-        if len(expanded_inputs) < 10000:
-            chunk_size = 500
-        elif len(expanded_inputs) < 100000:
-            chunk_size = 1000
-        else:
-            chunk_size = 5000
-        print(f"Auto-selected chunk size: {chunk_size} (based on {len(expanded_inputs)} files)", flush=True)
+        if len(expanded_inputs) < 10000: chunk_size = 500
+        elif len(expanded_inputs) < 100000: chunk_size = 1000
+        else: chunk_size = 5000
+        print(f"Auto-selected chunk size: {chunk_size}", flush=True)
     elif args.chunk_size > 0:
         chunk_size = args.chunk_size
     else:
@@ -1262,18 +1172,21 @@ def main():
 
     total_written = 0
     writer = None
-    output_path = Path(args.output) if args.output else None
+    output_path = Path(args.output).expanduser() if args.output else None
+    
     if output_path and args.mag_bins:
-        # Append mag-bin to the filename for clarity; use first bin if multiple
         bin_tag = args.mag_bins[0] if len(args.mag_bins) == 1 else "multi"
         output_path = output_path.with_name(f"{output_path.stem}_{bin_tag}{output_path.suffix}")
+    
+    if output_path:
+        output_path = output_path.with_name(f"{output_path.stem}_{ts}{output_path.suffix}")
         args.output = str(output_path)
 
     def _write_chunk(chunk_results, is_final=False):
-        """Write a chunk of results to Parquet."""
-        if not chunk_results or not args.output:
-            return
+        if not chunk_results or not args.output: return
         nonlocal total_written, writer
+        
+        # 1. Write Parquet
         df_chunk = pd.DataFrame(chunk_results)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         table = pa.Table.from_pandas(df_chunk, preserve_index=False)
@@ -1281,10 +1194,17 @@ def main():
             writer = pq.ParquetWriter(output_path, table.schema, compression="brotli")
         writer.write_table(table)
 
+        # 2. Update Checkpoint Log
+        try:
+            with open(checkpoint_log, "a") as f:
+                for row in chunk_results:
+                    f.write(str(row['path']) + "\n")
+        except Exception as e:
+            print(f"WARNING: Could not update checkpoint log: {e}", flush=True)
+
         total_written += len(chunk_results)
         if is_final:
-            if writer is not None:
-                writer.close()
+            if writer is not None: writer.close()
             print(f"Wrote {total_written} total rows to {args.output}", flush=True)
         else:
             print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})", flush=True)
@@ -1292,22 +1212,13 @@ def main():
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futs = {
             ex.submit(
-                _process_one,
-                path,
-                trigger_mode=args.trigger_mode,
-                logbf_threshold_dip=args.logbf_threshold_dip,
-                logbf_threshold_jump=args.logbf_threshold_jump,
-                significance_threshold=args.significance_threshold,
-                p_points=args.p_points,
-                run_min_points=args.run_min_points,
-                run_allow_gap_points=args.run_allow_gap_points,
-                run_max_gap_days=args.run_max_gap_days,
-                run_min_duration_days=args.run_min_duration_days,
-                run_sum_threshold=args.run_sum_threshold,
-                run_sum_multiplier=args.run_sum_multiplier,
+                _process_one, path, trigger_mode=args.trigger_mode, logbf_threshold_dip=args.logbf_threshold_dip,
+                logbf_threshold_jump=args.logbf_threshold_jump, significance_threshold=args.significance_threshold,
+                p_points=args.p_points, run_min_points=args.run_min_points, run_allow_gap_points=args.run_allow_gap_points,
+                run_max_gap_days=args.run_max_gap_days, run_min_duration_days=args.run_min_duration_days,
+                run_sum_threshold=args.run_sum_threshold, run_sum_multiplier=args.run_sum_multiplier,
                 compute_event_prob=compute_event_prob,
-            ): path
-            for path in expanded_inputs
+            ): path for path in expanded_inputs
         }
 
         for fut in tqdm(as_completed(futs), total=len(futs), desc="LCs", unit="lc"):
@@ -1315,7 +1226,6 @@ def main():
             try:
                 result = fut.result()
                 results.append(result)
-                
                 if chunk_size and len(results) >= chunk_size:
                     _write_chunk(results)
                     results = []
@@ -1324,8 +1234,7 @@ def main():
                 tb_str = traceback.format_exc()
                 errors.append(dict(path=str(path), error=repr(e), traceback=tb_str))
                 print(f"ERROR processing {path}: {e}", flush=True)
-                if "too many values to unpack" in str(e):
-                    print(f"Full traceback:\n{tb_str}", flush=True)
+                if "too many values to unpack" in str(e): print(f"Full traceback:\n{tb_str}", flush=True)
 
     if results:
         _write_chunk(results, is_final=True)
@@ -1333,16 +1242,7 @@ def main():
         pass
     else:
         for row in results:
-            print(
-                f"{row['path']}\t"
-                f"mode={row['trigger_mode']}\t"
-                f"dip_sig={row['dip_significant']} ({row['dip_best_morph']}) dip_dBIC={row['dip_best_delta_bic']:.1f}\t"
-                f"jump_sig={row['jump_significant']} ({row['jump_best_morph']}) jump_dBIC={row['jump_best_delta_bic']:.1f}"
-            )
+            print(f"{row['path']}\tmode={row['trigger_mode']}\tdip_sig={row['dip_significant']} jump_sig={row['jump_significant']}")
 
     if errors:
         print(f"Completed with {len(errors)} failures.", flush=True)
-
-
-if __name__ == "__main__":
-    main()
