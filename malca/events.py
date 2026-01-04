@@ -10,7 +10,6 @@ import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -1080,10 +1079,10 @@ def _process_one(
 def main():
     parser = argparse.ArgumentParser(description="Run Bayesian event scoring on light curves in parallel.")
     parser.add_argument("inputs", nargs="*", help="Paths to light-curve files (optional if using --mag-bin)")
-    parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin.")
+    parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin (choices: 12_12.5, 12.5_13, 13_13.5, 13.5_14, 14_14.5, 14.5_15).")
     parser.add_argument("--lc-path", type=str, default="/data/poohbah/1/assassin/rowan.90/lcsv2", help="Base path to light curve directories")
-    parser.add_argument("--workers", type=int, default=max(1, (mp.cpu_count() or 1) - 20), help="Number of worker processes")
-    parser.add_argument("--trigger-mode", type=str, default="logbf", choices=["logbf", "posterior_prob"], help="Triggering mode")
+    parser.add_argument("--workers", type=int, default=max(1, (mp.cpu_count() or 1) // 16), help="Number of worker processes")
+    parser.add_argument("--trigger-mode", type=str, default="logbf", choices=["logbf", "posterior_prob"], help="Triggering mode: logbf = per-point log Bayes factor threshold; posterior_prob = posterior probability threshold (requires event probs).")
     parser.add_argument("--logbf-threshold-dip", type=float, default=5.0, help="Per-point dip trigger")
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger")
     parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Only used if --trigger-mode posterior_prob")
@@ -1095,28 +1094,68 @@ def main():
     parser.add_argument("--run-sum-threshold", type=float, default=None, help="Require run sum-score >= this")
     parser.add_argument("--run-sum-multiplier", type=float, default=2.5, help="sum_thr = multiplier * per_point_thr")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
-    parser.add_argument("--output", type=str, default="/home/lenhart.106/Documents/asassn-variability/outputs/lc_events_bayes_results.parquet", help="Parquet path for results.")
-    parser.add_argument("--chunk-size", type=int, default=10000, help="Write Parquet in chunks of this many results.")
+    parser.add_argument("--output", type=str, default="./output/lc_events_results.csv", help="Output path for results (suffix adjusted per format).")
+    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format (csv = line-oriented append; parquet = single file append; parquet_chunk = one Parquet file per chunk with atomic rename; duckdb = transactional table writes).")
+    parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
 
     args = parser.parse_args()
-    ts = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S%z")
-
     if args.trigger_mode == "posterior_prob" and args.no_event_prob:
         raise SystemExit("posterior_prob triggering requires event_prob; remove --no-event-prob")
 
     compute_event_prob = (not args.no_event_prob)
 
+    output_format = args.output_format.lower()
+
+    def _ensure_suffix(path: Path | None, fmt: str) -> Path | None:
+        if path is None:
+            return None
+        suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None, "duckdb": ".duckdb"}
+        ext = suffix_map.get(fmt)
+        if ext and path.suffix.lower() != ext:
+            return path.with_suffix(ext)
+        return path
+
+    def _collect_processed_from_output(path: Path | None, fmt: str) -> set[str]:
+        if path is None or (not path.exists()):
+            return set()
+        try:
+            if fmt == "csv":
+                df_existing = pd.read_csv(path, usecols=["path"])
+            elif fmt == "parquet":
+                table = pq.read_table(path, columns=["path"])
+                df_existing = table.to_pandas()
+            elif fmt == "parquet_chunk":
+                import pyarrow.dataset as ds
+                dataset = ds.dataset(path, format="parquet")
+                table = dataset.to_table(columns=["path"])
+                df_existing = table.to_pandas()
+            elif fmt == "duckdb":
+                import duckdb
+                con = duckdb.connect(str(path), read_only=True)
+                df_existing = con.execute("SELECT path FROM results").df()
+                con.close()
+            else:
+                return set()
+            if "path" in df_existing.columns:
+                return set(df_existing["path"].astype(str))
+        except Exception as e:
+            print(f"Warning: could not read existing output {path} to skip duplicates: {e}", flush=True)
+        return set()
+
     # checkpoint
-    base_output_path = Path(args.output).expanduser()
-    if args.mag_bins:
-        # pick the bin name if only one was give; otherwise use the "multi" tag
+    base_output_path = _ensure_suffix(Path(args.output).expanduser() if args.output else None, output_format)
+    if args.mag_bins and base_output_path is not None:
+        # pick the bin name if only one was given; otherwise use the "multi" tag
         bin_tag = args.mag_bins[0] if len(args.mag_bins) == 1 else "multi"
-        checkpoint_log = base_output_path.with_name(f"{base_output_path.stem}_{bin_tag}_PROCESSED.txt")
-    else:
+        base_output_path = base_output_path.with_name(f"{base_output_path.stem}_{bin_tag}{base_output_path.suffix}")
+
+    if base_output_path:
         checkpoint_log = base_output_path.with_name(f"{base_output_path.stem}_PROCESSED.txt")
+    else:
+        checkpoint_log = None
 
     processed_files = set()
-    if checkpoint_log.exists():
+    if checkpoint_log and checkpoint_log.exists():
         print(f"--- RESUME DETECTED ---", flush=True)
         print(f"Reading processed files from: {checkpoint_log}", flush=True)
         try:
@@ -1125,6 +1164,9 @@ def main():
             print(f"Found {len(processed_files)} previously processed files.", flush=True)
         except Exception as e:
             print(f"Warning: Could not read checkpoint file ({e}). Starting fresh.", flush=True)
+
+    # existing output (avoid duplicates if checkpoint was out-of-sync)
+    processed_files |= _collect_processed_from_output(base_output_path, output_format)
 
     expanded_inputs = []
     if args.mag_bins:
@@ -1170,42 +1212,155 @@ def main():
     else:
         chunk_size = None
 
+    if output_format == "csv" and chunk_size is not None and args.chunk_size == 10000:
+        # default to per-LC append for the line-oriented CSV mode
+        chunk_size = 1
+
     total_written = 0
-    writer = None
-    output_path = Path(args.output).expanduser() if args.output else None
-    
-    if output_path and args.mag_bins:
-        bin_tag = args.mag_bins[0] if len(args.mag_bins) == 1 else "multi"
-        output_path = output_path.with_name(f"{output_path.stem}_{bin_tag}{output_path.suffix}")
-    
+
+    class CsvWriter:
+        def __init__(self, path: Path):
+            self.path = Path(path)
+            self.columns = None
+            if self.path.exists() and self.path.stat().st_size > 0:
+                try:
+                    self.columns = pd.read_csv(self.path, nrows=0).columns.tolist()
+                except Exception:
+                    self.columns = None
+
+        def write_chunk(self, chunk_results):
+            if not chunk_results:
+                return
+            df_chunk = pd.DataFrame(chunk_results)
+            if self.columns is None:
+                self.columns = list(df_chunk.columns)
+            df_chunk = df_chunk.reindex(columns=self.columns)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            header = not self.path.exists() or self.path.stat().st_size == 0
+            df_chunk.to_csv(self.path, mode="a", header=header, index=False)
+
+        def close(self):
+            return
+
+    class ParquetChunkWriter:
+        def __init__(self, path: Path):
+            self.path = Path(path)
+            self.append = self.path.exists() and self.path.stat().st_size > 0
+
+        def write_chunk(self, chunk_results):
+            if not chunk_results:
+                return
+            df_chunk = pd.DataFrame(chunk_results)
+            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(table, self.path, compression="brotli", append=self.append)
+            self.append = True
+
+        def close(self):
+            return
+
+    class ParquetDatasetWriter:
+        def __init__(self, path: Path):
+            self.path = Path(path)
+            self.path.mkdir(parents=True, exist_ok=True)
+            existing = sorted(self.path.glob("chunk_*.parquet"))
+            if existing:
+                try:
+                    last = existing[-1].stem.split("_")[-1]
+                    self.counter = int(last) + 1
+                except Exception:
+                    self.counter = len(existing)
+            else:
+                self.counter = 0
+
+        def write_chunk(self, chunk_results):
+            if not chunk_results:
+                return
+            df_chunk = pd.DataFrame(chunk_results)
+            table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+            tmp_path = self.path / f"chunk_{self.counter:06d}.parquet.tmp"
+            final_path = self.path / f"chunk_{self.counter:06d}.parquet"
+            pq.write_table(table, tmp_path, compression="brotli")
+            os.replace(tmp_path, final_path)
+            self.counter += 1
+
+        def close(self):
+            return
+
+    class DuckDBWriter:
+        def __init__(self, path: Path):
+            import duckdb
+            self.path = Path(path)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.con = duckdb.connect(str(self.path))
+            self.initialized = False
+
+        def write_chunk(self, chunk_results):
+            if not chunk_results:
+                return
+            df_chunk = pd.DataFrame(chunk_results)
+            if df_chunk.empty:
+                return
+            self.con.execute("BEGIN")
+            self.con.register("tmp_chunk", df_chunk)
+            if not self.initialized:
+                self.con.execute("CREATE TABLE IF NOT EXISTS results AS SELECT * FROM tmp_chunk LIMIT 0")
+                self.initialized = True
+            self.con.execute("INSERT INTO results SELECT * FROM tmp_chunk")
+            self.con.execute("COMMIT")
+
+        def close(self):
+            if hasattr(self, "con") and self.con:
+                try:
+                    self.con.close()
+                except Exception:
+                    pass
+
+    def _make_writer(path: Path | None, fmt: str):
+        if path is None:
+            return None
+        if fmt == "csv":
+            return CsvWriter(path)
+        elif fmt == "parquet":
+            return ParquetChunkWriter(path)
+        elif fmt == "parquet_chunk":
+            return ParquetDatasetWriter(path)
+        elif fmt == "duckdb":
+            try:
+                return DuckDBWriter(path)
+            except ImportError as e:
+                raise SystemExit(f"duckdb output selected but duckdb is not installed: {e}")
+        else:
+            raise ValueError(f"Unknown output format: {fmt}")
+
+    output_path = base_output_path
+    writer = _make_writer(output_path, output_format)
     if output_path:
-        output_path = output_path.with_name(f"{output_path.stem}_{ts}{output_path.suffix}")
         args.output = str(output_path)
 
     def _write_chunk(chunk_results, is_final=False):
-        if not chunk_results or not args.output: return
+        if not chunk_results: 
+            return
         nonlocal total_written, writer
         
-        # 1. Write Parquet
-        df_chunk = pd.DataFrame(chunk_results)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        table = pa.Table.from_pandas(df_chunk, preserve_index=False)
-        if writer is None:
-            writer = pq.ParquetWriter(output_path, table.schema, compression="brotli")
-        writer.write_table(table)
+        if writer is not None:
+            writer.write_chunk(chunk_results)
 
-        # 2. Update Checkpoint Log
-        try:
-            with open(checkpoint_log, "a") as f:
-                for row in chunk_results:
-                    f.write(str(row['path']) + "\n")
-        except Exception as e:
-            print(f"WARNING: Could not update checkpoint log: {e}", flush=True)
+        if checkpoint_log:
+            try:
+                checkpoint_log.parent.mkdir(parents=True, exist_ok=True)
+                with open(checkpoint_log, "a") as f:
+                    for row in chunk_results:
+                        f.write(str(row['path']) + "\n")
+            except Exception as e:
+                print(f"WARNING: Could not update checkpoint log: {e}", flush=True)
 
         total_written += len(chunk_results)
         if is_final:
-            if writer is not None: writer.close()
-            print(f"Wrote {total_written} total rows to {args.output}", flush=True)
+            if writer is not None:
+                writer.close()
+            if args.output:
+                print(f"Wrote {total_written} total rows to {args.output}", flush=True)
         else:
             print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})", flush=True)
 

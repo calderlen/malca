@@ -100,9 +100,6 @@ def global_median_baseline(
 
     return df_out
 
-
-
-
 def rolling_time_median(jd, mag, days=300.0, min_points=10, min_days=30.0, past_only=True):
     """
     Rolling median in time using pure numpy optimization (searchsorted).
