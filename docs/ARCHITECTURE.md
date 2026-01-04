@@ -4,15 +4,15 @@
 ## Modules (Python)
 - `malca/events.py`
   - orchestration and CLI for Bayesian event (dip/jump) scoring
-  - uses `malca/baseline.py`, `malca/df_utils.py`, `malca/lc_utils.py`
+  - uses `malca/baseline.py`, `malca/utils.py`
 - `malca/events_bayes.py`
   - Bayesian event scoring internals (formerly excursions_bayes)
 - `malca/baseline.py`
   - baseline computation: global/rolling mean/median, per-camera variants, GP baseline
-- `malca/df_utils.py`
-  - cleaning, peak search utilities, metrics helpers
-- `malca/lc_utils.py`
-  - light-curve I/O and parsing helpers
+- `malca/utils.py`
+  - light-curve I/O and parsing helpers, basic cleaning, JD/year conversions
+- `malca/old/df_utils.py`
+  - legacy peak search utilities and metrics helpers
 - `malca/plot.py`
   - plotting/light-curve helpers
 - `malca/stats.py`
@@ -22,7 +22,7 @@
 - `malca/vsx/`
   - `crossmatch.py`, `filter.py`, `reproducibility.py` for VSX integration
 - `malca/old/`
-  - legacy pipeline: `lc_events.py`, `lc_events_naive.py`, `lc_metrics.py`
+  - legacy pipeline: `df_utils.py`, `lc_events.py`, `lc_events_naive.py`, `lc_metrics.py`
 
 ## Modules (Julia)
 - `malca/julia/baseline.jl`
@@ -62,10 +62,11 @@
   - `run_metrics`
   - `is_dip_dominated`
   - `multi_camera_confirmation`
-- `src/lc_utils.py`
+- `malca/utils.py`
+  - `clean_lc`
   - `year_to_jd`
   - `jd_to_year`
-  - `read_lc_dat`
+  - `read_lc_dat2`
   - `read_lc_raw`
   - `match_index_to_lc`
   - `custom_id`
@@ -95,11 +96,10 @@
   - `_run_one_file`
   - `_build_cli_parser`
   - `main`
-- `src/df_utils.py`
-  - `year_to_jd`
-  - `jd_to_year`
+- `malca/old/df_utils.py`
   - `peak_search_residual_baseline`
   - `peak_search_biweight_delta`
+  - `empty_metrics`
 - `src/plot.py`
   - `read_asassn_dat`
     - Read an ASAS-SN .dat file using whitespace separation.
@@ -113,16 +113,6 @@
   - `plot_lc_with_residuals`
   - `plot_one_lc`
   - `plot_many_lc`
-- `src/df_utils.py`
-  - `clean_lc`
-  - `year_to_jd`
-  - `jd_to_year`
-  - `peak_search_residual_baseline`
-    - Peak finder that prefers per-camera-baseline residuals when available.
-    - Falls back to (mag - mean) if 'resid' is absent.
-  - `peak_search_biweight_delta`
-    - Tzanidakis et al. (2025) biweight magnitude deviation
-  - `empty_metrics`
 - `scripts/fp_analysis.py`
   - `_load_many`
   - `_band_flags`
@@ -255,7 +245,8 @@
   - `is_dip_dominated`
     - returns True if the the dip fraction from the metrics dict is above a certain value, currently 2/3
   - `multi_camera_confirmation`
-- `src/lc_utils.py`
+- `malca/utils.py`
+  - `clean_lc`
   - `year_to_jd`
     - ADOPTED FROM BRAYDEN JOHANTGEN'S CODE: https://github.com/johantgen13/Dippers_Project.git
   - `jd_to_year`

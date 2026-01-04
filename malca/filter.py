@@ -14,7 +14,7 @@ from astropy.timeseries import LombScargle
 from astropy import units as u
 
 from vsx_crossmatch import propagate_asassn_coords, vsx_coords
-from lc_utils import read_lc_dat, read_lc_raw
+from utils import read_lc_raw
 
 
 

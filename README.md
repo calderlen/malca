@@ -49,11 +49,10 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 ├── output/                
 ├── malca
 │   ├── baseline.py
-│   ├── df_utils.py
 │   ├── events.py
 │   ├── events_bayes.py
 │   ├── filter.py
-│   ├── lc_utils.py
+│   ├── utils.py
 │   ├── julia
 │   │   ├── baseline.jl
 │   │   ├── df_utils.jl
@@ -62,6 +61,7 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 │   │   └── lc_utils.jl
 │   ├── old
 │   │   ├── __init__.py
+│   │   ├── df_utils.py
 │   │   ├── lc_events_naive.py
 │   │   ├── lc_events.py
 │   │   └── lc_metrics.py

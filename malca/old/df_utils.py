@@ -3,36 +3,6 @@ import pandas as pd
 import scipy
 from astropy.stats import biweight_location, biweight_scale
 
-def clean_lc(df):
-    mask = np.ones(len(df), dtype=bool)
-
-    if "saturated" in df.columns:
-        mask &= (df["saturated"] == 0)
-
-    mask &= df["JD"].notna() & df["mag"].notna()
-    if "error" in df.columns:
-        mask &= df["error"].notna() & (df["error"] > 0.) & (df["error"] < 1.)
-    df = df.loc[mask]
-
-    df = df.sort_values("JD").reset_index(drop=True)
-    return df
-
-def year_to_jd(year):
-    jd_epoch = 2449718.5                                
-    year_epoch = 1995
-    days_in_year = 365.25
-                                                                  
-    return (year - year_epoch) * days_in_year + (jd_epoch - 2450000.0)
-
-
-def jd_to_year(jd):
-    jd_epoch = 2449718.5                                
-    year_epoch = 1995
-    days_in_year = 365.25
-                                                               
-    return year_epoch + ((jd + 2450000.0) - jd_epoch) / days_in_year
-
-
 def peak_search_residual_baseline(
     df,
     prominence=0.17,

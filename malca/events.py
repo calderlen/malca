@@ -24,9 +24,8 @@ warnings.filterwarnings("ignore", message=".*Covariance of the parameters could 
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
-from lc_utils import read_lc_dat2
+from utils import read_lc_dat2, clean_lc
 from baseline import per_camera_gp_baseline
-from df_utils import clean_lc
 
 
 MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
@@ -1078,7 +1077,8 @@ def _process_one(
 
 def main():
     parser = argparse.ArgumentParser(description="Run Bayesian event scoring on light curves in parallel.")
-    parser.add_argument("inputs", nargs="*", help="Paths to light-curve files (optional if using --mag-bin)")
+    parser.add_argument("--input", dest="input_patterns", nargs="*", default=None, help="Paths or globs to light-curve files (repeatable).")
+    parser.add_argument("inputs", nargs="*", help="Legacy positional light-curve paths or globs (optional if using --input/--mag-bin).")
     parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin (choices: 12_12.5, 12.5_13, 13_13.5, 13.5_14, 14_14.5, 14.5_15).")
     parser.add_argument("--lc-path", type=str, default="/data/poohbah/1/assassin/rowan.90/lcsv2", help="Base path to light curve directories")
     parser.add_argument("--workers", type=int, default=max(1, (mp.cpu_count() or 1) // 16), help="Number of worker processes")
@@ -1168,6 +1168,12 @@ def main():
     # existing output (avoid duplicates if checkpoint was out-of-sync)
     processed_files |= _collect_processed_from_output(base_output_path, output_format)
 
+    input_patterns: list[str] = []
+    if args.input_patterns:
+        input_patterns.extend(args.input_patterns)
+    if args.inputs:
+        input_patterns.extend(args.inputs)
+
     expanded_inputs = []
     if args.mag_bins:
         lc_path = args.lc_path
@@ -1178,7 +1184,7 @@ def main():
                 dat2_files = sorted(glob.glob(os.path.join(lc_dir, "*.dat2")))
                 if dat2_files: expanded_inputs.extend(dat2_files)
     
-    for pattern in args.inputs:
+    for pattern in input_patterns:
         if '*' in pattern or '?' in pattern or '[' in pattern:
             matches = glob.glob(pattern)
             if matches: expanded_inputs.extend(sorted(matches))
@@ -1401,3 +1407,10 @@ def main():
 
     if errors:
         print(f"Completed with {len(errors)} failures.", flush=True)
+
+
+if __name__ == "__main__":
+    main()
+
+if __name__ == "__main__":
+    main()

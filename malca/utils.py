@@ -1,14 +1,48 @@
-import pandas as pd
 import os
 import re
 from glob import glob
-from tqdm import tqdm
+
+import numpy as np
+import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+from tqdm import tqdm
 
 colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39", 
               "#ce5761", "#c68c45", '#b5b246', '#d77fcc', '#7362cf', '#ce443f', '#3fc1bf', '#cda735',
               '#a1b055']
+
+
+def clean_lc(df):
+    mask = np.ones(len(df), dtype=bool)
+
+    if "saturated" in df.columns:
+        mask &= (df["saturated"] == 0)
+
+    mask &= df["JD"].notna() & df["mag"].notna()
+    if "error" in df.columns:
+        mask &= df["error"].notna() & (df["error"] > 0.0) & (df["error"] < 1.0)
+    df = df.loc[mask]
+
+    df = df.sort_values("JD").reset_index(drop=True)
+    return df
+
+
+def year_to_jd(year):
+    jd_epoch = 2449718.5
+    year_epoch = 1995
+    days_in_year = 365.25
+
+    return (year - year_epoch) * days_in_year + (jd_epoch - 2450000.0)
+
+
+def jd_to_year(jd):
+    jd_epoch = 2449718.5
+    year_epoch = 1995
+    days_in_year = 365.25
+
+    return year_epoch + ((jd + 2450000.0) - jd_epoch) / days_in_year
+
 
 def read_lc_dat2(asassn_id, path):
 

@@ -28,10 +28,9 @@ include = ["*"]
 package-dir = {"" = "malca"}
 py-modules = [
     "baseline",
-    "df_utils",
     "events_bayes",
     "filter",
-    "lc_utils",
     "plot",
     "stats",
+    "utils",
 ]
