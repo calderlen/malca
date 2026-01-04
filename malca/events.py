@@ -1095,7 +1095,7 @@ def main():
     parser.add_argument("--run-sum-multiplier", type=float, default=2.5, help="sum_thr = multiplier * per_point_thr")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
     parser.add_argument("--output", type=str, default="./output/lc_events_results.csv", help="Output path for results (suffix adjusted per format).")
-    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format (csv = line-oriented append; parquet = single file append; parquet_chunk = one Parquet file per chunk with atomic rename; duckdb = transactional table writes).")
+    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format for results.")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
 
     args = parser.parse_args()
