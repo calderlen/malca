@@ -695,27 +695,28 @@ def bayesian_event_significance(
     bayes_factor = float(log_evidence_mixture - loglik_baseline_only)
 
     if compute_event_prob:
-        event_prob = np.zeros(N, dtype=float)
-        for j in range(N):
-            loglik_excl = loglik - log_mix[:, :, j]
+        loglik_excl = loglik[:, :, None] - log_mix
 
-            bright_num = loglik_excl + log_p[None, :] + log_Pb_grid[:, j][:, None]
-            faint_num = loglik_excl + log_1mp[None, :] + log_Pf_grid[:, j][:, None]
+        bright_num = loglik_excl + log_p[None, :, None] + log_Pb_grid[:, None, :]
+        faint_num = loglik_excl + log_1mp[None, :, None] + log_Pf_grid[:, None, :]
 
-            log_bright = logsumexp(bright_num)
-            log_faint = logsumexp(faint_num)
-            log_norm = logsumexp(np.array([log_bright, log_faint]))
+        log_bright = logsumexp(bright_num, axis=(0, 1))
+        log_faint = logsumexp(faint_num, axis=(0, 1))
 
-            bright_prob = float(np.exp(log_bright - log_norm))
-            faint_prob = float(np.exp(log_faint - log_norm))
+        log_norm = np.logaddexp(log_bright, log_faint)
 
-            if event_component == "faint":
-                event_prob[j] = faint_prob
-            else:
-                event_prob[j] = bright_prob
+        bright_prob = np.exp(log_bright - log_norm)
+        faint_prob = np.exp(log_faint - log_norm)
+
+        if event_component == "faint":
+            event_prob = faint_prob
+        else:
+            event_prob = bright_prob
+
     else:
         event_prob = None
 
+        
     if trigger_mode == "logbf":
         per_point_thr = float(logbf_threshold)
         score_vec = np.asarray(log_bf_local, float)
