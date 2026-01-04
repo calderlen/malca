@@ -29,7 +29,11 @@ warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
 from utils import read_lc_dat2, clean_lc
-from baseline import per_camera_gp_baseline
+from baseline import (
+    per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
+    per_camera_trend_baseline,
+)
 
 
 MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
@@ -399,7 +403,7 @@ def bayesian_event_significance(
     p_points: int = 80,
     mag_grid: np.ndarray | None = None,
 
-    trigger_mode: str = "logbf",
+    trigger_mode: str = "posterior_prob", # posterior probability or logbf
     logbf_threshold: float = 5.0,
     significance_threshold: float = 99.99997,
 
@@ -917,6 +921,10 @@ def _process_one(
     logbf_threshold_jump: float,
     significance_threshold: float,
     p_points: int,
+    p_min_dip: float | None,
+    p_max_dip: float | None,
+    p_min_jump: float | None,
+    p_max_jump: float | None,
 
     run_min_points: int,
     run_allow_gap_points: int,
@@ -924,6 +932,10 @@ def _process_one(
     run_min_duration_days: float | None,
     run_sum_threshold: float | None,
     run_sum_multiplier: float,
+
+    baseline_tag: str,
+    use_sigma_eff: bool,
+    require_sigma_eff: bool,
 
     compute_event_prob: bool,
 ):
@@ -994,6 +1006,13 @@ def _process_one(
     if n_points < 10:
         raise ValueError(f"Insufficient valid data points ({n_points} < 10) in {path}")
     
+    baseline_func_map = {
+        "gp": per_camera_gp_baseline,
+        "gp_masked": per_camera_gp_baseline_masked,
+        "trend": per_camera_trend_baseline,
+    }
+    baseline_func = baseline_func_map.get(baseline_tag, per_camera_gp_baseline)
+
     res = run_bayesian_significance(
         df,
         trigger_mode=trigger_mode,
@@ -1001,6 +1020,10 @@ def _process_one(
         logbf_threshold_jump=logbf_threshold_jump,
         significance_threshold=significance_threshold,
         p_points=p_points,
+        p_min_dip=p_min_dip,
+        p_max_dip=p_max_dip,
+        p_min_jump=p_min_jump,
+        p_max_jump=p_max_jump,
 
         run_min_points=run_min_points,
         run_allow_gap_points=run_allow_gap_points,
@@ -1010,8 +1033,9 @@ def _process_one(
         run_sum_multiplier=run_sum_multiplier,
 
         compute_event_prob=compute_event_prob,
-        use_sigma_eff=True,
-        require_sigma_eff=True,
+        use_sigma_eff=use_sigma_eff,
+        require_sigma_eff=require_sigma_eff,
+        baseline_func=baseline_func,
     )
 
     dip = res["dip"]
@@ -1131,6 +1155,13 @@ def main():
     parser.add_argument("--run-sum-threshold", type=float, default=None, help="Require run sum-score >= this")
     parser.add_argument("--run-sum-multiplier", type=float, default=2.5, help="sum_thr = multiplier * per_point_thr")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
+    parser.add_argument("--p-min-dip", type=float, default=None, help="Minimum dip fraction for p-grid (overrides default)")
+    parser.add_argument("--p-max-dip", type=float, default=None, help="Maximum dip fraction for p-grid (overrides default)")
+    parser.add_argument("--p-min-jump", type=float, default=None, help="Minimum jump fraction for p-grid (overrides default)")
+    parser.add_argument("--p-max-jump", type=float, default=None, help="Maximum jump fraction for p-grid (overrides default)")
+    parser.add_argument("--baseline-func", type=str, default="gp", choices=["gp", "gp_masked", "trend"], help="Baseline function to use")
+    parser.add_argument("--no-sigma-eff", action="store_true", help="Do not replace errors with sigma_eff from baseline")
+    parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False)")
     parser.add_argument("--output", type=str, default="./output/lc_events_results.csv", help="Output path for results (suffix adjusted per format).")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format for results.")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
@@ -1140,6 +1171,9 @@ def main():
         raise SystemExit("posterior_prob triggering requires event_prob; remove --no-event-prob")
 
     compute_event_prob = (not args.no_event_prob)
+    use_sigma_eff = not args.no_sigma_eff
+    require_sigma_eff = use_sigma_eff and (not args.allow_missing_sigma_eff)
+    baseline_tag = args.baseline_func
 
     output_format = args.output_format.lower()
 
@@ -1420,9 +1454,12 @@ def main():
             ex.submit(
                 _process_one, path, trigger_mode=args.trigger_mode, logbf_threshold_dip=args.logbf_threshold_dip,
                 logbf_threshold_jump=args.logbf_threshold_jump, significance_threshold=args.significance_threshold,
-                p_points=args.p_points, run_min_points=args.run_min_points, run_allow_gap_points=args.run_allow_gap_points,
+                p_points=args.p_points, p_min_dip=args.p_min_dip, p_max_dip=args.p_max_dip,
+                p_min_jump=args.p_min_jump, p_max_jump=args.p_max_jump,
+                run_min_points=args.run_min_points, run_allow_gap_points=args.run_allow_gap_points,
                 run_max_gap_days=args.run_max_gap_days, run_min_duration_days=args.run_min_duration_days,
                 run_sum_threshold=args.run_sum_threshold, run_sum_multiplier=args.run_sum_multiplier,
+                baseline_tag=baseline_tag, use_sigma_eff=use_sigma_eff, require_sigma_eff=require_sigma_eff,
                 compute_event_prob=compute_event_prob,
             ): path for path in expanded_inputs
         }
