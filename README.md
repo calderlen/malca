@@ -32,8 +32,11 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 - scipy
 - astropy
 - tqdm
+- matplotlib
 - celerite2
-- pyarrow (optional; required for Parquet outputs)
+- pyarrow (required for parquet outputs)
+- duckdb (optional; required for `--output-format duckdb`)
+- jupyter / ipykernel (optional; for notebooks)
 
 ## layout
 ```
@@ -47,12 +50,14 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 ├── pyproject.toml
 ├── README.md
 ├── output/                
+├── notebooks
+│   └── skypatrol_events_analysis.ipynb
 ├── malca
 │   ├── baseline.py
 │   ├── events.py
 │   ├── events_bayes.py
 │   ├── filter.py
-│   ├── utils.py
+│   ├── utils.py               # light-curve I/O and cleaning
 │   ├── julia
 │   │   ├── baseline.jl
 │   │   ├── df_utils.jl
@@ -64,7 +69,8 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 │   │   ├── df_utils.py
 │   │   ├── lc_events_naive.py
 │   │   ├── lc_events.py
-│   │   └── lc_metrics.py
+│   │   ├── lc_metrics.py
+│   │   └── stats.py
 │   ├── plot.py
 │   ├── stats.py
 │   ├── test
