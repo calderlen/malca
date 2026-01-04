@@ -17,8 +17,12 @@ from scipy.special import logsumexp
 from scipy.optimize import curve_fit
 from tqdm import tqdm
 import warnings
-import pyarrow as pa
-import pyarrow.parquet as pq
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+except ImportError:  # optional; only needed for parquet/duckdb outputs
+    pa = None
+    pq = None
 
 warnings.filterwarnings("ignore", message=".*Covariance of the parameters could not be estimated.*")
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
@@ -927,7 +931,16 @@ def _process_one(
     
     """
     import os
-    from plot import read_skypatrol_csv
+    try:
+        # script mode: sys.path[0] points to the malca/ directory with plot/plot.py
+        from plot.plot import read_skypatrol_csv  # type: ignore
+    except ImportError:
+        try:
+            # package-style
+            from malca.plot.plot import read_skypatrol_csv  # type: ignore
+        except ImportError:
+            # fallback if a flat plot.py is on the path
+            from plot import read_skypatrol_csv  # type: ignore
     path = str(path)
     
     if os.path.isfile(path) and (path.endswith('.csv') or path.endswith('-light-curves.csv')):
@@ -977,8 +990,9 @@ def _process_one(
     
     df = df[valid_mask].copy()
     
-    if len(df) < 10:
-        raise ValueError(f"Insufficient valid data points ({len(df)} < 10) in {path}")
+    n_points = len(df)
+    if n_points < 10:
+        raise ValueError(f"Insufficient valid data points ({n_points} < 10) in {path}")
     
     res = run_bayesian_significance(
         df,
@@ -1002,6 +1016,18 @@ def _process_one(
 
     dip = res["dip"]
     jump = res["jump"]
+
+    jd_arr = np.asarray(df["JD"], float)
+    jd_first = float(np.nanmin(jd_arr)) if jd_arr.size else np.nan
+    jd_last = float(np.nanmax(jd_arr)) if jd_arr.size else np.nan
+    cadence_median_days = float(robust_median_dt_days(jd_arr))
+
+    def _max_event_prob(ev):
+        ep = ev.get("event_probability")
+        if ep is None or (isinstance(ep, float) and not np.isfinite(ep)):
+            return np.nan
+        ep = np.asarray(ep, float)
+        return float(np.nanmax(ep)) if ep.size else np.nan
 
     def get_best_morph_info(run_list):
         """
@@ -1032,6 +1058,11 @@ def _process_one(
 
         dip_significant=bool(dip["significant"]),
         jump_significant=bool(jump["significant"]),
+
+        n_points=int(n_points),
+        jd_first=jd_first,
+        jd_last=jd_last,
+        cadence_median_days=cadence_median_days,
 
         dip_best_morph=str(dip_morph),
         dip_best_delta_bic=float(dip_dbic),
@@ -1064,6 +1095,12 @@ def _process_one(
 
         dip_best_p=float(dip["best_p"]),
         jump_best_p=float(jump["best_p"]),
+        dip_best_mag_event=float(dip.get("best_mag_event", np.nan)),
+        jump_best_mag_event=float(jump.get("best_mag_event", np.nan)),
+        dip_trigger_max=float(dip.get("trigger_max", np.nan)),
+        jump_trigger_max=float(jump.get("trigger_max", np.nan)),
+        dip_max_event_prob=_max_event_prob(dip),
+        jump_max_event_prob=_max_event_prob(jump),
 
         used_sigma_eff=bool(dip.get("used_sigma_eff", False) and jump.get("used_sigma_eff", False)),
         baseline_source=str(dip.get("baseline_source", jump.get("baseline_source", "unknown"))),
@@ -1122,9 +1159,13 @@ def main():
             if fmt == "csv":
                 df_existing = pd.read_csv(path, usecols=["path"])
             elif fmt == "parquet":
+                if pq is None:
+                    raise ImportError("pyarrow is required for parquet outputs")
                 table = pq.read_table(path, columns=["path"])
                 df_existing = table.to_pandas()
             elif fmt == "parquet_chunk":
+                if pq is None:
+                    raise ImportError("pyarrow is required for parquet outputs")
                 import pyarrow.dataset as ds
                 dataset = ds.dataset(path, format="parquet")
                 table = dataset.to_table(columns=["path"])
@@ -1250,6 +1291,8 @@ def main():
 
     class ParquetChunkWriter:
         def __init__(self, path: Path):
+            if pa is None or pq is None:
+                raise ImportError("pyarrow is required for parquet outputs")
             self.path = Path(path)
             self.append = self.path.exists() and self.path.stat().st_size > 0
 
@@ -1267,6 +1310,8 @@ def main():
 
     class ParquetDatasetWriter:
         def __init__(self, path: Path):
+            if pa is None or pq is None:
+                raise ImportError("pyarrow is required for parquet outputs")
             self.path = Path(path)
             self.path.mkdir(parents=True, exist_ok=True)
             existing = sorted(self.path.glob("chunk_*.parquet"))
