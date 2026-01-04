@@ -3,28 +3,28 @@
 Pipeline to search for peaks and dips in ASAS-SN light curves
 
 ## how to use
-- `scripts/lc_manifest.py`  
+- `malca/manifest.py`  
   Build a csv/parquet file mapping ASAS-SN IDs to LC paths:  
-  `python scripts/lc_manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.csv [--mag-bin 12_12.5 ...]`
+  `python malca/manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.csv [--mag-bin 12_12.5 ...]`
 
 - `malca/events.py`  
   Event detection orchestration (CLI) wrapping the Bayesian scoring.
 - `malca/events_bayes.py`  
   Bayesian dip/peak search (writes CSV/Parquet), with optional baseline override from `malca/baseline.py`:  
-  `python malca/events_bayes.py --mode dips|peaks --out-dir ./results_bayes --chunk-size 5000 [--mag-bin 12_12.5 ...]`  
+  `python malca/events_bayes.py --mode dips|peaks --out-dir ./results_bayes --chunk-size 5000 [--mag-bin 12_12.5 ...]`
   Example with a baseline: `--baseline-func baseline:per_camera_median_baseline`
 
-- `scripts/reproduce_candidates.py`  
+- `malca/reproduce_candidates.py`  
   Search for peaks/dips from a list of candidates (default: Brayden list):  
-  `python scripts/reproduce_candidates.py --method biweight|naive --manifest ./lc_manifest.csv --out-dir ./results_repro --out-format csv [--candidates <file_or_builtin>] [--n-workers 8]`
+  `python malca/reproduce_candidates.py --method biweight|naive --manifest ./lc_manifest.csv --out-dir ./results_repro --out-format csv [--candidates <file_or_builtin>] [--n-workers 8]`
 
 - `malca/filter.py`  
   Filter the list of peaks/dips:  
   `python malca/filter.py <peaks_csv_or_dir> [--biweight] [--band g|v|both|either] [--latest-per-bin] [--output <csv>] [--output-dir <dir>]`
 
-- `scripts/fp_analysis.py`  
+- `malca/fp_analysis.py`  
   Summarize false-positive reduction (pre vs post filter retention):  
-  `python scripts/fp_analysis.py --pre <pre_csv_or_dir> --post <post_csv_or_dir> [--id-col asas_sn_id]`
+  `python malca/fp_analysis.py --pre <pre_csv_or_dir> --post <post_csv_or_dir> [--id-col asas_sn_id]`
 
 ## dependencies
 - numpy
@@ -54,9 +54,13 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 │   └── skypatrol_events_analysis.ipynb
 ├── malca
 │   ├── baseline.py
+│   ├── fp_analysis.py
 │   ├── events.py
 │   ├── events_bayes.py
 │   ├── filter.py
+│   ├── manifest.py
+│   ├── plot_results_bayes.py
+│   ├── reproduce_candidates.py
 │   ├── utils.py               # light-curve I/O and cleaning
 │   ├── julia
 │   │   ├── baseline.jl
