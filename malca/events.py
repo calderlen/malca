@@ -35,6 +35,8 @@ from baseline import (
     per_camera_trend_baseline,
 )
 
+from numba import njit
+
 
 MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
 
@@ -384,6 +386,100 @@ def summarize_kept_runs(kept_runs, jd: np.ndarray, score_vec: np.ndarray):
     )
 
 
+@njit(fastmath=True, cache=True)
+def compute_global_loglik_numba(log_Pb_grid, log_Pf_grid, log_p, log_1mp):
+    """
+    numba kernel for global loglikelihood computation
+    """
+    M, N = log_Pb_grid.shape
+    P = log_p.shape[0]
+    loglik = np.zeros((M, P), dtype=log_Pb_grid.dtype) 
+
+    for m in range(M):
+        for p in range(P):
+            lp = log_p[p]
+            l1mp = log_1mp[p]
+            acc = 0.0
+            
+            for i in range(N):
+                val_b = log_Pb_grid[m, i] + lp
+                val_f = log_Pf_grid[m, i] + l1mp
+
+                if val_b > val_f:
+                    mix = val_b + np.log1p(np.exp(val_f - val_b))
+                else:
+                    mix = val_f + np.log1p(np.exp(val_b - val_f))
+                
+                acc += mix
+            
+            loglik[m, p] = acc
+            
+    return loglik
+
+@njit(fastmath=True, cache=True)
+def fast_loo_event_prob_numba(loglik, log_p, log_1mp, log_Pb_grid, log_Pf_grid, is_faint):
+    """ 
+    numba kernel for leave-one-out event probability computation 
+    """
+    M, P = loglik.shape
+    _, N = log_Pb_grid.shape
+
+    event_prob = np.zeros(N, dtype=np.float64)
+
+    for i in range(N):
+        max_b = -np.inf
+        sum_b = 0.0
+
+        max_f = -np.inf
+        sum_f = 0.0
+
+        for m in range(M):
+            val_Pb = log_Pb_grid[m, i]
+            val_Pf = log_Pf_grid[m, i]
+
+            for p in range(P):
+                t1 = log_p[p] + val_Pb
+                t2 = log_1mp[p] + val_Pf
+
+                if t1 > t2:
+                    mix = t1 + np.log1p(np.exp(t2 - t1))
+                else:
+                    mix = t2 + np.log1p(np.exp(t1 - t2))
+
+                ll_excl = loglik[m, p] - mix
+
+                val_b = ll_excl + t1
+                val_f = ll_excl + t2
+
+                if val_b > max_b:
+                    sum_b = sum_b * np.exp(max_b - val_b) + 1.0
+                    max_b = val_b
+                else:
+                    sum_b += np.exp(val_b - max_b)
+
+                if val_f > max_f:
+                    sum_f = sum_f * np.exp(max_f - val_f) + 1.0
+                    max_f = val_f
+                else:
+                    sum_f += np.exp(val_f - max_f)
+
+        log_bright = max_b + np.log(sum_b)
+        log_faint = max_f + np.log(sum_f)
+
+        if log_bright > log_faint:
+            log_norm = log_bright + np.log1p(np.exp(log_faint - log_bright))
+        else:
+            log_norm = log_faint + np.log1p(np.exp(log_bright - log_faint))
+            
+        if is_faint:
+            event_prob[i] = np.exp(log_faint - log_norm)
+        else:
+            event_prob[i] = np.exp(log_bright - log_norm)
+            
+    return event_prob
+
+
+
 def bayesian_event_significance(
     df: pd.DataFrame,
     *,
@@ -627,25 +723,12 @@ def bayesian_event_significance(
     log_p = np.log(p_grid)
     log_1mp = np.log1p(-p_grid)
 
-    log_Pb_weighted = log_p[None, :, None] + log_Pb_grid[:, None, :]
-    log_Pf_weighted = log_1mp[None, :, None] + log_Pf_grid[:, None, :]
-
-    log_Pb_weighted = np.where(np.isfinite(log_Pb_weighted), log_Pb_weighted, -np.inf)
-    log_Pf_weighted = np.where(np.isfinite(log_Pf_weighted), log_Pf_weighted, -np.inf)
-
-    log_mix = np.logaddexp(log_Pb_weighted, log_Pf_weighted)
-    
-    log_mix_finite = np.isfinite(log_mix).sum()
-    log_mix_total = log_mix.size
-    if log_mix_finite == 0:
-        raise ValueError(
-            f"All log_mix values are NaN/inf: "
-            f"total={log_mix_total}, finite={log_mix_finite}, "
-            f"log_Pb_weighted_finite={np.isfinite(log_Pb_weighted).sum()}/{log_Pb_weighted.size}, "
-            f"log_Pf_weighted_finite={np.isfinite(log_Pf_weighted).sum()}/{log_Pf_weighted.size}"
-        )
-    
-    loglik = np.sum(log_mix, axis=2)
+    loglik = compute_global_loglik_numba(
+        np.ascontiguousarray(log_Pb_grid), 
+        np.ascontiguousarray(log_Pf_grid), 
+        log_p, 
+        log_1mp
+    )
 
     loglik_finite = np.isfinite(loglik).sum()
     loglik_total = loglik.size
@@ -695,24 +778,14 @@ def bayesian_event_significance(
     bayes_factor = float(log_evidence_mixture - loglik_baseline_only)
 
     if compute_event_prob:
-        loglik_excl = loglik[:, :, None] - log_mix
-
-        bright_num = loglik_excl + log_p[None, :, None] + log_Pb_grid[:, None, :]
-        faint_num = loglik_excl + log_1mp[None, :, None] + log_Pf_grid[:, None, :]
-
-        log_bright = logsumexp(bright_num, axis=(0, 1))
-        log_faint = logsumexp(faint_num, axis=(0, 1))
-
-        log_norm = np.logaddexp(log_bright, log_faint)
-
-        bright_prob = np.exp(log_bright - log_norm)
-        faint_prob = np.exp(log_faint - log_norm)
-
-        if event_component == "faint":
-            event_prob = faint_prob
-        else:
-            event_prob = bright_prob
-
+        event_prob = fast_loo_event_prob_numba(
+                loglik,
+                log_p,
+                log_1mp,
+                log_Pb_grid,
+                log_Pf_grid,
+                (event_component == "faint")
+            )
     else:
         event_prob = None
 

@@ -27,6 +27,7 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 - numpy
 - pandas
 - scipy
+- numba
 - astropy
 - tqdm
 - matplotlib
