@@ -13,7 +13,7 @@ from matplotlib.lines import Line2D
 import time
 from typing import Sequence
 
-from events_bayes import (
+from events import (
     run_bayesian_significance,
     gaussian,
     paczynski,
@@ -30,9 +30,6 @@ from baseline import (
     per_camera_gp_baseline_masked,
 )
 
-# ---------------------------------------------------------------------
-# Shared constants and IO/helpers (lifted from plot.py)
-# ---------------------------------------------------------------------
 
 PLOT_OUTPUT_DIR = Path("lc_plots")
 DETECTION_RESULTS_FILE = Path("detection_results.csv")

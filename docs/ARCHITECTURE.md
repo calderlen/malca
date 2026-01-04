@@ -5,7 +5,7 @@
 - `malca/events.py`
   - orchestration and CLI for Bayesian event (dip/jump) scoring
   - uses `malca/baseline.py`, `malca/utils.py`
-- `malca/events_bayes.py`
+- `malca/events.py`
   - Bayesian event scoring internals (formerly excursions_bayes)
 - `malca/baseline.py`
   - baseline computation: global/rolling mean/median, per-camera variants, GP baseline
@@ -28,7 +28,7 @@
 - `malca/julia/baseline.jl`
 - `malca/julia/df_utils.jl`
 - `malca/julia/events.jl`
-- `malca/julia/events_bayes.jl`
+- `malca/julia/events.jl`
 - `malca/julia/lc_utils.jl`
     - since the ASAS-SN light curves are in two bands, V and G which have offsets, we analyze them separately. this function looks at only one of the two bands of the light curve at a time, converts the mag to delta, and finds dips/peaks a minimum distance of 50 data points apart (~1 data point per day), scores the light curve band and computes other metrics
   - `prefix_metrics`
@@ -197,7 +197,7 @@
     - mode="peaks": use (R-mag) biweight delta, Paczynski fits, no dip metrics.
   - `event_finder`
     - Combined event finder (dips or peaks) using efficient process pool.
-- `src/events_bayes.py`
+- `src/events.py`
   - `gaussian`
     - gaussian kernel + baseline term
   - `paczynski`

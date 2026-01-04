@@ -945,11 +945,11 @@ def _process_one(
     import os
     try:
         # script mode: sys.path[0] points to the malca/ directory with plot/plot.py
-        from plot.plot import read_skypatrol_csv  # type: ignore
+        from malca.plot import read_skypatrol_csv  # type: ignore
     except ImportError:
         try:
             # package-style
-            from malca.plot.plot import read_skypatrol_csv  # type: ignore
+            from malca.plot import read_skypatrol_csv  # type: ignore
         except ImportError:
             # fallback if a flat plot.py is on the path
             from plot import read_skypatrol_csv  # type: ignore
@@ -1143,7 +1143,7 @@ def main():
     parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin (choices: 12_12.5, 12.5_13, 13_13.5, 13.5_14, 14_14.5, 14.5_15).")
     parser.add_argument("--lc-path", type=str, default="/data/poohbah/1/assassin/rowan.90/lcsv2", help="Base path to light curve directories")
     parser.add_argument("--workers", type=int, default=max(1, (mp.cpu_count() or 1) // 16), help="Number of worker processes")
-    parser.add_argument("--trigger-mode", type=str, default="logbf", choices=["logbf", "posterior_prob"], help="Triggering mode: logbf = per-point log Bayes factor threshold; posterior_prob = posterior probability threshold (requires event probs).")
+    parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"], help="Triggering mode: logbf = per-point log Bayes factor threshold; posterior_prob = posterior probability threshold (requires event probs).")
     parser.add_argument("--logbf-threshold-dip", type=float, default=5.0, help="Per-point dip trigger")
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger")
     parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Only used if --trigger-mode posterior_prob")

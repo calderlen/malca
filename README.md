@@ -9,10 +9,7 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 
 - `malca/events.py`  
   Event detection orchestration (CLI) wrapping the Bayesian scoring.
-- `malca/events_bayes.py`  
-  Bayesian dip/peak search (writes CSV/Parquet), with optional baseline override from `malca/baseline.py`:  
-  `python malca/events_bayes.py --mode dips|peaks --out-dir ./results_bayes --chunk-size 5000 [--mag-bin 12_12.5 ...]`
-  Example with a baseline: `--baseline-func baseline:per_camera_median_baseline`
+- Deprecated: `malca/events_bayes.py` (legacy Bayesian CLI; superseded by `malca/events.py`)
 
 - `malca/reproduce_candidates.py`  
   Search for peaks/dips from a list of candidates (default: Brayden list):  
@@ -56,7 +53,6 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 │   ├── baseline.py
 │   ├── fp_analysis.py
 │   ├── events.py
-│   ├── events_bayes.py
 │   ├── filter.py
 │   ├── manifest.py
 │   ├── plot_results_bayes.py
@@ -66,7 +62,6 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 │   │   ├── baseline.jl
 │   │   ├── df_utils.jl
 │   │   ├── events.jl
-│   │   ├── events_bayes.jl
 │   │   └── lc_utils.jl
 │   ├── old
 │   │   ├── __init__.py

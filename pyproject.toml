@@ -28,7 +28,7 @@ include = ["*"]
 package-dir = {"" = "malca"}
 py-modules = [
     "baseline",
-    "events_bayes",
+    "events",
     "filter",
     "plot",
     "stats",

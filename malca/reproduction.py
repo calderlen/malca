@@ -11,7 +11,7 @@ import matplotlib.pyplot as pl
 
 from old.lc_events_naive import dip_finder_naive
 from old.lc_events import event_finder
-from events_bayes import run_bayesian_significance
+from events import run_bayesian_significance
 from utils import read_lc_dat2
 from baseline import per_camera_gp_baseline
 
