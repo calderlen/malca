@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore", message=".*Covariance of the parameters could 
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
-from utils import read_lc_dat2, clean_lc
+from utils import read_lc_dat2, read_lc_csv, clean_lc
 from baseline import (
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
@@ -1041,6 +1041,15 @@ def _process_one(
                 df = result
         except ValueError as e:
             raise ValueError(f"Error reading {path}: {e}")
+    elif os.path.isfile(path) and path.endswith('.csv'):
+        dir_path = os.path.dirname(path) or '.'
+        basename = os.path.basename(path)
+        asassn_id = basename.replace('.csv', '')
+        try:
+            dfg, dfv = read_lc_csv(asassn_id, dir_path)
+            df = pd.concat([dfg, dfv], ignore_index=True) if not (dfg.empty and dfv.empty) else pd.DataFrame()
+        except Exception as e:
+            raise ValueError(f"Error reading .csv file {path}: {e}")
     elif os.path.isfile(path) and path.endswith('.dat2'):
         dir_path = os.path.dirname(path) or '.'
         basename = os.path.basename(path)
@@ -1350,8 +1359,10 @@ def main():
             mag_bin_dir = os.path.join(lc_path, mag_bin)
             lc_dirs = sorted(glob.glob(os.path.join(mag_bin_dir, "lc*_cal")))
             for lc_dir in lc_dirs:
+                csv_files = sorted(glob.glob(os.path.join(lc_dir, "*.csv")))
                 dat2_files = sorted(glob.glob(os.path.join(lc_dir, "*.dat2")))
-                if dat2_files: expanded_inputs.extend(dat2_files)
+                if csv_files: expanded_inputs.extend(csv_files)
+                elif dat2_files: expanded_inputs.extend(dat2_files)
     
     for pattern in input_patterns:
         if '*' in pattern or '?' in pattern or '[' in pattern:

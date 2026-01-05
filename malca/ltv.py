@@ -1,0 +1,626 @@
+"""
+Refactor of the LTvar-style seasonal-trend code.
+
+Key behavior preserved from the brute-force version:
+- Read ASAS-SN .dat light curves, keep only good points and g-band (good/bad==1, v/g?==0)
+- Convert times from (jd ~ JD-2450000) to full JD via JD = jd + 2450000
+- Special hard-coded Target filter: 17181160895 drops JD < 2.458e6
+- Compute “season gap midpoints” from RA and dspring, then keep only midpoints inside [min(JD), max(JD)]
+- Require at least 2 midpoints (otherwise skip) like the original (it `continue`s on mid_length==1)
+- Cap at 12 seasons by using at most the *earliest 11* midpoints (same net effect as using mid[-1]..mid[-11])
+- Define seasons with strict inequalities (points exactly on a midpoint are excluded)
+- Compute per-season medians for *non-empty* seasons, keep their original season numbers as x-values
+  (this is what the giant if/elif ladder was trying to do with e.g. indexes=[1,5,6,...])
+- Fit linear and quadratic polynomials to (season_index, season_median)
+- Compute “max diff” using the same (buggy but preserved) algebra as in the snippet.
+
+Notes:
+- The original uses ID['ra_deg'] but treats it like hours in the formula.
+  Default below preserves that behavior. If your RA is truly degrees, pass --ra-is-deg to convert deg->hours.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import multiprocessing as mp
+import os
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+from astropy.stats import mad_std
+from astropy.table import Table
+from tqdm import tqdm
+
+from .utils import read_lc_dat2, read_lc_csv, clean_lc
+
+
+LC_COLUMNS = ["jd", "mag", "error", "good/bad", "camera", "v/g?", "saturated/unsaturated", "camera,field"]
+MAG_BINS = ["12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15"]
+
+@dataclass(frozen=True)
+class Config:
+    root: Path
+    mag_bin: str
+    output: Path
+    dir_start: int
+    dir_end: int
+    dspring: float
+    ra_is_deg: bool
+    max_seasons: int
+    n_midpoints: int
+    min_points_per_season: int
+    min_seasons_for_quadratic: int
+    write_per_dir: bool
+    # Parallel processing options
+    workers: int
+    chunk_size: int
+    output_format: str
+    resume: bool
+
+
+def parse_args() -> Config:
+    p = argparse.ArgumentParser(prog="ltv", description="Compute seasonal trends for ASAS-SN light curves.")
+
+    p.add_argument("--root", 
+                   default="/data/poohbah/1/assassin/rowan.90/lcsv2/", 
+                   type=str)
+    p.add_argument("--mag-bin", 
+                   default="13_13.5", 
+                   type=str,
+                   choices=MAG_BINS,
+                   help=f"Magnitude bin to process (choices: {', '.join(MAG_BINS)})")
+    p.add_argument("--output", 
+                   default=None, 
+                   type=str, 
+                   help="Combined output CSV (default: LTvar<MAG>.csv)")
+    p.add_argument("--dir-start", 
+                   type=int, 
+                   default=0)
+    p.add_argument("--dir-end", 
+                   type=int, 
+                   default=30)
+    # Preserve constants/behavior
+    p.add_argument("--dspring", 
+                   type=float, 
+                   default=2460023.5)
+    p.add_argument("--ra-is-deg",
+                    action="store_true",
+                    help="Convert ID['ra_deg'] from degrees to hours before the dspring formula.")
+    p.add_argument("--max-seasons",
+                   type=int,
+                   default=12)
+    p.add_argument("--n-midpoints", 
+                   type=int, 
+                   default=None, 
+                   help="How many yearly midpoints to generate before filtering to data range (default: dir_end+1, like the snippet).",
+    )
+    p.add_argument("--min-points-per-season", 
+                   type=int, 
+                   default=1, 
+                   help="Treat seasons with < this many points as empty. (The snippet mostly uses 0, sometimes <=1; default 1 is safest.)",
+    )
+    p.add_argument("--min-seasons-for-quadratic", 
+                   type=int, 
+                   default=3, 
+                   help="Need at least this many non-empty seasons to do degree-2 polyfit (default 3).",
+    )
+    p.add_argument("--write-per-dir",
+                   action="store_true",
+                   help="Write per-directory CSVs to <MAG_BIN>/new/<x>.csv.",
+    )
+    p.add_argument("--workers",
+                   type=int,
+                   default=max(1, mp.cpu_count() // 16),
+                   help="Number of parallel workers (default: cpu_count//16)")
+    p.add_argument("--chunk-size",
+                   type=int,
+                   default=10000,
+                   help="Number of results to accumulate before writing (default: 1000)")
+    p.add_argument("--output-format",
+                   type=str,
+                   default="csv",
+                   choices=["csv", "parquet", "parquet_chunk", "duckdb"],
+                   help="Output format (default: csv)")
+    p.add_argument("--resume",
+                   action="store_true",
+                   help="Enable checkpointing to resume interrupted runs")
+
+    a = p.parse_args()
+
+    root = Path(a.root)
+    mag_bin = a.mag_bin
+    out = a.output
+    if out is None:
+        out = f"LTvar{mag_bin.replace('_','-')}.csv"
+    output = Path(out)
+
+    n_midpoints = a.n_midpoints if a.n_midpoints is not None else (a.dir_end + 1)
+
+    return Config(
+        root=root,
+        mag_bin=mag_bin,
+        output=output,
+        dir_start=a.dir_start,
+        dir_end=a.dir_end,
+        dspring=float(a.dspring),
+        ra_is_deg=bool(a.ra_is_deg),
+        max_seasons=int(a.max_seasons),
+        n_midpoints=int(n_midpoints),
+        min_points_per_season=int(a.min_points_per_season),
+        min_seasons_for_quadratic=int(a.min_seasons_for_quadratic),
+        write_per_dir=bool(a.write_per_dir),
+        workers=int(a.workers),
+        chunk_size=int(a.chunk_size),
+        output_format=str(a.output_format),
+        resume=bool(a.resume),
+    )
+
+
+def read_index_csv(path: Path) -> pd.DataFrame:
+    return pd.read_csv(path)
+
+
+def filter_lc_for_ltv(df_g: pd.DataFrame, target_id: int) -> pd.DataFrame:
+    """Apply clean_lc + special-case target filtering."""
+    df = clean_lc(df_g)
+
+    if target_id == 17181160895:
+        df = df[df["JD"] >= 2.458e6]
+
+    return df
+
+
+def seasonal_midpoints_from_ra(
+    ra_val: float, *,
+    ra_is_deg: bool,
+    dspring: float,
+    n_midpoints: int,
+) -> np.ndarray:
+    """
+    Replicates:
+      date1 = dspring + 365.25*(RA-12.0)/24.0
+      date2 = date1 + 365.25/2.0 + 365.25
+      mid(n) = date2 - n*365.25
+    """
+    ra_hours = ra_val / 15.0 if ra_is_deg else ra_val
+    n = np.arange(n_midpoints, dtype=float)
+
+    date1 = dspring + 365.25 * (ra_hours - 12.0) / 24.0
+    date2 = date1 + 365.25 / 2.0 + 365.25
+    mid = date2 - n * 365.25
+
+    return np.asarray(mid, dtype=float)
+
+
+def choose_midpoints_in_range(mid: np.ndarray, tmin: float, tmax: float, max_seasons: int) -> np.ndarray:
+    """
+    Keep only midpoints within (tmin, tmax) like the snippet, then cap to max_seasons.
+
+    The brute-force code effectively uses at most 11 midpoints (for 12 seasons) by indexing from the end.
+    Since mid is generated in decreasing order, mid[-1]..mid[-11] are the 11 *smallest* midpoints.
+    Equivalent, once sorted ascending: keep the earliest 11 midpoints (smallest times).
+
+    Returns sorted ascending midpoints.
+    """
+    mid_in = mid[(mid > tmin) & (mid < tmax)]
+    if mid_in.size == 0:
+        return np.array([], dtype=float)
+
+    mid_sorted = np.sort(mid_in)
+
+    max_midpoints = max_seasons - 1
+    if mid_sorted.size > max_midpoints:
+        mid_sorted = mid_sorted[:max_midpoints]
+
+    return mid_sorted
+
+
+def assign_seasons_strict(JD: np.ndarray, mids_sorted: np.ndarray) -> np.ndarray:
+    """
+    Seasons are defined by strict inequalities:
+
+      S=1: JD < mid0
+      S=2: mid0 < JD < mid1
+      ...
+      S=k: mid_{k-2} < JD < mid_{k-1}
+      S=k+1: JD > mid_{k-1}
+
+    Points exactly equal to any midpoint are excluded (strict).
+    """
+    if mids_sorted.size == 0:
+        return np.full(JD.shape, -1, dtype=int)
+
+    # Exclude exact-boundary points (strict inequalities)
+    mask = np.ones(JD.shape, dtype=bool)
+    for m in mids_sorted:
+        mask &= ~np.isclose(JD, m, rtol=0.0, atol=0.0)
+
+    JD2 = JD[mask]
+    # np.digitize: returns 0..len(mids), where 0 means < mids[0], len(mids) means > mids[-1]
+    season2 = np.digitize(JD2, mids_sorted, right=False) + 1  # seasons numbered starting at 1
+
+    season = np.full(JD.shape, -1, dtype=int)
+    season[mask] = season2
+    return season
+
+
+def season_medians_with_gap_indices(
+    mags: np.ndarray,
+    season_idx: np.ndarray,
+    *,
+    min_points_per_season: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute median and MAD per season for seasons that have enough points.
+    Return (indexes, meds, meds_err) where indexes are the *season numbers* (gap-preserving).
+    """
+    good = season_idx > 0
+    if not np.any(good):
+        return np.array([]), np.array([]), np.array([])
+
+    idxs = []
+    meds = []
+    errs = []
+
+    for s in np.unique(season_idx[good]):
+        sel = (season_idx == s)
+        m = mags[sel]
+        if m.size >= min_points_per_season:
+            idxs.append(int(s))
+            meds.append(float(np.median(m)))
+            errs.append(float(mad_std(m)))
+
+    if len(idxs) == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    # Ensure sorted by season number
+    order = np.argsort(idxs)
+    return np.asarray(idxs)[order], np.asarray(meds)[order], np.asarray(errs)[order]
+
+
+def compute_trend_metrics(indexes: np.ndarray, meds: np.ndarray) -> tuple[float, float, float, float, float]:
+    """
+    Return:
+      (lin_slope, quad_slope, coeff1, coeff2, max_diff)
+
+    Preserves the snippet's naming/buggy algebra:
+      coeffs = polyfit(x, y, 2) gives [a,b,c]
+      quadratic_slope = a
+      c1 = b
+      c2 = c
+      te = -c2/(2*a)   (bug preserved)
+      me = c1-(c2^2)/(4*a) (bug preserved)
+      m(x) = c1 + c2*x + a*x^2 (bug preserved)
+    """
+    # Linear slope
+    lin = np.polyfit(indexes, meds, 1)
+    lin_slope = float(lin[0])
+
+    # Quadratic
+    quad = np.polyfit(indexes, meds, 2)
+    a = float(quad[0])
+    c1 = float(quad[1])
+    c2 = float(quad[2])
+
+    # Fitted endpoints (preserved)
+    x0 = float(indexes[0])
+    x1 = float(indexes[-1])
+
+    m0 = c1 + c2 * x0 + a * x0 * x0
+    m1 = c1 + c2 * x1 + a * x1 * x1
+
+    # Handle near-linear case safely
+    if np.isclose(a, 0.0):
+        diff = abs(m1 - m0)
+        return lin_slope, a, c1, c2, float(diff)
+
+    te = -c2 / (2.0 * a)
+    me = c1 - (c2 * c2) / (4.0 * a)
+
+    if (te > x0) and (te < x1):
+        m1m0 = abs(m1 - m0)
+        m1me = abs(m1 - me)
+        m0me = abs(m0 - me)
+        diff = max(m1m0, m1me, m0me)
+    else:
+        diff = abs(m1 - m0)
+
+    return lin_slope, a, c1, c2, float(diff)
+
+
+def _process_one_lc(
+    path: str,
+    id_df: pd.DataFrame,
+    cfg: Config,
+) -> dict | None:
+    basename = os.path.basename(path)
+    asassn_id = basename.replace('.csv', '')
+    target = int(asassn_id)
+
+    rows = id_df.loc[id_df["asas_sn_id"] == target]
+    if rows.empty:
+        return None
+    row = rows.iloc[0]
+
+    ra_val = float(row["ra_deg"])
+    p_mag = float(row["pstarrs_g_mag"])
+
+    dir_path = os.path.dirname(path)
+    df_g, df_v = read_lc_csv(asassn_id, dir_path)
+
+    if df_g.empty:
+        return None
+    df = filter_lc_for_ltv(df_g, target)
+
+    if df.empty:
+        return None
+
+    JD = df["JD"].to_numpy(dtype=float)
+    mag = df["mag"].to_numpy(dtype=float)
+    lc_median = float(np.median(mag))
+    lc_mad = float(mad_std(mag))
+    lc_dispersion = float(np.ptp(mag))
+
+    mid_all = seasonal_midpoints_from_ra(
+        ra_val,
+        ra_is_deg=cfg.ra_is_deg,
+        dspring=cfg.dspring,
+        n_midpoints=cfg.n_midpoints,
+    )
+    mids = choose_midpoints_in_range(mid_all, float(JD.min()), float(JD.max()), cfg.max_seasons)
+
+    if mids.size < 2:
+        return None
+
+    season_idx = assign_seasons_strict(JD, mids)
+    indexes, meds, _meds_err = season_medians_with_gap_indices(
+        mag, season_idx, min_points_per_season=cfg.min_points_per_season
+    )
+
+    if meds.size < cfg.min_seasons_for_quadratic:
+        return None
+
+    lin_slope, quad_slope, c1, c2, diff = compute_trend_metrics(indexes.astype(float), meds.astype(float))
+
+    return {
+        "ASAS-SN ID": target,
+        "Pstarss gmag": p_mag,
+        "Median": lc_median,
+        "Median_err": lc_mad,
+        "Dispersion": lc_dispersion,
+        "Slope": lin_slope,
+        "Quad Slope": quad_slope,
+        "coeff1": c1,
+        "coeff2": c2,
+        "max diff": diff,
+    }
+
+
+def write_csv_rows(path: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(rows[0].keys())
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+
+
+class CsvWriter:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.columns = None
+        if self.path.exists() and self.path.stat().st_size > 0:
+            try:
+                self.columns = pd.read_csv(self.path, nrows=0).columns.tolist()
+            except Exception:
+                self.columns = None
+
+    def write_chunk(self, chunk_results):
+        if not chunk_results:
+            return
+        df_chunk = pd.DataFrame(chunk_results)
+        if self.columns is None:
+            self.columns = list(df_chunk.columns)
+        df_chunk = df_chunk.reindex(columns=self.columns)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        header = not self.path.exists() or self.path.stat().st_size == 0
+        df_chunk.to_csv(self.path, mode="a", header=header, index=False)
+
+    def close(self):
+        return
+
+
+class ParquetChunkWriter:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.append = self.path.exists() and self.path.stat().st_size > 0
+
+    def write_chunk(self, chunk_results):
+        if not chunk_results:
+            return
+        df_chunk = pd.DataFrame(chunk_results)
+        table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, self.path, compression="brotli", append=self.append)
+        self.append = True
+
+    def close(self):
+        return
+
+
+class ParquetDatasetWriter:
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.path.mkdir(parents=True, exist_ok=True)
+        existing = sorted(self.path.glob("chunk_*.parquet"))
+        if existing:
+            try:
+                last = existing[-1].stem.split("_")[-1]
+                self.counter = int(last) + 1
+            except Exception:
+                self.counter = len(existing)
+        else:
+            self.counter = 0
+
+    def write_chunk(self, chunk_results):
+        if not chunk_results:
+            return
+        df_chunk = pd.DataFrame(chunk_results)
+        table = pa.Table.from_pandas(df_chunk, preserve_index=False)
+        tmp_path = self.path / f"chunk_{self.counter:06d}.parquet.tmp"
+        final_path = self.path / f"chunk_{self.counter:06d}.parquet"
+        pq.write_table(table, tmp_path, compression="brotli")
+        os.replace(tmp_path, final_path)
+        self.counter += 1
+
+    def close(self):
+        return
+
+
+class DuckDBWriter:
+    def __init__(self, path: Path):
+        import duckdb
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.con = duckdb.connect(str(self.path))
+        self.initialized = False
+
+    def write_chunk(self, chunk_results):
+        if not chunk_results:
+            return
+        df_chunk = pd.DataFrame(chunk_results)
+        if df_chunk.empty:
+            return
+        self.con.execute("BEGIN")
+        self.con.register("tmp_chunk", df_chunk)
+        if not self.initialized:
+            self.con.execute("CREATE TABLE IF NOT EXISTS results AS SELECT * FROM tmp_chunk LIMIT 0")
+            self.initialized = True
+        self.con.execute("INSERT INTO results SELECT * FROM tmp_chunk")
+        self.con.execute("COMMIT")
+
+    def close(self):
+        if hasattr(self, "con") and self.con:
+            try:
+                self.con.close()
+            except Exception:
+                pass
+
+
+def _make_writer(path: Path | None, fmt: str):
+    if path is None:
+        return None
+    if fmt == "csv":
+        return CsvWriter(path)
+    elif fmt == "parquet":
+        return ParquetChunkWriter(path)
+    elif fmt == "parquet_chunk":
+        return ParquetDatasetWriter(path)
+    elif fmt == "duckdb":
+        return DuckDBWriter(path)
+    else:
+        raise ValueError(f"Unknown output format: {fmt}")
+
+
+def main() -> None:
+    cfg = parse_args()
+
+    print(f"Processing mag_bin={cfg.mag_bin} directories {cfg.dir_start} to {cfg.dir_end}")
+    print(f"Workers: {cfg.workers}, Chunk size: {cfg.chunk_size}, Format: {cfg.output_format}")
+
+    output_path = Path(cfg.output)
+    checkpoint_log = output_path.with_name(f"{output_path.stem}_PROCESSED.txt") if cfg.resume else None
+
+    processed_files = set()
+    if checkpoint_log and checkpoint_log.exists():
+        print(f"Resume mode: loading checkpoint from {checkpoint_log}")
+        with open(checkpoint_log, "r") as f:
+            processed_files = set(line.strip() for line in f)
+        print(f"Found {len(processed_files)} previously processed files")
+
+    all_files = []
+    id_map = {}
+
+    for x in range(cfg.dir_start, cfg.dir_end + 1):
+        index_path = cfg.root / cfg.mag_bin / f"index{x}.csv"
+        lc_dir = cfg.root / cfg.mag_bin / f"lc{x}_cal"
+
+        if not index_path.exists() or not lc_dir.exists():
+            print(f"Skipping directory {x}: missing index or lc_dir")
+            continue
+
+        id_df = read_index_csv(index_path)
+        id_map[str(lc_dir)] = id_df
+
+        csv_files = sorted(lc_dir.glob("*.csv"))
+
+        for file_path in csv_files:
+            if str(file_path) not in processed_files:
+                all_files.append((str(file_path), str(lc_dir)))
+
+    if not all_files:
+        print("No files to process (all may be completed)")
+        return
+
+    print(f"Processing {len(all_files)} light curve files")
+
+    writer = _make_writer(output_path, cfg.output_format)
+    results = []
+    total_written = 0
+
+    def _write_chunk(chunk_results):
+        nonlocal total_written
+        if not chunk_results:
+            return
+
+        writer.write_chunk(chunk_results)
+
+        if checkpoint_log:
+            with open(checkpoint_log, "a") as f:
+                for row in chunk_results:
+                    f.write(row.get('_path', '') + "\n")
+
+        total_written += len(chunk_results)
+        print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})")
+
+    with ProcessPoolExecutor(max_workers=cfg.workers) as executor:
+        futures = {}
+        for file_path, lc_dir in all_files:
+            id_df = id_map[lc_dir]
+            future = executor.submit(_process_one_lc, file_path, id_df, cfg)
+            futures[future] = file_path
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Processing LCs", unit="lc"):
+            file_path = futures[future]
+            try:
+                result = future.result()
+                if result is not None:
+                    result['_path'] = file_path
+                    results.append(result)
+
+                    if len(results) >= cfg.chunk_size:
+                        _write_chunk(results)
+                        results = []
+            except Exception as e:
+                print(f"ERROR processing {file_path}: {e}")
+
+    if results:
+        _write_chunk(results)
+
+    if writer:
+        writer.close()
+
+    print(f"Complete! Wrote {total_written} rows to {output_path}")
+
+
+if __name__ == "__main__":
+    main()

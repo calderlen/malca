@@ -151,10 +151,25 @@ def read_lc_dat2(asassn_id, path):
     print(f"[error] {asassn_id}: file not found in {path}")
     return pd.DataFrame(), pd.DataFrame()
 
+def read_lc_csv(asassn_id, path):
+    csv_path = os.path.join(path, f"{asassn_id}.csv")
+    if not os.path.exists(csv_path):
+        return pd.DataFrame(), pd.DataFrame()
+
+    df = pd.read_csv(csv_path)
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df["JD"] = df["jd"] + 2450000.0
+
+    df_g = df[df["phot_filter"] == "g"].copy().reset_index(drop=True)
+    df_v = df[df["phot_filter"] == "V"].copy().reset_index(drop=True)
+
+    return df_g, df_v
+
+
 def read_lc_raw(asassn_id, path):
-    """
-    read <asassn_id>.raw containing per-camera summary statistics
-    """
     raw_path = os.path.join(path, f"{asassn_id}.raw")
     if not os.path.exists(raw_path):
         return pd.DataFrame()
