@@ -1151,6 +1151,21 @@ def _process_one(
     dip_morph, dip_dbic, dip_param = get_best_morph_info(dip["run_summaries"])
     jump_morph, jump_dbic, jump_param = get_best_morph_info(jump["run_summaries"])
 
+    cam_col = next((c for c in ("camera#", "Camera", "camera", "cam") if c in df.columns), None)
+    if cam_col is not None:
+        cams = df[cam_col].dropna()
+        unique_cams = np.unique(cams.astype(str))
+        n_cameras = int(unique_cams.size)
+        cam_counts = cams.value_counts()
+        camera_min_points = int(cam_counts.min()) if len(cam_counts) else 0
+        camera_max_points = int(cam_counts.max()) if len(cam_counts) else 0
+        camera_ids = ",".join(unique_cams)
+    else:
+        n_cameras = 0
+        camera_min_points = 0
+        camera_max_points = 0
+        camera_ids = ""
+
     return dict(
         path=str(path),
 
@@ -1199,6 +1214,11 @@ def _process_one(
         jump_trigger_max=float(jump.get("trigger_max", np.nan)),
         dip_max_event_prob=_max_event_prob(dip),
         jump_max_event_prob=_max_event_prob(jump),
+
+        n_cameras=int(n_cameras),
+        camera_ids=str(camera_ids),
+        camera_min_points=int(camera_min_points),
+        camera_max_points=int(camera_max_points),
 
         used_sigma_eff=bool(dip.get("used_sigma_eff", False) and jump.get("used_sigma_eff", False)),
         baseline_source=str(dip.get("baseline_source", jump.get("baseline_source", "unknown"))),
