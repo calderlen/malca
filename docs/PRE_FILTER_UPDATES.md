@@ -25,11 +25,11 @@ Rewrote `malca/pre_filter.py` to compute required statistics from dat2 files on-
 - **Before**: Assumed `vsx_match_sep_arcsec` and `vsx_class` columns existed
 - **After**: Checks if columns exist; if not, performs crossmatch:
   - Loads VSX catalog from `results_crossmatch/vsx_cleaned_20250926_1557.csv` (default)
-  - Requires `ra_deg`, `dec_deg`, `pm_ra`, `pm_dec` in input DataFrame
+  - **Requires** `ra_deg`, `dec_deg`, `pm_ra`, `pm_dec` in input DataFrame
   - Uses `propagate_asassn_coords()` to propagate proper motion
   - Performs spatial match with `match_to_catalog_sky()`
   - Adds `vsx_match_sep_arcsec` and `vsx_class` columns
-- **Graceful degradation**: Skips filter if catalog missing or required columns absent
+- **Fail-fast**: Raises `ValueError` if catalog file missing or required columns absent
 - **Default catalog**: Uses existing crossmatch results in `results_crossmatch/` directory
 
 ### 4. **filter_bright_nearby_stars** - Catalog crossmatch for BNS
@@ -37,14 +37,14 @@ Rewrote `malca/pre_filter.py` to compute required statistics from dat2 files on-
 - **After**: Checks if columns exist; if not, performs crossmatch:
   - Loads ASAS-SN index from `results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv` (default)
   - Index contains: `asas_sn_id`, `ra_deg`, `dec_deg`, `pm_ra`, `pm_dec`, `gaia_mag`, `pstarrs_g_mag`, etc.
-  - Requires `ra_deg`, `dec_deg` in input DataFrame
+  - **Requires** `ra_deg`, `dec_deg`, and a magnitude column in input DataFrame
   - Looks for magnitude in order: `gaia_mag`, `pstarrs_g_mag`, `mag`, etc.
   - For each candidate:
     - Finds all catalog sources within `max_separation_arcsec`
     - Identifies brighter nearby stars (mag_diff < `max_mag_diff`)
     - Records minimum separation and mag difference
   - Rejects candidates with bright contaminating stars
-- **Graceful degradation**: Skips filter if catalog missing or required columns absent
+- **Fail-fast**: Raises `ValueError` if catalog file missing or required columns absent
 - **Default catalog**: Uses existing ASAS-SN index files with full photometric data
 
 ### 5. **filter_multi_camera** - Count cameras from dat2

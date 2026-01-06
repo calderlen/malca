@@ -4,24 +4,41 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 
 ## how to use
 - `malca/manifest.py`  
-  Build a csv/parquet file mapping ASAS-SN IDs to LC paths:  
-  `python malca/manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.csv [--mag-bin 12_12.5 ...]`
+  Build a CSV/Parquet mapping ASAS-SN IDs to light-curve paths:  
+  `python malca/manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.parquet [--mag-bin 12_12.5 ...]`
+
+- `malca/pre_filter.py`  
+  Run pre-filters on candidates before event detection (sparse, periodic, VSX, bright-nearby, multi-camera):  
+  `python -m malca.pre_filter --help` (expects an input CSV with `asas_sn_id`/`path`; configure filters via flags).
 
 - `malca/events.py`  
-  Event detection orchestration (CLI) wrapping the Bayesian scoring.
-- Deprecated: `malca/events_bayes.py` (legacy Bayesian CLI; superseded by `malca/events.py`)
+  Bayesian event detection over light curves:  
+  `python malca/events.py --input <paths_or_glob> --output results.parquet --workers 8 [--mag-bins ...] [--trigger-mode logbf|posterior_prob]`
+
+- `malca/post_filter.py`  
+  Post-process detected events (rule-based pruning/aggregation):  
+  `python -m malca.post_filter --input <events_csv_or_parquet> --output <filtered_csv>`
 
 - `malca/reproduce_candidates.py`  
-  Search for peaks/dips from a list of candidates (default: Brayden list):  
-  `python malca/reproduce_candidates.py --method biweight|naive --manifest ./lc_manifest.csv --out-dir ./results_repro --out-format csv [--candidates <file_or_builtin>] [--n-workers 8]`
+  Targeted reproduction over candidate lists (naive/biweight/Bayesian):  
+  `python malca/reproduce_candidates.py --method bayes --manifest ./lc_manifest.parquet --out-dir ./results_repro --out-format csv [--candidates <file_or_builtin>] [--n-workers 8]`
 
 - `malca/filter.py`  
-  Filter the list of peaks/dips:  
+  Apply legacy/aggregate filtering to peak/dip tables:  
   `python malca/filter.py <peaks_csv_or_dir> [--biweight] [--band g|v|both|either] [--latest-per-bin] [--output <csv>] [--output-dir <dir>]`
 
 - `malca/fp_analysis.py`  
-  Summarize false-positive reduction (pre vs post filter retention):  
+  Compare pre/post filter retention:  
   `python malca/fp_analysis.py --pre <pre_csv_or_dir> --post <post_csv_or_dir> [--id-col asas_sn_id]`
+
+- VSX utilities  
+  - `malca/vsx_crossmatch.py`: build/propagate VSX matches; see `python malca/vsx_crossmatch.py --help`.  
+  - `malca/vsx_filter.py`: filter VSX classes; see `python malca/vsx_filter.py --help`.  
+  - `malca/vsx_reproducibility.py`: crossmatch reproducibility checks; see `python malca/vsx_reproducibility.py --help`.
+
+- Plotting  
+  - `malca/plot_results_bayes.py`: batch plotting of Bayesian results; see `python malca/plot_results_bayes.py --help`.  
+  - `malca/plot.py`: helpers for plotting individual light curves (import or run `python -m malca.plot` for ad hoc use).
 
 ## dependencies
 - numpy
@@ -35,55 +52,3 @@ Pipeline to search for peaks and dips in ASAS-SN light curves
 - pyarrow (required for parquet outputs)
 - duckdb (optional; required for `--output-format duckdb`)
 - jupyter / ipykernel (optional; for notebooks)
-
-## layout
-```
-
-├── docs
-│   ├── ARCHITECTURE.md
-│   ├── NOTES.md
-│   └── TODO.md
-├── environment.yml
-├── .gitignore
-├── pyproject.toml
-├── README.md
-├── output/                
-├── notebooks
-│   └── skypatrol_events_analysis.ipynb
-├── malca
-│   ├── baseline.py
-│   ├── fp_analysis.py
-│   ├── events.py
-│   ├── filter.py
-│   ├── manifest.py
-│   ├── plot_results_bayes.py
-│   ├── reproduce_candidates.py
-│   ├── utils.py               # light-curve I/O and cleaning
-│   ├── julia
-│   │   ├── baseline.jl
-│   │   ├── df_utils.jl
-│   │   ├── events.jl
-│   │   └── lc_utils.jl
-│   ├── old
-│   │   ├── __init__.py
-│   │   ├── df_utils.py
-│   │   ├── lc_events_naive.py
-│   │   ├── lc_events.py
-│   │   ├── lc_metrics.py
-│   │   └── stats.py
-│   ├── plot.py
-│   ├── stats.py
-│   ├── test
-│   │   ├── test.py
-│   │   └── test_skypatrol.py
-│   └── vsx
-│       ├── crossmatch.py
-│       ├── filter.py
-│       └── reproducibility.py
-├── scripts
-│   ├── fp_analysis.py
-│   ├── lc_manifest.py
-│   ├── plot_results_bayes.py
-│   ├── plot_results.py
-│   └── reproduce_candidates.py
-```

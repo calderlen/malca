@@ -317,7 +317,9 @@ def filter_vsx_match(
 
     If vsx_match_sep_arcsec and vsx_class columns exist, use them.
     Otherwise, perform crossmatch using VSX catalog from results_crossmatch/vsx_cleaned_*.csv
-    (requires ra_deg, dec_deg, pm_ra, pm_dec columns in input DataFrame).
+
+    Required columns for crossmatch: ra_deg, dec_deg, pm_ra, pm_dec
+    Raises ValueError if required columns or catalog file are missing.
     """
     n0 = len(df)
 
@@ -379,13 +381,17 @@ def filter_bright_nearby_stars(
 
     If bns_separation_arcsec and bns_delta_mag columns exist, use them.
     Otherwise, perform catalog crossmatch using ASAS-SN index from results_crossmatch/asassn_index_*.csv
-    (requires ra_deg, dec_deg columns in input DataFrame).
+
+    Required columns for crossmatch: ra_deg, dec_deg, and a magnitude column
+    (gaia_mag, pstarrs_g_mag, mag, mean_mag, or median_mag)
 
     For each candidate, finds all catalog sources within max_separation_arcsec and checks
     if any are brighter by less than max_mag_diff. Such candidates are rejected.
 
     The ASAS-SN index file contains: asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec,
     gaia_mag, pstarrs_g_mag, pstarrs_r_mag, and other photometric columns.
+
+    Raises ValueError if required columns or catalog file are missing.
     """
     n0 = len(df)
 
@@ -461,9 +467,7 @@ def filter_bright_nearby_stars(
                     break
 
             if catalog_mag_col is None:
-                if pbar:
-                    pbar.update(1)
-                continue
+                raise ValueError(f"No magnitude column found in catalog. Expected one of: gaia_mag, pstarrs_g_mag, pstarrs_r_mag, mag")
 
             # Compute mag differences (positive means catalog star is brighter)
             mag_diffs = candidate_mag - nearby_catalog[catalog_mag_col].values
