@@ -14,7 +14,7 @@ IDX_PATTERN = re.compile(r"index(\d+)_masked\.csv$", re.IGNORECASE)
 
                                                                                                                                    
 
-def _iter_source_records(
+def iter_source_records(
     index_root: Path,
     lc_root: Path,
     mag_bins: Sequence[str],
@@ -89,7 +89,7 @@ def build_manifest_dataframe(
 ) -> pd.DataFrame:
     seen: dict[str, dict[str, object]] = {}
     duplicates = 0
-    for record in _iter_source_records(
+    for record in iter_source_records(
         index_root,
         lc_root,
         mag_bins,

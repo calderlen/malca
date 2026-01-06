@@ -5,21 +5,22 @@ Plot light curves with Bayesian event detection results, showing run fits overla
 from __future__ import annotations
 
 import argparse
+import json
+import ast
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
-import time
-from typing import Sequence
 
-from events import (
+from .plot import read_skypatrol_csv, JD_OFFSET
+from .events import (
     run_bayesian_significance,
     gaussian,
     paczynski,
-    per_camera_gp_baseline,
 )
-from baseline import (
+from .baseline import (
+    per_camera_gp_baseline,
     global_mean_baseline,
     global_median_baseline,
     global_rolling_median_baseline,
@@ -27,193 +28,7 @@ from baseline import (
     per_camera_mean_baseline,
     per_camera_median_baseline,
     per_camera_trend_baseline,
-    per_camera_gp_baseline_masked,
 )
-
-
-PLOT_OUTPUT_DIR = Path("lc_plots")
-DETECTION_RESULTS_FILE = Path("detection_results.csv")
-JD_OFFSET = 2458000.0
-
-asassn_columns = [
-    "JD",
-    "mag",
-    "error",
-    "good_bad",
-    "camera#",
-    "v_g_band",
-    "saturated",
-    "cam_field",
-]
-
-asassn_raw_columns = [
-    "cam#",
-    "median",
-    "1siglow",
-    "1sighigh",
-    "90percentlow",
-    "90percenthigh",
-]
-
-
-def read_asassn_dat(dat_path):
-    """
-    Read an ASAS-SN .dat file using whitespace separation.
-    """
-    import pandas as pd
-
-    df = pd.read_csv(
-        dat_path,
-        sep=r"\s+",
-        names=asassn_columns,
-        dtype={
-            "JD": float,
-            "mag": float,
-            "error": float,
-            "good_bad": int,
-            "camera#": int,
-            "v_g_band": int,
-            "saturated": int,
-            "cam_field": str,
-        },
-        comment="#",
-    )
-    return df
-
-
-def read_skypatrol_csv(csv_path):
-    """
-    Read a SkyPatrol CSV, remapping columns to the ASAS-SN schema.
-    """
-    import pandas as pd
-
-    csv_path = Path(csv_path)
-    df = pd.read_csv(
-        csv_path,
-        comment="#",
-        skip_blank_lines=True,
-        dtype={
-            "JD": float,
-            "Flux": float,
-            "Flux Error": float,
-            "Mag": float,
-            "Mag Error": float,
-            "Limit": float,
-            "FWHM": float,
-            "Filter": "string",
-            "Quality": "string",
-            "Camera": "string",
-        },
-    )
-    rename_map = {
-        "Flux": "flux",
-        "Flux Error": "flux_error",
-        "Mag": "mag",
-        "Mag Error": "error",
-        "Limit": "limit",
-        "FWHM": "fwhm",
-        "Filter": "filter_band",
-        "Quality": "quality_flag",
-        "Camera": "camera",
-    }
-    df = df.rename(columns=rename_map)
-    df["JD"] = pd.to_numeric(df["JD"], errors="coerce")
-    df["mag"] = pd.to_numeric(df["mag"], errors="coerce")
-    df["error"] = pd.to_numeric(df["error"], errors="coerce")
-    df["flux"] = pd.to_numeric(df.get("flux"), errors="coerce")
-    df["flux_error"] = pd.to_numeric(df.get("flux_error"), errors="coerce")
-    df["camera"] = df["camera"].astype(str).str.strip()
-    df["camera#"] = df["camera"]
-    df["cam_field"] = df["camera#"]
-    df["quality_flag"] = df["quality_flag"].astype(str).str.strip().str.upper()
-    df["good_bad"] = (df["quality_flag"] == "G").astype(int)
-    df["saturated"] = 0
-
-    filt = df["filter_band"].astype(str).str.strip().str.lower()
-    band_map = {"v": 1, "g": 0}
-    df["v_g_band"] = filt.map(band_map)
-    df = df[df["v_g_band"].notna()].copy()
-    df["v_g_band"] = df["v_g_band"].astype(int)
-
-    df = df[pd.notna(df["JD"]) & pd.notna(df["mag"])]
-    df = df.sort_values("JD").reset_index(drop=True)
-    return df
-
-
-def load_lightcurve_df(path):
-    """
-    Dispatch loader based on file extension (.csv -> SkyPatrol, else ASAS-SN .dat).
-    """
-    path = Path(path)
-    suffix = path.suffix.lower()
-    if suffix == ".csv":
-        return read_skypatrol_csv(path)
-    return read_asassn_dat(path)
-
-
-def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
-    """
-    Load detection_results.csv with trimmed strings; used for metadata lookup.
-    """
-    csv_path = Path(csv_path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"detection_results file not found: {csv_path}")
-
-    df = pd.read_csv(csv_path, dtype=str, keep_default_na=False)
-    df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-    df["Match_ID"] = df["DAT_Path"].apply(lambda p: Path(p).stem if p else "")
-    return df
-
-
-def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, csv_path=DETECTION_RESULTS_FILE):
-    """
-    Look up metadata (source/category/vsx class) from detection_results.
-    """
-    df = load_detection_results(csv_path)
-    matches = pd.DataFrame()
-
-    if asassn_id:
-        matches = df[df["Match_ID"] == str(asassn_id).strip()]
-    if matches.empty and dat_path:
-        matches = df[df["DAT_Path"] == str(dat_path).strip()]
-    if matches.empty and source_name:
-        matches = df[df["Source"].str.lower() == str(source_name).strip().lower()]
-
-    if matches.empty:
-        return None
-
-    row = matches.iloc[0]
-    return {
-        "dat_path": row.get("DAT_Path"),
-        "source": row.get("Source"),
-        "source_id": row.get("Match_ID"),
-        "category": row.get("Category"),
-        "vsx_class": row.get("VSX_Class"),
-    }
-
-
-def lookup_metadata_for_path(path: Path):
-    """
-    Infer metadata for a given light-curve path.
-    """
-    path = Path(path)
-    stem = path.stem
-    source_type = "SkyPatrol" if path.suffix.lower() == ".csv" else "Internal"
-
-    meta = lookup_source_metadata(asassn_id=stem, dat_path=str(path))
-
-    if not meta and "-light-curves" in stem:
-        meta = lookup_source_metadata(asassn_id=stem.replace("-light-curves", ""))
-
-    if not meta and "-" in stem:
-        meta = lookup_source_metadata(asassn_id=stem.split("-")[0])
-
-    if not meta:
-        return {"data_source": source_type}
-
-    meta = dict(meta)
-    meta["data_source"] = source_type
-    return meta
 
 
 BASELINE_FUNCTIONS = {
@@ -225,7 +40,6 @@ BASELINE_FUNCTIONS = {
     "per_camera_median": per_camera_median_baseline,
     "per_camera_trend": per_camera_trend_baseline,
     "per_camera_gp": per_camera_gp_baseline,
-    "per_camera_gp_masked": per_camera_gp_baseline_masked,
 }
 
 
@@ -240,11 +54,10 @@ def plot_bayes_results(
     baseline_kwargs=None,
     logbf_threshold_dip=5.0,
     logbf_threshold_jump=5.0,
-    skip_events=False,
 ):
     """Plot a light curve with Bayesian detection results and run fits."""
                       
-    df = load_lightcurve_df(csv_path)
+    df = read_skypatrol_csv(csv_path)
     if df.empty:
         print(f"Warning: {csv_path.name} is empty")
         return None
@@ -257,9 +70,6 @@ def plot_bayes_results(
         baseline_func = per_camera_gp_baseline
     if baseline_kwargs is None:
         baseline_kwargs = {}
-    # allow alias strings for baseline selection
-    if isinstance(baseline_func, str):
-        baseline_func = BASELINE_FUNCTIONS.get(baseline_func, per_camera_gp_baseline)
     
     print(f"Analyzing {asas_sn_id}...")
     
@@ -267,29 +77,26 @@ def plot_bayes_results(
     df_g = df[df["v_g_band"] == 0].copy()
     df_v = df[df["v_g_band"] == 1].copy()
     
-    if skip_events:
-        empty_res = {"significant": False, "run_summaries": [], "n_runs": 0}
-        band_results = {0: {"dip": empty_res, "jump": empty_res}, 1: {"dip": empty_res, "jump": empty_res}}
-    else:
-        res_g = run_bayesian_significance(
-            df_g,
-            baseline_func=baseline_func,
-            baseline_kwargs=baseline_kwargs,
-            logbf_threshold_dip=logbf_threshold_dip,
-            logbf_threshold_jump=logbf_threshold_jump,
-            compute_event_prob=True,
-        ) if not df_g.empty else {"dip": {"significant": False, "run_summaries": [], "n_runs": 0}, "jump": {"significant": False, "run_summaries": [], "n_runs": 0}}
-        
-        res_v = run_bayesian_significance(
-            df_v,
-            baseline_func=baseline_func,
-            baseline_kwargs=baseline_kwargs,
-            logbf_threshold_dip=logbf_threshold_dip,
-            logbf_threshold_jump=logbf_threshold_jump,
-            compute_event_prob=True,
-        ) if not df_v.empty else {"dip": {"significant": False, "run_summaries": [], "n_runs": 0}, "jump": {"significant": False, "run_summaries": [], "n_runs": 0}}
-        
-        band_results = {0: res_g, 1: res_v}
+    res_g = run_bayesian_significance(
+        df_g,
+        baseline_func=baseline_func,
+        baseline_kwargs=baseline_kwargs,
+        logbf_threshold_dip=logbf_threshold_dip,
+        logbf_threshold_jump=logbf_threshold_jump,
+        compute_event_prob=True,
+    ) if not df_g.empty else {"dip": {"significant": False, "run_summaries": []}, "jump": {"significant": False, "run_summaries": []}}
+    
+    res_v = run_bayesian_significance(
+        df_v,
+        baseline_func=baseline_func,
+        baseline_kwargs=baseline_kwargs,
+        logbf_threshold_dip=logbf_threshold_dip,
+        logbf_threshold_jump=logbf_threshold_jump,
+        compute_event_prob=True,
+    ) if not df_v.empty else {"dip": {"significant": False, "run_summaries": []}, "jump": {"significant": False, "run_summaries": []}}
+    
+                           
+    band_results = {0: res_g, 1: res_v}
     
                                
     df = df[np.isfinite(df["JD"]) & np.isfinite(df["mag"])].copy()
@@ -374,7 +181,7 @@ def plot_bayes_results(
         jump = band_res["jump"]
         
                        
-        if (not skip_events) and dip["significant"] and dip.get("run_summaries"):
+        if dip["significant"] and dip["run_summaries"]:
             for run_summary in dip["run_summaries"]:
                 jd_start = run_summary["start_jd"]
                 jd_end = run_summary["end_jd"]
@@ -433,7 +240,7 @@ def plot_bayes_results(
                     )
         
                                         
-        if (not skip_events) and jump["significant"] and jump.get("run_summaries"):
+        if jump["significant"] and jump["run_summaries"]:
             for run_summary in jump["run_summaries"]:
                 jd_start = run_summary["start_jd"]
                 jd_end = run_summary["end_jd"]
@@ -522,26 +329,17 @@ def plot_bayes_results(
     
            
     title_parts = [f"ID: {asas_sn_id}"]
-    meta = lookup_metadata_for_path(csv_path) or {}
-    if meta.get("source"):
-        title_parts.append(str(meta["source"]))
-    if meta.get("category"):
-        title_parts.append(str(meta["category"]))
-    if meta.get("data_source"):
-        title_parts.append(str(meta["data_source"]))
-
-    if not skip_events:
-        g_dip = band_results[0]["dip"]
-        g_jump = band_results[0]["jump"]
-        v_dip = band_results[1]["dip"]
-        v_jump = band_results[1]["jump"]
-        
-        if g_dip["significant"] or v_dip["significant"]:
-            total_dips = g_dip.get("n_runs", 0) + v_dip.get("n_runs", 0)
-            title_parts.append(f"Dips: {total_dips} runs (g:{g_dip.get('n_runs', 0)}, V:{v_dip.get('n_runs', 0)})")
-        if g_jump["significant"] or v_jump["significant"]:
-            total_jumps = g_jump.get("n_runs", 0) + v_jump.get("n_runs", 0)
-            title_parts.append(f"Jumps: {total_jumps} runs (g:{g_jump.get('n_runs', 0)}, V:{v_jump.get('n_runs', 0)})")
+    g_dip = band_results[0]["dip"]
+    g_jump = band_results[0]["jump"]
+    v_dip = band_results[1]["dip"]
+    v_jump = band_results[1]["jump"]
+    
+    if g_dip["significant"] or v_dip["significant"]:
+        total_dips = g_dip.get("n_runs", 0) + v_dip.get("n_runs", 0)
+        title_parts.append(f"Dips: {total_dips} runs (g:{g_dip.get('n_runs', 0)}, V:{v_dip.get('n_runs', 0)})")
+    if g_jump["significant"] or v_jump["significant"]:
+        total_jumps = g_jump.get("n_runs", 0) + v_jump.get("n_runs", 0)
+        title_parts.append(f"Jumps: {total_jumps} runs (g:{g_jump.get('n_runs', 0)}, V:{v_jump.get('n_runs', 0)})")
     fig.suptitle(" | ".join(title_parts), fontsize=14, fontweight="bold")
     
                   
@@ -594,11 +392,6 @@ def main():
         default=5.0,
         help="Log BF threshold for jumps",
     )
-    parser.add_argument(
-        "--skip-events",
-        action="store_true",
-        help="Skip Bayesian event detection; plot baseline/residuals only",
-    )
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
     
     args = parser.parse_args()
@@ -646,7 +439,6 @@ def main():
                 baseline_kwargs=baseline_kwargs,
                 logbf_threshold_dip=args.logbf_threshold_dip,
                 logbf_threshold_jump=args.logbf_threshold_jump,
-                skip_events=args.skip_events,
             )
         except Exception as e:
             print(f"Error plotting {csv_path}: {e}")

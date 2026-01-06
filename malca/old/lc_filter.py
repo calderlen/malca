@@ -18,14 +18,14 @@ from utils import read_lc_raw
 
 
 
-def _call_filter_by_name(func_name: str, df_in: pd.DataFrame, kwargs: Dict[str, Any]) -> pd.DataFrame:
+def call_filter_by_name(func_name: str, df_in: pd.DataFrame, kwargs: Dict[str, Any]) -> pd.DataFrame:
     """
     
     """
     fn = globals()[func_name]
     return fn(df_in, **kwargs)
 
-def _filter_candidates_chunk(df_chunk: pd.DataFrame, band_key: str) -> pd.DataFrame:
+def filter_candidates_chunk(df_chunk: pd.DataFrame, band_key: str) -> pd.DataFrame:
     """
     
     """
@@ -43,7 +43,7 @@ def _filter_candidates_chunk(df_chunk: pd.DataFrame, band_key: str) -> pd.DataFr
 
     return df_chunk.loc[mask].copy()
 
-def _run_step_sequential(
+def run_step_sequential(
     df_in: pd.DataFrame,
     *,
     func_name: str,
@@ -59,7 +59,7 @@ def _run_step_sequential(
     n_in = len(df_in)
 
     with tqdm(total=1, desc=step_desc, position=position, leave=False, dynamic_ncols=True) as pbar:
-        df_out = _call_filter_by_name(func_name, df_in, func_kwargs)
+        df_out = call_filter_by_name(func_name, df_in, func_kwargs)
         pbar.update(1)
 
     elapsed = perf_counter() - start
@@ -68,7 +68,7 @@ def _run_step_sequential(
     )
     return df_out
 
-def _first_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
+def first_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
     """
     
     """
@@ -78,7 +78,7 @@ def _first_col(df: pd.DataFrame, *candidates: str) -> Optional[str]:
     return None
 
 
-def _log_rejections(
+def log_rejections(
     df_before: pd.DataFrame,
     df_after: pd.DataFrame,
     filter_name: str,
@@ -135,7 +135,7 @@ def candidates_with_peaks_naive(
         ) as pbar:
             with ProcessPoolExecutor(max_workers=n_workers) as ex:
                 futures = {
-                    ex.submit(_filter_candidates_chunk, chunk, band_key): len(chunk)
+                    ex.submit(filter_candidates_chunk, chunk, band_key): len(chunk)
                     for chunk in splits
                 }
                 for fut in as_completed(futures):
@@ -219,7 +219,7 @@ def filter_bns(
         df_out = df_out.dropna(subset=[c for c in ["pm_ra", "pm_dec"] if c in df_out.columns]).reset_index(drop=True)
         pbar.update(1)
 
-    _log_rejections(df_ids, df_out, "filter_bns", rejected_log_csv)
+    log_rejections(df_ids, df_out, "filter_bns", rejected_log_csv)
 
     return df_out
 
@@ -262,10 +262,10 @@ def filter_dip_dominated(
     """
     
     """
-    g_frac_col = _first_col(df, "g_dip_fraction", "g_dip_frac")
-    v_frac_col = _first_col(df, "v_dip_fraction", "v_dip_frac")
-    g_flag_col = _first_col(df, "g_dip_dominated", "g_dipdom")
-    v_flag_col = _first_col(df, "v_dip_dominated", "v_dipdom")
+    g_frac_col = first_col(df, "g_dip_fraction", "g_dip_frac")
+    v_frac_col = first_col(df, "v_dip_fraction", "v_dip_frac")
+    g_flag_col = first_col(df, "g_dip_dominated", "g_dipdom")
+    v_flag_col = first_col(df, "v_dip_dominated", "v_dipdom")
 
     n0 = len(df)
     pbar = tqdm(total=2, desc="filter_dip_dominated", leave=False) if show_tqdm else None
@@ -286,7 +286,7 @@ def filter_dip_dominated(
 
     if show_tqdm:
         tqdm.write(f"[filter_dip_dominated] kept {len(out)}/{n0}")
-    _log_rejections(df, out, "filter_dip_dominated", rejected_log_csv)
+    log_rejections(df, out, "filter_dip_dominated", rejected_log_csv)
     if pbar:
         pbar.update(1)
         pbar.close()
@@ -303,7 +303,7 @@ def filter_multi_camera(
     """
     
     """
-    cam_col = _first_col(
+    cam_col = first_col(
         df, "n_cameras", "num_cameras", "unique_cameras",
         "n_unique_cameras", "camera_count"
     )
@@ -321,7 +321,7 @@ def filter_multi_camera(
 
     if show_tqdm:
         tqdm.write(f"[filter_multi_camera] kept {len(out)}/{n0}")
-    _log_rejections(df, out, "filter_multi_camera", rejected_log_csv)
+    log_rejections(df, out, "filter_multi_camera", rejected_log_csv)
     if pbar:
         pbar.update(1)
         pbar.close()
@@ -340,8 +340,8 @@ def filter_periodic_candidates(
     """
     
     """
-    power_col = _first_col(df, "ls_max_power", "max_power")
-    per_col = _first_col(df, "best_period", "ls_best_period", "period_best")
+    power_col = first_col(df, "ls_max_power", "max_power")
+    per_col = first_col(df, "best_period", "ls_best_period", "period_best")
     n0 = len(df)
     mask = pd.Series(True, index=df.index)
     pbar = tqdm(total=3, desc="filter_periodic_candidates", leave=False) if show_tqdm else None
@@ -374,7 +374,7 @@ def filter_periodic_candidates(
 
     if show_tqdm:
         tqdm.write(f"[filter_periodic_candidates] kept {len(out)}/{n0}")
-    _log_rejections(df, out, "filter_periodic_candidates", rejected_log_csv)
+    log_rejections(df, out, "filter_periodic_candidates", rejected_log_csv)
     if pbar:
         pbar.update(1)
         pbar.close()
@@ -392,8 +392,8 @@ def filter_sparse_lightcurves(
     """
     
     """
-    span_col = _first_col(df, "time_span_days", "timespan_days", "t_span_days", "t_span")
-    ppd_col = _first_col(df, "points_per_day", "ppd", "n_per_day")
+    span_col = first_col(df, "time_span_days", "timespan_days", "t_span_days", "t_span")
+    ppd_col = first_col(df, "points_per_day", "ppd", "n_per_day")
 
     n0 = len(df)
     pbar = tqdm(total=3, desc="filter_sparse_lightcurves", leave=False) if show_tqdm else None
@@ -421,7 +421,7 @@ def filter_sparse_lightcurves(
 
     if show_tqdm:
         tqdm.write(f"[filter_sparse_lightcurves] kept {len(out)}/{n0}")
-    _log_rejections(df, out, "filter_sparse_lightcurves", rejected_log_csv)
+    log_rejections(df, out, "filter_sparse_lightcurves", rejected_log_csv)
     if pbar:
         pbar.update(1)
         pbar.close()
@@ -464,9 +464,9 @@ def box_filter(
     """
     
     """
-    dip_col = _first_col(df, *dip_cols)
-    peaks_col = _first_col(df, *peaks_cols)
-    std_col = _first_col(df, *std_cols)
+    dip_col = first_col(df, *dip_cols)
+    peaks_col = first_col(df, *peaks_cols)
+    std_col = first_col(df, *std_cols)
 
     missing: list[str] = []
     if dip_col is None:
@@ -500,11 +500,11 @@ def box_filter(
             f"[box_filter] kept {len(out)}/{len(df)} "
             f"(dips in [{min_dips}, {max_dips}], peaks/time <= {max_peaks_per_time}, std <= {max_std_mag})"
         )
-    _log_rejections(df, out, "box_filter", rejected_log_csv)
+    log_rejections(df, out, "box_filter", rejected_log_csv)
     return out
 
 
-def _sigma_ok_for_row(asas_sn_id: str, raw_path: str | Path, min_sigma: float) -> bool:
+def sigma_ok_for_row(asas_sn_id: str, raw_path: str | Path, min_sigma: float) -> bool:
     """
     
     """
@@ -531,8 +531,8 @@ def filter_sigma_resid(
     
     """
     need_cols = {"asas_sn_id", "raw_path"}
-    depth_g = _first_col(df, "g_max_depth", "g_depth_max")
-    depth_v = _first_col(df, "v_max_depth", "v_depth_max")
+    depth_g = first_col(df, "g_max_depth", "g_depth_max")
+    depth_v = first_col(df, "v_max_depth", "v_depth_max")
 
     if not need_cols.issubset(df.columns) or (not depth_g and not depth_v):
         tqdm.write("[filter_sigma_resid] Missing asas_sn_id/raw_path or depth columns; passing through.")
@@ -541,12 +541,12 @@ def filter_sigma_resid(
     rows = df.reset_index(drop=False)                                
     idx_name = "index"
 
-    def _eval_row(row) -> tuple[int, bool]:
+    def eval_row(row) -> tuple[int, bool]:
         """
         
         """
         try:
-            raw_ok = _sigma_ok_for_row(str(row["asas_sn_id"]), Path(row["raw_path"]), min_sigma)
+            raw_ok = sigma_ok_for_row(str(row["asas_sn_id"]), Path(row["raw_path"]), min_sigma)
             if not raw_ok:
                 return (int(row[idx_name]), False)
             scatter_df = read_lc_raw(str(row["asas_sn_id"]), str(Path(row["raw_path"]).parent))
@@ -568,7 +568,7 @@ def filter_sigma_resid(
     results = {}
     prog = tqdm(total=len(df), desc="filter_sigma_resid (rows)", leave=False) if show_tqdm else None
     for r in it:
-        i, ok = _eval_row(r._asdict())
+        i, ok = eval_row(r._asdict())
         results[i] = ok
         if prog:
             prog.update(1)
@@ -579,7 +579,7 @@ def filter_sigma_resid(
     out = df.loc[mask.values].reset_index(drop=True)
     if show_tqdm:
         tqdm.write(f"[filter_sigma_resid] kept {len(out)}/{len(df)}")
-    _log_rejections(df, out, "filter_sigma_resid", rejected_log_csv)
+    log_rejections(df, out, "filter_sigma_resid", rejected_log_csv)
     return out
 
 def filter_csv(
@@ -699,7 +699,7 @@ def filter_csv(
     if total_steps:
         with tqdm(total=total_steps, desc="filter_csv (steps)", position=tqdm_position_base, leave=False) as outer:
             for i, (label, func_name, kwargs) in enumerate(plan):
-                df_filtered = _run_step_sequential(
+                df_filtered = run_step_sequential(
                     df_filtered,
                     func_name=func_name,
                     func_kwargs=kwargs,
@@ -788,7 +788,7 @@ def gather_files(
     return files_list
 
 
-def _run_one_file(
+def run_one_file(
     file_path: Path,
     args,
     ts: str,
@@ -836,7 +836,7 @@ def _run_one_file(
     return df
 
 
-def _build_cli_parser() -> argparse.ArgumentParser:
+def build_cli_parser() -> argparse.ArgumentParser:
     """
     
     """
@@ -875,7 +875,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     """
     
     """
-    parser = _build_cli_parser()
+    parser = build_cli_parser()
     args = parser.parse_args(argv)
     ts = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S%z")
 
@@ -908,7 +908,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 
         dfs: list[pd.DataFrame] = []
         for f in files:
-            dfs.append(_run_one_file(f, args, ts, out_dir=output_dir))
+            dfs.append(run_one_file(f, args, ts, out_dir=output_dir))
 
         if not args.no_combined:
             combined = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -920,7 +920,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 0
 
     if in_path.is_file() or not in_path.exists():
-        df = _run_one_file(
+        df = run_one_file(
             in_path,
             args,
             ts,

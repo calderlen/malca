@@ -9,17 +9,9 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.time import Time
 
-DEFAULT_ASASSN_PATH = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/"
-    "asassn_index_masked_concat_cleaned_20250919_154524.csv"
-)
-DEFAULT_VSX_PATH = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output/"
-    "vsx_cleaned_20250919_154524.csv"
-)
-DEFAULT_OUTPUT_DIR = Path(
-    "/data/poohbah/1/assassin/lenhart/code/calder/calder/output"
-)
+DEFAULT_ASASSN_PATH = Path(__file__).parent.parent / "input" / "vsx" / "asassn_catalog.csv"
+DEFAULT_VSX_PATH = Path(__file__).parent.parent / "input" / "vsx" / "vsx_catalog.csv"
+DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent / "output"
 
 
 def load_asassn_catalog(path: Path) -> pd.DataFrame:

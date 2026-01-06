@@ -335,7 +335,7 @@ def compute_trend_metrics(indexes: np.ndarray, meds: np.ndarray) -> tuple[float,
     return lin_slope, a, c1, c2, float(diff)
 
 
-def _process_one_lc(
+def process_one_lc(
     path: str,
     id_df: pd.DataFrame,
     cfg: Config,
@@ -516,7 +516,7 @@ class DuckDBWriter:
                 pass
 
 
-def _make_writer(path: Path | None, fmt: str):
+def make_writer(path: Path | None, fmt: str):
     if path is None:
         return None
     if fmt == "csv":
@@ -573,11 +573,11 @@ def main() -> None:
 
     print(f"Processing {len(all_files)} light curve files")
 
-    writer = _make_writer(output_path, cfg.output_format)
+    writer = make_writer(output_path, cfg.output_format)
     results = []
     total_written = 0
 
-    def _write_chunk(chunk_results):
+    def write_chunk(chunk_results):
         nonlocal total_written
         if not chunk_results:
             return
@@ -596,7 +596,7 @@ def main() -> None:
         futures = {}
         for file_path, lc_dir in all_files:
             id_df = id_map[lc_dir]
-            future = executor.submit(_process_one_lc, file_path, id_df, cfg)
+            future = executor.submit(process_one_lc, file_path, id_df, cfg)
             futures[future] = file_path
 
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processing LCs", unit="lc"):
@@ -608,13 +608,13 @@ def main() -> None:
                     results.append(result)
 
                     if len(results) >= cfg.chunk_size:
-                        _write_chunk(results)
+                        write_chunk(results)
                         results = []
             except Exception as e:
                 print(f"ERROR processing {file_path}: {e}")
 
     if results:
-        _write_chunk(results)
+        write_chunk(results)
 
     if writer:
         writer.close()

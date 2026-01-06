@@ -73,11 +73,11 @@
   - `plotparams`
   - `divide_cameras`
 - `src/filter.py`
-  - `_call_filter_by_name`
-  - `_filter_candidates_chunk`
-  - `_run_step_sequential`
-  - `_first_col`
-  - `_log_rejections`
+  - `call_filter_by_name`
+  - `filter_candidates_chunk`
+  - `run_step_sequential`
+  - `first_col`
+  - `log_rejections`
   - `candidates_with_peaks_naive`
   - `candidates_with_peaks_biweight`
   - `filter_bns`
@@ -87,14 +87,14 @@
   - `filter_periodic_candidates`
   - `filter_sparse_lightcurves`
   - `box_filter`
-  - `_sigma_ok_for_row`
+  - `sigma_ok_for_row`
   - `filter_sigma_resid`
   - `filter_csv`
   - `parse_bin_key`
   - `latest_per_bin`
   - `gather_files`
-  - `_run_one_file`
-  - `_build_cli_parser`
+  - `run_one_file`
+  - `build_cli_parser`
   - `main`
 - `malca/old/df_utils.py`
   - `peak_search_residual_baseline`
@@ -105,17 +105,17 @@
     - Read an ASAS-SN .dat file using whitespace separation.
   - `read_skypatrol_csv`
     - Read a SkyPatrol CSV, remapping columns to the ASAS-SN schema.
-  - `_load_lightcurve_df`
+  - `load_lightcurve_df`
   - `load_detection_results`
   - `lookup_source_metadata`
-  - `_lookup_metadata_for_path`
+  - `lookup_metadata_for_path`
   - `_plot_lc_with_residuals_df`
   - `plot_lc_with_residuals`
   - `plot_one_lc`
   - `plot_many_lc`
 - `scripts/fp_analysis.py`
-  - `_load_many`
-  - `_band_flags`
+  - `load_many`
+  - `band_flags`
   - `summarize`
   - `retention`
   - `main`
@@ -226,14 +226,14 @@
     -   - global bayes_factor
   - `run_bayesian_significance`
     - Compute baseline ONCE, then reuse it for dip & jump scoring.
-  - `_process_one`
+  - `process_one`
   - `main`
 - `src/old/lc_events_naive.py`
   - `lc_proc_naive`
   - `dip_finder_naive`
     - run the naive dip search across one or more magnitude bins.
 - `scripts/lc_manifest.py`
-  - `_iter_source_records`
+  - `iter_source_records`
     - Yield dictionaries that describe each source found in the masked index files.
   - `build_manifest_dataframe`
   - `parse_args`
@@ -273,14 +273,14 @@
     - Plot a SkyPatrol light curve with detected peaks marked.
   - `main`
 - `scripts/reproduce_candidates.py`
-  - `_load_manifest_df`
-  - `_dataframe_from_candidates`
-  - `_target_map`
-  - `_records_from_manifest`
-  - `_coerce_candidate_records`
-  - `_resolve_candidates`
+  - `load_manifest_df`
+  - `dataframe_from_candidates`
+  - `target_map`
+  - `records_from_manifest`
+  - `coerce_candidate_records`
+  - `resolve_candidates`
   - `build_reproduction_report`
-  - `_build_parser`
+  - `build_parser`
   - `main`
 - `src/stats.py`
   - `weighted_mean`

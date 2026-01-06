@@ -520,7 +520,7 @@ def per_camera_gp_baseline(
         if col not in df_out.columns:
             df_out[col] = np.nan if col != "baseline_source" else "unknown"
 
-    def _robust_sigma_floor(resid, yerr_here, var_here):
+    def robust_sigma_floor(resid, yerr_here, var_here):
         """Estimate sigma_floor from quiescent residuals via iterative MAD clipping."""
         finite0 = np.isfinite(resid) & np.isfinite(yerr_here) & np.isfinite(var_here)
         if finite0.sum() < max(10, min_floor_points):
@@ -642,7 +642,7 @@ def per_camera_gp_baseline(
         yerr_full = np.maximum(yerr_full, 0.0)
 
         if sigma_floor is None:
-            floor_here = _robust_sigma_floor(resid, yerr_full, var)
+            floor_here = robust_sigma_floor(resid, yerr_full, var)
         else:
             floor_here = float(max(sigma_floor, 0.0))
 

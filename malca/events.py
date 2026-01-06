@@ -908,7 +908,7 @@ def run_bayesian_significance(
     mag_grid_dip: np.ndarray | None = None,
     mag_grid_jump: np.ndarray | None = None,
 
-    trigger_mode: str = "logbf",
+    trigger_mode: str = "posterior_prob", # posterior probability or logbf
     logbf_threshold_dip: float = 5.0,
     logbf_threshold_jump: float = 5.0,
     significance_threshold: float = 99.99997,
@@ -987,7 +987,7 @@ def run_bayesian_significance(
 
 
 
-def _process_one(
+def process_one(
     path: str,
     *,
     trigger_mode: str,
@@ -1067,24 +1067,16 @@ def _process_one(
         else:
             raise ValueError(f"Cannot read light curve from path (not a CSV file and no CSVs found in directory): {path}")
 
-    if df.empty:
-        raise ValueError(f"Empty dataframe read from {path}")
-    
-    required_cols = ["JD", "mag", "error"]
-    for col in required_cols:
-        if col not in df.columns:
-            raise ValueError(f"Missing required column '{col}' in {path}")
-    
     valid_mask = (
-        np.isfinite(df["JD"]) & 
-        np.isfinite(df["mag"]) & 
+        np.isfinite(df["JD"]) &
+        np.isfinite(df["mag"]) &
         np.isfinite(df["error"]) &
         (df["error"] > 0) &
         (df["error"] < 10)
     )
-    
+
     df = df[valid_mask].copy()
-    
+
     n_points = len(df)
     if n_points < 10:
         raise ValueError(f"Insufficient valid data points ({n_points} < 10) in {path}")
@@ -1129,7 +1121,7 @@ def _process_one(
     jd_last = float(np.nanmax(jd_arr)) if jd_arr.size else np.nan
     cadence_median_days = float(robust_median_dt_days(jd_arr))
 
-    def _max_event_prob(ev):
+    def max_event_prob(ev):
         ep = ev.get("event_probability")
         if ep is None or (isinstance(ep, float) and not np.isfinite(ep)):
             return np.nan
@@ -1160,20 +1152,13 @@ def _process_one(
     dip_morph, dip_dbic, dip_param = get_best_morph_info(dip["run_summaries"])
     jump_morph, jump_dbic, jump_param = get_best_morph_info(jump["run_summaries"])
 
-    cam_col = next((c for c in ("camera#", "Camera", "camera", "cam") if c in df.columns), None)
-    if cam_col is not None:
-        cams = df[cam_col].dropna()
-        unique_cams = np.unique(cams.astype(str))
-        n_cameras = int(unique_cams.size)
-        cam_counts = cams.value_counts()
-        camera_min_points = int(cam_counts.min()) if len(cam_counts) else 0
-        camera_max_points = int(cam_counts.max()) if len(cam_counts) else 0
-        camera_ids = ",".join(unique_cams)
-    else:
-        n_cameras = 0
-        camera_min_points = 0
-        camera_max_points = 0
-        camera_ids = ""
+    cams = df["camera"].dropna()
+    unique_cams = np.unique(cams.astype(str))
+    n_cameras = int(unique_cams.size)
+    cam_counts = cams.value_counts()
+    camera_min_points = int(cam_counts.min()) if len(cam_counts) else 0
+    camera_max_points = int(cam_counts.max()) if len(cam_counts) else 0
+    camera_ids = ",".join(unique_cams)
 
     return dict(
         path=str(path),
@@ -1221,8 +1206,8 @@ def _process_one(
         jump_best_mag_event=float(jump.get("best_mag_event", np.nan)),
         dip_trigger_max=float(dip.get("trigger_max", np.nan)),
         jump_trigger_max=float(jump.get("trigger_max", np.nan)),
-        dip_max_event_prob=_max_event_prob(dip),
-        jump_max_event_prob=_max_event_prob(jump),
+        dip_max_event_prob=max_event_prob(dip),
+        jump_max_event_prob=max_event_prob(jump),
 
         n_cameras=int(n_cameras),
         camera_ids=str(camera_ids),
@@ -1280,7 +1265,7 @@ def main():
 
     output_format = args.output_format.lower()
 
-    def _ensure_suffix(path: Path | None, fmt: str) -> Path | None:
+    def ensure_suffix(path: Path | None, fmt: str) -> Path | None:
         if path is None:
             return None
         suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None, "duckdb": ".duckdb"}
@@ -1289,7 +1274,7 @@ def main():
             return path.with_suffix(ext)
         return path
 
-    def _collect_processed_from_output(path: Path | None, fmt: str) -> set[str]:
+    def collect_processed_from_output(path: Path | None, fmt: str) -> set[str]:
         if path is None or (not path.exists()):
             return set()
         try:
@@ -1321,7 +1306,7 @@ def main():
         return set()
 
     # checkpoint
-    base_output_path = _ensure_suffix(Path(args.output).expanduser() if args.output else None, output_format)
+    base_output_path = ensure_suffix(Path(args.output).expanduser() if args.output else None, output_format)
     if args.mag_bins and base_output_path is not None:
         # pick the bin name if only one was given; otherwise use the "multi" tag
         bin_tag = args.mag_bins[0] if len(args.mag_bins) == 1 else "multi"
@@ -1344,7 +1329,7 @@ def main():
             print(f"Warning: Could not read checkpoint file ({e}). Starting fresh.", flush=True)
 
     # existing output (avoid duplicates if checkpoint was out-of-sync)
-    processed_files |= _collect_processed_from_output(base_output_path, output_format)
+    processed_files |= collect_processed_from_output(base_output_path, output_format)
 
     input_patterns: list[str] = []
     if args.input_patterns:
@@ -1506,7 +1491,7 @@ def main():
                 except Exception:
                     pass
 
-    def _make_writer(path: Path | None, fmt: str):
+    def make_writer(path: Path | None, fmt: str):
         if path is None:
             return None
         if fmt == "csv":
@@ -1524,11 +1509,11 @@ def main():
             raise ValueError(f"Unknown output format: {fmt}")
 
     output_path = base_output_path
-    writer = _make_writer(output_path, output_format)
+    writer = make_writer(output_path, output_format)
     if output_path:
         args.output = str(output_path)
 
-    def _write_chunk(chunk_results, is_final=False):
+    def write_chunk(chunk_results, is_final=False):
         if not chunk_results: 
             return
         nonlocal total_written, writer
@@ -1557,7 +1542,7 @@ def main():
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futs = {
             ex.submit(
-                _process_one, path, trigger_mode=args.trigger_mode, logbf_threshold_dip=args.logbf_threshold_dip,
+                process_one, path, trigger_mode=args.trigger_mode, logbf_threshold_dip=args.logbf_threshold_dip,
                 logbf_threshold_jump=args.logbf_threshold_jump, significance_threshold=args.significance_threshold,
                 p_points=args.p_points, p_min_dip=args.p_min_dip, p_max_dip=args.p_max_dip,
                 p_min_jump=args.p_min_jump, p_max_jump=args.p_max_jump,
@@ -1575,7 +1560,7 @@ def main():
                 result = fut.result()
                 results.append(result)
                 if chunk_size and len(results) >= chunk_size:
-                    _write_chunk(results)
+                    write_chunk(results)
                     results = []
             except Exception as e:
                 import traceback
@@ -1585,7 +1570,7 @@ def main():
                 if "too many values to unpack" in str(e): print(f"Full traceback:\n{tb_str}", flush=True)
 
     if results:
-        _write_chunk(results, is_final=True)
+        write_chunk(results, is_final=True)
     elif args.output and total_written == 0:
         pass
     else:
@@ -1595,9 +1580,6 @@ def main():
     if errors:
         print(f"Completed with {len(errors)} failures.", flush=True)
 
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()

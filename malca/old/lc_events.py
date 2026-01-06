@@ -605,7 +605,7 @@ def event_finder(
     Combined event finder (dips or peaks) using efficient process pool.
     """
 
-    def _normalize_target_ids(target_ids_by_bin: dict[str, set[str]] | None):
+    def normalize_target_ids(target_ids_by_bin: dict[str, set[str]] | None):
         """
         
         """
@@ -617,7 +617,7 @@ def event_finder(
             if ids
         }
 
-    def _build_record_map(records_by_bin: dict[str, list[dict[str, object]]] | None):
+    def build_record_map(records_by_bin: dict[str, list[dict[str, object]]] | None):
         """
         
         """
@@ -645,7 +645,7 @@ def event_finder(
                 record_map[norm_key].append(norm)
         return record_map
 
-    def _iter_records_for_bin(
+    def iter_records_for_bin(
         bin_key: str,
         record_map: dict[str, list[dict[str, object]]] | None,
         target_ids_norm: dict[str, set[str]] | None,
@@ -672,7 +672,7 @@ def event_finder(
                 continue
             yield rec
 
-    def _flush_rows(rows_buffer, *, force: bool = False):
+    def flush_rows(rows_buffer, *, force: bool = False):
         """
         
         """
@@ -692,7 +692,7 @@ def event_finder(
             print(f"ERROR: Failed to flush rows to {out_path}: {e}", flush=True)
             raise
 
-    def _process_bin(
+    def process_bin(
         bin_key: str,
         record_iter,
         ex,
@@ -719,7 +719,7 @@ def event_finder(
                     if collected_rows_list is not None:
                         collected_rows_list.append(row)
                     done_now += 1
-                    _flush_rows(rows_buffer)
+                    flush_rows(rows_buffer)
                 except Exception as e:
                     print(f"WARNING: Task failed: {type(e).__name__}: {e}", flush=True)
                 finally:
@@ -749,7 +749,7 @@ def event_finder(
             pbar.update(done_n)
 
         pbar.close()
-        _flush_rows(rows_buffer, force=True)
+        flush_rows(rows_buffer, force=True)
 
     peak_kwargs = dict(peak_kwargs or {})
     baseline_func = baseline_func or per_camera_median_baseline
@@ -773,9 +773,9 @@ def event_finder(
     out_path = os.path.join(out_dir, f"events_{mode}.{out_format}")
     
                                                             
-    target_ids_norm = _normalize_target_ids(target_ids_by_bin)
+    target_ids_norm = normalize_target_ids(target_ids_by_bin)
 
-    record_map = _build_record_map(records_by_bin)
+    record_map = build_record_map(records_by_bin)
 
                                
     if record_map:
@@ -792,8 +792,8 @@ def event_finder(
                   
     with ProcessPoolExecutor(max_workers=n_workers) as ex:
         for b in tqdm(bins_iter, desc=f"Bins ({mode})", unit="bin"):
-            record_iter = _iter_records_for_bin(b, record_map, target_ids_norm)
-            _process_bin(b, record_iter, ex, rows_buffer, collected_rows_list)
+            record_iter = iter_records_for_bin(b, record_map, target_ids_norm)
+            process_bin(b, record_iter, ex, rows_buffer, collected_rows_list)
 
     if collected_rows_list is not None:
         return pd.DataFrame(collected_rows_list)

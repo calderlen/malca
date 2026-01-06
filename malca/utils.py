@@ -6,11 +6,20 @@ import numpy as np
 import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
+from astropy.timeseries import LombScargle
 from tqdm import tqdm
 
-colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39", 
+colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39",
               "#ce5761", "#c68c45", '#b5b246', '#d77fcc', '#7362cf', '#ce443f', '#3fc1bf', '#cda735',
               '#a1b055']
+
+
+def get_id_col(df: pd.DataFrame) -> str:
+    """Find the ID column in a dataframe."""
+    for candidate in ["asas_sn_id", "id", "source_id", "path"]:
+        if candidate in df.columns:
+            return candidate
+    raise ValueError("No ID column found. Expected one of: asas_sn_id, id, source_id, path")
 
 
 def clean_lc(df):
@@ -26,6 +35,71 @@ def clean_lc(df):
 
     df = df.sort_values("JD").reset_index(drop=True)
     return df
+
+
+def compute_time_stats(df_lc: pd.DataFrame) -> dict:
+    """Compute time span and cadence stats from a light curve DataFrame."""
+    if df_lc.empty or "JD" not in df_lc.columns:
+        return {"time_span_days": 0.0, "points_per_day": 0.0}
+
+    jd = df_lc["JD"].values
+    jd = jd[np.isfinite(jd)]
+    if len(jd) < 2:
+        return {"time_span_days": 0.0, "points_per_day": 0.0}
+
+    time_span_days = float(jd.max() - jd.min())
+    points_per_day = len(jd) / time_span_days if time_span_days > 0 else 0.0
+
+    return {
+        "time_span_days": time_span_days,
+        "points_per_day": points_per_day,
+    }
+
+
+def compute_periodogram(df_lc: pd.DataFrame) -> dict:
+    """Compute Lomb-Scargle periodogram stats from a light curve DataFrame."""
+    if df_lc.empty or "JD" not in df_lc.columns or "mag" not in df_lc.columns:
+        return {"ls_max_power": 0.0, "best_period": np.nan}
+
+    # Clean data
+    mask = np.isfinite(df_lc["JD"]) & np.isfinite(df_lc["mag"])
+    if "error" in df_lc.columns:
+        mask &= np.isfinite(df_lc["error"]) & (df_lc["error"] > 0)
+
+    jd = df_lc.loc[mask, "JD"].values
+    mag = df_lc.loc[mask, "mag"].values
+
+    if len(jd) < 10:
+        return {"ls_max_power": 0.0, "best_period": np.nan}
+
+    # Compute time span for frequency grid
+    t_span = jd.max() - jd.min()
+    if t_span < 1.0:
+        return {"ls_max_power": 0.0, "best_period": np.nan}
+
+    # Run Lomb-Scargle
+    try:
+        ls = LombScargle(jd, mag)
+        freq, power = ls.autopower(minimum_frequency=1.0/365.0, maximum_frequency=10.0)
+        max_idx = np.argmax(power)
+        ls_max_power = float(power[max_idx])
+        best_period = float(1.0 / freq[max_idx])
+    except Exception:
+        ls_max_power = 0.0
+        best_period = np.nan
+
+    return {
+        "ls_max_power": ls_max_power,
+        "best_period": best_period,
+    }
+
+
+def compute_n_cameras(df_lc: pd.DataFrame) -> int:
+    """Count unique cameras from a light curve DataFrame."""
+    if df_lc.empty or "camera#" not in df_lc.columns:
+        return 0
+    cameras = df_lc["camera#"].dropna().unique()
+    return int(len(cameras))
 
 
 def year_to_jd(year):
@@ -130,13 +204,13 @@ def read_lc_dat2(asassn_id, path):
             df["quality_flag"] = "G"
             df["good_bad"] = 1
 
-        def _band_flag(val: str) -> int:
+        def band_flag(val: str) -> int:
             v = str(val).upper()
             if v.startswith("V"):
                 return 1          
             return 0                                           
 
-        df["v_g_band"] = df["filter"].map(_band_flag) if "filter" in df.columns else 0
+        df["v_g_band"] = df["filter"].map(band_flag) if "filter" in df.columns else 0
 
                       
         for col in ["JD", "mag", "error"]:
