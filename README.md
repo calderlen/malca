@@ -12,27 +12,18 @@
 #### Typical run (large batches)
 1) Build a manifest (map IDs -> light-curve directories):
    ```bash
-   python malca/manifest.py --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
-     --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
-     --mag-bin 13_13.5 \
-     --out /output/lc_manifest_13_13.5.parquet \
-     --workers 8
+   python malca/manifest.py --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --mag-bin 13_13.5 --out /output/lc_manifest_13_13.5.parquet --workers 8
    ```
 2) Pre-filter and run events in batches with resume support:
    ```bash
-   python -m malca.filtered_events --mag-bin 13_13.5 --n-workers 16 \
-     --min-time-span 100 --min-points-per-day 0.05 --max-power 0.5 --min-cameras 2 \
-     --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
-     --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
-     -- --output /output/lc_events_results_13_13.5.csv --workers 32
+   python -m malca.filtered_events --mag-bin 13_13.5 --n-workers 20 --min-time-span 100 --min-points-per-day 0.05 --max-power 0.5 --min-cameras 2 --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /output/lc_events_results_13_13.5.csv --workers 20
    ```
    - The wrapper builds/loads the manifest, runs pre-filters from `malca/pre_filter.py`, then calls `malca/events.py` in batches.
    - Resume: if interrupted, it skips already processed paths using the `*_PROCESSED.txt` checkpoint next to the output.
 
 3)  Post-filter events:
    ```bash
-   python -m malca.post_filter --input /output/lc_events_results_13_13.5.csv \
-     --output /output/lc_events_results_13_13.5_filtered.csv
+   python -m malca.post_filter --input /output/lc_events_results_13_13.5.csv --output /output/lc_events_results_13_13.5_filtered.csv
    ```
 
 ### Running pieces manually

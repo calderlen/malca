@@ -11,6 +11,7 @@ Workflow:
 Usage:
     python -m filtered_events --mag-bin 13_13.5 [events.py args...]
 """
+from __future__ import annotations
 
 import argparse
 import subprocess
@@ -84,8 +85,21 @@ def main():
 
     # Determine file names
     mag_bin_tag = args.mag_bin[0] if len(args.mag_bin) == 1 else "multi"
-    manifest_file = args.manifest_file or Path(f"/output/lc_manifest_{mag_bin_tag}.parquet")
-    filtered_file = args.filtered_file or Path(f"/output/lc_filtered_{mag_bin_tag}.parquet")
+
+    # IMPORTANT: never write to filesystem root (/output). Default to a writable directory.
+    events_output = parse_output_path(events_args)
+    if args.filtered_file is not None:
+        out_dir = Path(args.filtered_file).expanduser().parent
+    elif args.manifest_file is not None:
+        out_dir = Path(args.manifest_file).expanduser().parent
+    elif events_output is not None:
+        out_dir = events_output.parent
+    else:
+        out_dir = Path.home() / "malca_output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_file = Path(args.manifest_file).expanduser() if args.manifest_file else (out_dir / f"lc_manifest_{mag_bin_tag}.parquet")
+    filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (out_dir / f"lc_filtered_{mag_bin_tag}.parquet")
 
     # Step 1: Build or load manifest
     if args.force_manifest or not manifest_file.exists():
@@ -128,7 +142,7 @@ def main():
             min_cameras=args.min_cameras,
             n_workers=args.n_workers,
             show_tqdm=True,
-            rejected_log_csv=f"rejected_pre_filter_{mag_bin_tag}.csv"
+            rejected_log_csv=str(out_dir / f"rejected_pre_filter_{mag_bin_tag}.csv")
         )
 
         print(f"\nKept {len(df_filtered)}/{len(df_manifest)} sources after pre-filtering")
@@ -152,13 +166,13 @@ def main():
     print(f"\nPreparing to run events.py on {len(file_paths)} light curves...")
 
     # Write paths to temp file for events.py to consume
-    paths_file = Path(f"/output/filtered_paths_{mag_bin_tag}.txt")
+    paths_file = out_dir / f"filtered_paths_{mag_bin_tag}.txt"
     with open(paths_file, "w") as f:
         for path in file_paths:
             f.write(f"{path}\n")
 
     # Resume logic: skip paths already recorded in events checkpoint log if present
-    base_output = parse_output_path(events_args) or Path("/output/lc_events_results.csv")
+    base_output = events_output or (out_dir / "lc_events_results.csv")
     checkpoint_log = base_output.with_name(f"{base_output.stem}_PROCESSED.txt")
     processed_paths: set[str] = set()
     if checkpoint_log.exists():
