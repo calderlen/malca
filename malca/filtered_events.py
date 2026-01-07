@@ -9,7 +9,7 @@ Workflow:
 4. Pass to events.py
 
 Usage:
-    python -m malca.filtered_events --mag-bin 13_13.5 [events.py args...]
+    python -m filtered_events --mag-bin 13_13.5 [events.py args...]
 """
 
 import argparse
@@ -20,8 +20,8 @@ import pandas as pd
 from tqdm import tqdm
 import tempfile
 
-from malca.manifest import build_manifest_dataframe
-from malca.pre_filter import apply_pre_filters
+from manifest import build_manifest_dataframe
+from pre_filter import apply_pre_filters
 
 
 def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -185,7 +185,7 @@ def main():
         print(f"\nRunning batch {batch_idx + 1}/{total_batches} ({len(batch_paths)} LCs)...")
 
         events_cmd = [
-            "python", "-m", "malca.events",
+            "python", "-m", "events",
             *events_args,
             *batch_paths,
         ]

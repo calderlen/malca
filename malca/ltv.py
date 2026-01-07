@@ -38,7 +38,7 @@ from astropy.stats import mad_std
 from astropy.table import Table
 from tqdm import tqdm
 
-from .utils import read_lc_dat2, read_lc_csv, clean_lc
+from utils import read_lc_dat2, read_lc_csv, clean_lc
 
 
 LC_COLUMNS = ["jd", "mag", "error", "good/bad", "camera", "v/g?", "saturated/unsaturated", "camera,field"]
