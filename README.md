@@ -1,4 +1,4 @@
-# MALCA: ASAS-SN light-curve filtering and event finding
+# MALCA: Multi-timescale ASAS-SN Light Curve Analysis
 
 ## How to use
 #### What files are expected
