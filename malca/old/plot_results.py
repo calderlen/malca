@@ -12,8 +12,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-from plot import read_skypatrol_csv, JD_OFFSET
-from baseline import (
+from malca.plot import read_skypatrol_csv, JD_OFFSET
+from malca.baseline import (
     global_mean_baseline,
     global_median_baseline,
     global_rolling_median_baseline,

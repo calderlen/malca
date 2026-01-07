@@ -13,13 +13,13 @@ from matplotlib.lines import Line2D
 import time
 from typing import Sequence
 
-from events import (
+from malca.events import (
     run_bayesian_significance,
     gaussian,
     paczynski,
-    per_camera_gp_baseline,
 )
-from baseline import (
+from malca.baseline import (
+    per_camera_gp_baseline,
     global_mean_baseline,
     global_median_baseline,
     global_rolling_median_baseline,

@@ -30,14 +30,14 @@ from astropy import units as u
 from astropy.coordinates import SkyCoord
 from tqdm.auto import tqdm
 
-from utils import (
+from malca.utils import (
     read_lc_dat2,
     get_id_col,
     compute_time_stats,
     compute_periodogram,
     compute_n_cameras,
 )
-from vsx_crossmatch import propagate_asassn_coords, vsx_coords
+from malca.vsx_crossmatch import propagate_asassn_coords, vsx_coords
 
 
 def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, compute_period: bool, compute_cameras: bool) -> dict:

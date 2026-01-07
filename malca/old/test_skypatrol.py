@@ -9,9 +9,9 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from plot import read_skypatrol_csv
-from old.lc_events import lc_band_proc, per_camera_median_baseline
-from baseline import (
+from malca.plot import read_skypatrol_csv
+from malca.old.lc_events import lc_band_proc, per_camera_median_baseline
+from malca.baseline import (
     global_mean_baseline,
     global_median_baseline,
     global_rolling_median_baseline,

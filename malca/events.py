@@ -28,8 +28,8 @@ warnings.filterwarnings("ignore", message=".*Covariance of the parameters could 
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
-from utils import read_lc_dat2, read_lc_csv, clean_lc
-from baseline import (
+from malca.utils import read_lc_dat2, read_lc_csv, clean_lc
+from malca.baseline import (
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
     per_camera_trend_baseline,

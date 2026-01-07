@@ -13,13 +13,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
-from plot import read_skypatrol_csv, JD_OFFSET
-from events import (
+from malca.plot import read_skypatrol_csv, JD_OFFSET
+from malca.events import (
     run_bayesian_significance,
     gaussian,
     paczynski,
 )
-from baseline import (
+from malca.baseline import (
     per_camera_gp_baseline,
     global_mean_baseline,
     global_median_baseline,

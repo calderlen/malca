@@ -9,10 +9,10 @@ import warnings
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from utils import read_lc_dat2, read_lc_raw, match_index_to_lc, clean_lc
-from old.lc_metrics import run_metrics, is_dip_dominated
-from baseline import per_camera_median_baseline
-from old.df_utils import empty_metrics
+from malca.utils import read_lc_dat2, read_lc_raw, match_index_to_lc, clean_lc
+from malca.old.lc_metrics import run_metrics, is_dip_dominated
+from malca.baseline import per_camera_median_baseline
+from malca.old.df_utils import empty_metrics
 
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks

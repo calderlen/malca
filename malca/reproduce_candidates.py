@@ -9,11 +9,11 @@ import pandas as pd
 from scipy import stats
 import matplotlib.pyplot as pl
 
-from old.lc_events_naive import dip_finder_naive
-from old.lc_events import event_finder
-from events import run_bayesian_significance
-from utils import read_lc_dat2
-from baseline import per_camera_gp_baseline
+from malca.old.lc_events_naive import dip_finder_naive
+from malca.old.lc_events import event_finder
+from malca.events import run_bayesian_significance
+from malca.utils import read_lc_dat2
+from malca.baseline import per_camera_gp_baseline
 
 
 brayden_candidates: list[dict[str, object]] = [

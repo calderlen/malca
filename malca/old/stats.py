@@ -13,7 +13,7 @@ from collections import OrderedDict
 import numpy as np
 import pandas as pd
 
-from utils import read_lc_dat2
+from malca.utils import read_lc_dat2
 
 # helpers
 def weighted_mean(x, w):
