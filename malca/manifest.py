@@ -10,7 +10,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import pandas as pd
 from tqdm import tqdm
 
-from old.lc_events import MAG_BINS
+MAG_BINS = ['12_12.5', '12.5_13', '13_13.5', '13.5_14', '14_14.5', '14.5_15']
 
 IDX_PATTERN = re.compile(r"index(\d+)\.csv$", re.IGNORECASE)
 
