@@ -15,7 +15,8 @@
    python malca/manifest.py --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
      --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
      --mag-bin 13_13.5 \
-     --out /output/lc_manifest_13_13.5.parquet
+     --out /output/lc_manifest_13_13.5.parquet \
+     --workers 8
    ```
 2) Pre-filter and run events in batches with resume support:
    ```bash

@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import pandas as pd
 from tqdm import tqdm
 
@@ -12,7 +14,55 @@ from old.lc_events import MAG_BINS
 
 IDX_PATTERN = re.compile(r"index(\d+)\.csv$", re.IGNORECASE)
 
-                                                                                                                                   
+
+def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: str) -> list[dict[str, object]]:
+    """Read one index CSV and return records for all IDs."""
+    records: list[dict[str, object]] = []
+    match = IDX_PATTERN.search(csv_path.name)
+    if not match:
+        return records
+    idx_num = int(match.group(1))
+    lc_dir = lc_root / mag_bin / f"lc{idx_num}_cal"
+    try:
+        ids = (
+            pd.read_csv(
+                csv_path,
+                usecols=[id_column],
+                dtype={id_column: "string"},
+            )[id_column]
+            .dropna()
+            .astype(str)
+            .unique()
+        )
+    except (FileNotFoundError, pd.errors.EmptyDataError, ValueError, KeyError):
+        return records
+
+    for source_id in ids:
+        dat2_path = lc_dir / f"{source_id}.dat2"
+        csv_path_lc = lc_dir / f"{source_id}.csv"
+
+        if dat2_path.exists():
+            file_path = dat2_path
+            file_exists = True
+        elif csv_path_lc.exists():
+            file_path = csv_path_lc
+            file_exists = True
+        else:
+            file_path = dat2_path
+            file_exists = False
+
+        records.append({
+            "source_id": source_id,
+            "mag_bin": mag_bin,
+            "index_num": idx_num,
+            "index_csv": str(csv_path),
+            "lc_dir": str(lc_dir),
+            "lc_dir_exists": lc_dir.exists(),
+            "dat_path": str(file_path),
+            "dat_exists": file_exists,
+        })
+    return records
+
 
 def iter_source_records(
     index_root: Path,
@@ -21,9 +71,10 @@ def iter_source_records(
     *,
     id_column: str = "asas_sn_id",
     show_progress: bool = True,
+    n_workers: int = 1,
 ) -> Iterable[dict[str, object]]:
     """
-    Yield dictionaries that describe each source found in the masked index files.
+    Yield dictionaries that describe each source found in the index files.
     """
     for mag_bin in tqdm(mag_bins, desc="mag bins", disable=not show_progress):
         idx_dir = index_root / mag_bin
@@ -35,60 +86,29 @@ def iter_source_records(
             tqdm.write(f"[warn] no index CSVs found in {idx_dir}")
             continue
 
-        for csv_path in tqdm(
-            csv_paths,
-            desc=f"{mag_bin} index CSVs",
-            leave=False,
-            disable=not show_progress,
-        ):
-            match = IDX_PATTERN.search(csv_path.name)
-            if not match:
-                tqdm.write(f"[warn] skipping unrecognized file name: {csv_path}")
-                continue
-            idx_num = int(match.group(1))
-            lc_dir = lc_root / mag_bin / f"lc{idx_num}_cal"
-
-            try:
-                ids = (
-                    pd.read_csv(
-                        csv_path,
-                        usecols=[id_column],
-                        dtype={id_column: "string"},
-                    )[id_column]
-                    .dropna()
-                    .astype(str)
-                    .unique()
-                )
-            except FileNotFoundError:
-                tqdm.write(f"[warn] index CSV not found: {csv_path}")
-                continue
-            except pd.errors.EmptyDataError:
-                continue
-
-            for source_id in ids:
-                dat2_path = lc_dir / f"{source_id}.dat2"
-                csv_path_lc = lc_dir / f"{source_id}.csv"
-
-                if dat2_path.exists():
-                    file_path = dat2_path
-                    file_exists = True
-                elif csv_path_lc.exists():
-                    file_path = csv_path_lc
-                    file_exists = True
-                else:
-                    file_path = dat2_path
-                    file_exists = False
-
-                yield {
-                    "source_id": source_id,
-                    "mag_bin": mag_bin,
-                    "index_num": idx_num,
-                    "index_csv": str(csv_path),
-                    "lc_dir": str(lc_dir),
-                    "lc_dir_exists": lc_dir.exists(),
-                    "dat_path": str(file_path),
-                    "dat_exists": file_exists,
+        if n_workers > 1:
+            with ProcessPoolExecutor(max_workers=n_workers) as ex:
+                futures = {
+                    ex.submit(_process_index_file, csv_path, mag_bin, lc_root, id_column): csv_path
+                    for csv_path in csv_paths
                 }
+                pbar = tqdm(total=len(futures), desc=f"{mag_bin} index CSVs", leave=False, disable=not show_progress)
+                for fut in as_completed(futures):
+                    for rec in fut.result():
+                        yield rec
+                    if pbar:
+                        pbar.update(1)
+                if pbar:
+                    pbar.close()
+        else:
+            for csv_path in tqdm(
+                csv_paths,
+                desc=f"{mag_bin} index CSVs",
+                leave=False,
+                disable=not show_progress,
+            ):
+                for rec in _process_index_file(csv_path, mag_bin, lc_root, id_column):
+                    yield rec
 
 
 def build_manifest_dataframe(
@@ -98,6 +118,7 @@ def build_manifest_dataframe(
     mag_bins: Sequence[str],
     id_column: str,
     show_progress: bool = True,
+    n_workers: int = 1,
 ) -> pd.DataFrame:
     seen: dict[str, dict[str, object]] = {}
     duplicates = 0
@@ -107,6 +128,7 @@ def build_manifest_dataframe(
         mag_bins,
         id_column=id_column,
         show_progress=show_progress,
+        n_workers=n_workers,
     ):
         source_id = record["source_id"]
         if source_id in seen:
@@ -177,6 +199,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable tqdm progress bars.",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel workers to read index CSVs (default: 1, uses ProcessPoolExecutor).",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite the output file if it already exists.",
@@ -193,6 +221,7 @@ def main() -> None:
         mag_bins=mag_bins,
         id_column=args.id_column,
         show_progress=not args.no_progress,
+        n_workers=max(1, args.workers),
     )
 
     out_path = args.out.expanduser()
