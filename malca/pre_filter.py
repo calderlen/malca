@@ -18,9 +18,6 @@ Input format:
     - vsx_match_sep_arcsec, vsx_class (computed via VSX crossmatch using data in input/vsx/)
     - bns_separation_arcsec, bns_delta_mag (computed via ASAS-SN catalog crossmatch)
     - n_cameras (counted from camera# column)
-
-    If any of these columns already exist in the input DataFrame, they will be used
-    instead of recomputing.
 """
 
 from __future__ import annotations
@@ -176,6 +173,7 @@ def filter_sparse_lightcurves(
     min_time_span: float = 100.0,
     min_points_per_day: float = 0.05,
     show_tqdm: bool = False,
+    compute_stats: bool = True,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
@@ -183,15 +181,12 @@ def filter_sparse_lightcurves(
     - less than min_time_span days of observation (default 100)
     - less than min_points_per_day on average (default 0.05 = 1 point per 20 days)
 
-    If time_span_days and points_per_day columns exist, use them.
-    Otherwise, read dat2 files and compute on-the-fly.
+    Stats are computed from the dat2 files; set compute_stats=False only if the
+    columns were already added upstream.
     """
     n0 = len(df)
 
-    # Check if we need to compute stats
-    need_compute = ("time_span_days" not in df.columns) or ("points_per_day" not in df.columns)
-
-    if need_compute:
+    if compute_stats:
         id_col = get_id_col(df)
         path_col = "path" if "path" in df.columns else None
 
@@ -221,6 +216,10 @@ def filter_sparse_lightcurves(
             pbar.close()
 
         df = df_with_stats
+    else:
+        missing_cols = [c for c in ("time_span_days", "points_per_day") if c not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}. Set compute_stats=True to compute from dat2.")
 
     # Apply filter
     mask = (df["time_span_days"] >= min_time_span) & \
@@ -241,20 +240,18 @@ def filter_periodic_candidates(
     min_period: float | None = None,
     max_period: float | None = None,
     show_tqdm: bool = False,
+    compute_stats: bool = True,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Remove candidates with strong periodicity.
 
-    If ls_max_power and best_period columns exist, use them.
-    Otherwise, read dat2 files and compute Lomb-Scargle periodogram on-the-fly.
+    Stats are computed from the dat2 files; set compute_stats=False only if the
+    columns were already added upstream.
     """
     n0 = len(df)
 
-    # Check if we need to compute periodogram
-    need_compute = ("ls_max_power" not in df.columns) or ("best_period" not in df.columns)
-
-    if need_compute:
+    if compute_stats:
         id_col = get_id_col(df)
         path_col = "path" if "path" in df.columns else None
 
@@ -284,6 +281,10 @@ def filter_periodic_candidates(
             pbar.close()
 
         df = df_with_stats
+    else:
+        missing_cols = [c for c in ("ls_max_power", "best_period") if c not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}. Set compute_stats=True to compute from dat2.")
 
     # Apply filter
     mask = df["ls_max_power"] <= max_power
@@ -505,20 +506,18 @@ def filter_multi_camera(
     *,
     min_cameras: int = 2,
     show_tqdm: bool = False,
+    compute_stats: bool = True,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Remove candidates that were only detected on one camera.
 
-    If n_cameras column exists, use it.
-    Otherwise, read dat2 files and count unique cameras on-the-fly.
+    Stats are computed from the dat2 files; set compute_stats=False only if the
+    column was already added upstream.
     """
     n0 = len(df)
 
-    # Check if we need to compute n_cameras
-    need_compute = "n_cameras" not in df.columns
-
-    if need_compute:
+    if compute_stats:
         id_col = get_id_col(df)
         path_col = "path" if "path" in df.columns else None
 
@@ -546,6 +545,9 @@ def filter_multi_camera(
             pbar.close()
 
         df = df_with_cameras
+    else:
+        if "n_cameras" not in df.columns:
+            raise ValueError("Missing required column: n_cameras. Set compute_stats=True to compute from dat2.")
 
     # Apply filter
     out = df.loc[df["n_cameras"] >= min_cameras].reset_index(drop=True)
@@ -612,25 +614,32 @@ def apply_pre_filters(
     df_filtered = df.copy()
     n_start = len(df_filtered)
 
+    precomputed_time = False
+    precomputed_period = False
+    precomputed_cameras = False
+
     # Pre-compute stats in parallel if requested and needed
     if n_workers > 1 and "path" in df_filtered.columns:
         id_col = get_id_col(df_filtered)
 
-        need_time = apply_sparse and (("time_span_days" not in df_filtered.columns) or ("points_per_day" not in df_filtered.columns))
-        need_period = apply_periodic and (("ls_max_power" not in df_filtered.columns) or ("best_period" not in df_filtered.columns))
-        need_cameras = apply_multi_camera and ("n_cameras" not in df_filtered.columns)
+        compute_time = apply_sparse
+        compute_period = apply_periodic
+        compute_cameras = apply_multi_camera
 
-        if need_time or need_period or need_cameras:
+        if compute_time or compute_period or compute_cameras:
             if show_tqdm:
                 tqdm.write(f"[apply_pre_filters] Pre-computing stats with {n_workers} workers")
             df_filtered = _compute_stats_parallel(
                 df_filtered, id_col, "path",
-                compute_time=need_time,
-                compute_period=need_period,
-                compute_cameras=need_cameras,
+                compute_time=compute_time,
+                compute_period=compute_period,
+                compute_cameras=compute_cameras,
                 n_workers=n_workers,
                 show_tqdm=show_tqdm
             )
+            precomputed_time = compute_time
+            precomputed_period = compute_period
+            precomputed_cameras = compute_cameras
 
     filters = []
 
@@ -639,6 +648,7 @@ def apply_pre_filters(
             "min_time_span": min_time_span,
             "min_points_per_day": min_points_per_day,
             "show_tqdm": show_tqdm,
+            "compute_stats": not precomputed_time,
             "rejected_log_csv": rejected_log_csv,
         }))
 
@@ -648,6 +658,7 @@ def apply_pre_filters(
             "min_period": min_period,
             "max_period": max_period,
             "show_tqdm": show_tqdm,
+            "compute_stats": not precomputed_period,
             "rejected_log_csv": rejected_log_csv,
         }))
 
@@ -673,6 +684,7 @@ def apply_pre_filters(
         filters.append(("multi_camera", filter_multi_camera, {
             "min_cameras": min_cameras,
             "show_tqdm": show_tqdm,
+            "compute_stats": not precomputed_cameras,
             "rejected_log_csv": rejected_log_csv,
         }))
 

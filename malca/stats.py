@@ -114,8 +114,7 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     df.columns = cols[:len(df.columns)] + [f"extra_{i}" for i in range(len(df.columns)-len(cols))]
 
     for c in ["JD","mag","error","good_bad","camera#","v_g_band","saturated"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df[c] = pd.to_numeric(df[c], errors="coerce")
 
     df = df.dropna(subset=["JD","mag","error"]).sort_values("JD").reset_index(drop=True)
 

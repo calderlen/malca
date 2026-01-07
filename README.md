@@ -1,54 +1,64 @@
-# MALCA: Multi-timescale ASAS-SN Light Curve Analysis
+# MALCA: ASAS-SN light-curve filtering and event finding
 
-Pipeline to search for peaks and dips in ASAS-SN light curves
+## How to use
+#### What files are expected
+- Per-mag-bin directories: `/data/poohbah/1/assassin/rowan.90/lcsv2/<mag_bin>/`
+  - Index CSVs: `index*.csv` with columns like `asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec, ...`
+  - Light curves: `lc<num>_cal/` folders containing `<asas_sn_id>.dat2` (preferred) or `<asas_sn_id>.csv`
+- Optional catalogs (only needed if you turn on those filters):
+  - VSX: `results_crossmatch/vsx_cleaned_*.csv`
+  - ASAS-SN bright-star index: `results_crossmatch/asassn_index_masked_concat_cleaned_*.csv`
 
-## how to use
-- `malca/manifest.py`  
-  Build a CSV/Parquet mapping ASAS-SN IDs to light-curve paths:  
-  `python malca/manifest.py --index-root <path_to_index_root> --lc-root <path_to_lc_root> --out ./lc_manifest.parquet [--mag-bin 12_12.5 ...]`
+#### Typical run (large batches)
+1) Build a manifest (map IDs -> light-curve directories):
+   ```bash
+   python malca/manifest.py --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
+     --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
+     --mag-bin 13_13.5 \
+     --out lc_manifest_13_13.5.parquet
+   ```
+2) Pre-filter and run events in batches with resume support:
+   ```bash
+   python filtered_events.py --mag-bin 13_13.5 --n-workers 16 \
+     --min-time-span 100 --min-points-per-day 0.05 --max-power 0.5 --min-cameras 2 \
+     --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
+     --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
+     -- --output ./output/lc_events_results_13_13.5.csv --workers 32
+   ```
+   - The wrapper builds/loads the manifest, runs pre-filters from `malca/pre_filter.py`, then calls `malca/events.py` in batches.
+   - Resume: if interrupted, it skips already processed paths using the `*_PROCESSED.txt` checkpoint next to the output.
 
-- `malca/pre_filter.py`  
-  Run pre-filters on candidates before event detection (sparse, periodic, VSX, bright-nearby, multi-camera):  
-  `python -m malca.pre_filter --help` (expects an input CSV with `asas_sn_id`/`path`; configure filters via flags).
+3)  Post-filter events:
+   ```bash
+   python -m malca.post_filter --input ./output/lc_events_results_13_13.5.csv \
+     --output ./output/lc_events_results_13_13.5_filtered.csv
+   ```
 
-- `malca/events.py`  
-  Bayesian event detection over light curves:  
-  `python malca/events.py --input <paths_or_glob> --output results.parquet --workers 8 [--mag-bins ...] [--trigger-mode logbf|posterior_prob]`
+### Running pieces manually
+- Build manifest only:
+  `python malca/manifest.py --index-root <index_dir> --lc-root <lc_dir> --mag-bin 12_12.5 --out lc_manifest.parquet`
+- Pre-filter only (expects columns `asas_sn_id` and `path` pointing to lc_dir):
+  `python -m malca.pre_filter --help`
+- Events only:
+  `python -m malca.events --input /path/to/lc*_cal/*.dat2 --output results.parquet --workers 16`
+- Post-filter only:
+  `python -m malca.post_filter --input results.parquet --output results_filtered.parquet`
+- Targeted reproduction of specific candidates (Bayesian):
+  `python malca/reproduce_candidates.py --method bayes --manifest lc_manifest.parquet --candidates my_targets.csv --out-dir results_repro --out-format csv --n-workers 8`
+- Batch reproduction helper (same idea, alternate entry point):
+  `python malca/reproduction.py --method bayes --manifest lc_manifest.parquet --candidates my_targets.csv --out-dir results_repro --out-format csv --n-workers 8`
+- Plot a single light curve with baseline/residuals:
+  `python -m malca.plot --input /path/to/lc123.dat2 --output plot.png`
+- Batch plot Bayesian results:
+  `python malca/plot_results_bayes.py --input ./output/lc_events_results_13_13.5.csv --out-dir ./plots`
 
-- `malca/post_filter.py`  
-  Post-process detected events (rule-based pruning/aggregation):  
-  `python -m malca.post_filter --input <events_csv_or_parquet> --output <filtered_csv>`
+### Notes
+- Always generate the manifest first; everything else depends on knowing where each `<asas_sn_id>.dat2` lives.
+- If you don’t have the VSX or ASAS-SN catalog files, leave those filters off (`apply_vsx=False`, `apply_bns=False`).
 
-- `malca/reproduce_candidates.py`  
-  Targeted reproduction over candidate lists (naive/biweight/Bayesian):  
-  `python malca/reproduce_candidates.py --method bayes --manifest ./lc_manifest.parquet --out-dir ./results_repro --out-format csv [--candidates <file_or_builtin>] [--n-workers 8]`
 
-- `malca/filter.py`  
-  Apply legacy/aggregate filtering to peak/dip tables:  
-  `python malca/filter.py <peaks_csv_or_dir> [--biweight] [--band g|v|both|either] [--latest-per-bin] [--output <csv>] [--output-dir <dir>]`
-
-- `malca/fp_analysis.py`  
-  Compare pre/post filter retention:  
-  `python malca/fp_analysis.py --pre <pre_csv_or_dir> --post <post_csv_or_dir> [--id-col asas_sn_id]`
-
-- VSX utilities  
-  - `malca/vsx_crossmatch.py`: build/propagate VSX matches; see `python malca/vsx_crossmatch.py --help`.  
-  - `malca/vsx_filter.py`: filter VSX classes; see `python malca/vsx_filter.py --help`.  
-  - `malca/vsx_reproducibility.py`: crossmatch reproducibility checks; see `python malca/vsx_reproducibility.py --help`.
-
-- Plotting  
-  - `malca/plot_results_bayes.py`: batch plotting of Bayesian results; see `python malca/plot_results_bayes.py --help`.  
-  - `malca/plot.py`: helpers for plotting individual light curves (import or run `python -m malca.plot` for ad hoc use).
-
-## dependencies
-- numpy
-- pandas
-- scipy
-- numba
-- astropy
-- tqdm
-- matplotlib
+### Dependencies
+- numpy, pandas, scipy, numba, astropy, tqdm, matplotlib
 - celerite2
-- pyarrow (required for parquet outputs)
-- duckdb (optional; required for `--output-format duckdb`)
-- jupyter / ipykernel (optional; for notebooks)
+- pyarrow (Parquet support)
+- duckdb (optional, only if using `--output-format duckdb`)

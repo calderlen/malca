@@ -24,22 +24,17 @@ def get_id_col(df: pd.DataFrame) -> str:
 
 def clean_lc(df):
     mask = np.ones(len(df), dtype=bool)
-
-    if "saturated" in df.columns:
-        mask &= (df["saturated"] == 0)
-
+    mask &= (df["saturated"] == 0)
     mask &= df["JD"].notna() & df["mag"].notna()
-    if "error" in df.columns:
-        mask &= df["error"].notna() & (df["error"] > 0.0) & (df["error"] < 1.0)
+    mask &= df["error"].notna() & (df["error"] > 0.0) & (df["error"] < 1.0)
     df = df.loc[mask]
-
     df = df.sort_values("JD").reset_index(drop=True)
     return df
 
 
 def compute_time_stats(df_lc: pd.DataFrame) -> dict:
     """Compute time span and cadence stats from a light curve DataFrame."""
-    if df_lc.empty or "JD" not in df_lc.columns:
+    if df_lc.empty:
         return {"time_span_days": 0.0, "points_per_day": 0.0}
 
     jd = df_lc["JD"].values
@@ -58,13 +53,11 @@ def compute_time_stats(df_lc: pd.DataFrame) -> dict:
 
 def compute_periodogram(df_lc: pd.DataFrame) -> dict:
     """Compute Lomb-Scargle periodogram stats from a light curve DataFrame."""
-    if df_lc.empty or "JD" not in df_lc.columns or "mag" not in df_lc.columns:
+    if df_lc.empty:
         return {"ls_max_power": 0.0, "best_period": np.nan}
 
-    # Clean data
     mask = np.isfinite(df_lc["JD"]) & np.isfinite(df_lc["mag"])
-    if "error" in df_lc.columns:
-        mask &= np.isfinite(df_lc["error"]) & (df_lc["error"] > 0)
+    mask &= np.isfinite(df_lc["error"]) & (df_lc["error"] > 0)
 
     jd = df_lc.loc[mask, "JD"].values
     mag = df_lc.loc[mask, "mag"].values
@@ -96,7 +89,7 @@ def compute_periodogram(df_lc: pd.DataFrame) -> dict:
 
 def compute_n_cameras(df_lc: pd.DataFrame) -> int:
     """Count unique cameras from a light curve DataFrame."""
-    if df_lc.empty or "camera#" not in df_lc.columns:
+    if df_lc.empty:
         return 0
     cameras = df_lc["camera#"].dropna().unique()
     return int(len(cameras))

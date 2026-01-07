@@ -7,14 +7,14 @@ Rewrote `malca/pre_filter.py` to compute required statistics from dat2 files on-
 
 ### 1. **filter_sparse_lightcurves** - Compute time stats from dat2
 - **Before**: Assumed `time_span_days` and `points_per_day` columns existed
-- **After**: Checks if columns exist; if not, reads dat2 files and computes:
+- **After**: Reads dat2 files and computes:
   - `time_span_days`: max(JD) - min(JD)
   - `points_per_day`: n_points / time_span_days
 - **Implementation**: `_compute_time_stats()` helper function
 
 ### 2. **filter_periodic_candidates** - Compute Lomb-Scargle on-the-fly
 - **Before**: Assumed `ls_max_power` and `best_period` columns existed
-- **After**: Checks if columns exist; if not, reads dat2 files and computes:
+- **After**: Reads dat2 files and computes:
   - Lomb-Scargle periodogram using astropy.timeseries.LombScargle
   - `ls_max_power`: maximum power from periodogram
   - `best_period`: period at maximum power (1/frequency)
@@ -49,7 +49,7 @@ Rewrote `malca/pre_filter.py` to compute required statistics from dat2 files on-
 
 ### 5. **filter_multi_camera** - Count cameras from dat2
 - **Before**: Assumed `n_cameras` column existed
-- **After**: Checks if column exists; if not, reads dat2 files and computes:
+- **After**: Reads dat2 files and computes:
   - Counts unique values in `camera#` column
   - Uses `_compute_n_cameras()` helper function
 
@@ -99,8 +99,8 @@ Input format:
     - bns_separation_arcsec, bns_delta_mag (computed via ASAS-SN catalog crossmatch)
     - n_cameras (counted from camera# column)
 
-    If any of these columns already exist in the input DataFrame, they will be used
-    instead of recomputing.
+    These columns are computed from the dat2 files during filtering (overwriting any
+    existing values in the DataFrame).
 ```
 
 ## Usage Example

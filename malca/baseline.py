@@ -555,11 +555,7 @@ def per_camera_gp_baseline(
         idx = sub.sort_values(t_col).index
         t = df_out.loc[idx, t_col].to_numpy(dtype=float)
         y = df_out.loc[idx, mag_col].to_numpy(dtype=float)
-
-        if err_col in df_out.columns:
-            yerr = df_out.loc[idx, err_col].to_numpy(dtype=float)
-        else:
-            yerr = np.full_like(y, np.nan, dtype=float)
+        yerr = df_out.loc[idx, err_col].to_numpy(dtype=float)
 
         finite = np.isfinite(t) & np.isfinite(y)
         if finite.sum() < 5:
@@ -708,7 +704,7 @@ def per_camera_gp_baseline_masked(
         t = df_out.loc[idx, t_col].to_numpy(float)
         y = df_out.loc[idx, mag_col].to_numpy(float)
 
-        if use_yerr and err_col in df_out.columns:
+        if use_yerr:
             yerr = df_out.loc[idx, err_col].to_numpy(float)
         else:
             yerr = np.full_like(y, np.nan, dtype=float)

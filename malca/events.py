@@ -534,10 +534,7 @@ def bayesian_event_significance(
             f"NaN={np.isnan(mags).sum()}, inf={np.isinf(mags).sum()}"
         )
 
-    if err_col in df.columns:
-        errs = np.asarray(df[err_col], float)
-    else:
-        errs = np.full_like(mags, 0.05)
+    errs = np.asarray(df[err_col], float)
     
     errs_finite = np.isfinite(errs).sum()
     errs_positive = (errs > 0).sum() if errs_finite > 0 else 0

@@ -8,9 +8,9 @@ from typing import Iterable, Sequence
 import pandas as pd
 from tqdm import tqdm
 
-from old.lc_events import MAG_BINS, lc_dir_masked
+from old.lc_events import MAG_BINS
 
-IDX_PATTERN = re.compile(r"index(\d+)_masked\.csv$", re.IGNORECASE)
+IDX_PATTERN = re.compile(r"index(\d+)\.csv$", re.IGNORECASE)
 
                                                                                                                                    
 
@@ -30,7 +30,7 @@ def iter_source_records(
         if not idx_dir.exists():
             tqdm.write(f"[warn] missing index dir for {mag_bin}: {idx_dir}")
             continue
-        csv_paths = sorted(idx_dir.glob("index*_masked.csv"))
+        csv_paths = sorted(idx_dir.glob("index*.csv"))
         if not csv_paths:
             tqdm.write(f"[warn] no index CSVs found in {idx_dir}")
             continue
@@ -66,7 +66,19 @@ def iter_source_records(
                 continue
 
             for source_id in ids:
-                dat_path = lc_dir / f"{source_id}.dat"
+                dat2_path = lc_dir / f"{source_id}.dat2"
+                csv_path_lc = lc_dir / f"{source_id}.csv"
+
+                if dat2_path.exists():
+                    file_path = dat2_path
+                    file_exists = True
+                elif csv_path_lc.exists():
+                    file_path = csv_path_lc
+                    file_exists = True
+                else:
+                    file_path = dat2_path
+                    file_exists = False
+
                 yield {
                     "source_id": source_id,
                     "mag_bin": mag_bin,
@@ -74,8 +86,8 @@ def iter_source_records(
                     "index_csv": str(csv_path),
                     "lc_dir": str(lc_dir),
                     "lc_dir_exists": lc_dir.exists(),
-                    "dat_path": str(dat_path),
-                    "dat_exists": dat_path.exists(),
+                    "dat_path": str(file_path),
+                    "dat_exists": file_exists,
                 }
 
 
@@ -133,8 +145,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--index-root",
         type=Path,
-        default=Path(lc_dir_masked),
-        help="Root directory that contains <mag_bin>/index*_masked.csv files.",
+        default=Path("/data/poohbah/1/assassin/rowan.90/lcsv2"),
+        help="Root directory that contains <mag_bin>/index*.csv files.",
     )
     parser.add_argument(
         "--lc-root",
