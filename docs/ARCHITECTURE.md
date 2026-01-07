@@ -26,8 +26,10 @@
 - `malca/vsx_crossmatch.py`
 - `malca/vsx_filter.py`
 - `malca/vsx_reproducibility.py`
-- `filtered_events.py`
+- `malca/filtered_events.py`
   - wrapper script: build/load manifest, run pre-filters, and call `malca.events` in batches with resume support
+- `malca/plot_metrics.py`
+  - plotting helpers for light-curve metrics (2D multi-metric plots and simple 3D scatter)
 
 ## Legacy Python modules (`malca/old/`)
 - `df_utils.py`

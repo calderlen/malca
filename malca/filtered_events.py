@@ -9,7 +9,7 @@ Workflow:
 4. Pass to events.py
 
 Usage:
-    python filtered_events.py --mag-bin 13_13.5 [events.py args...]
+    python -m malca.filtered_events --mag-bin 13_13.5 [events.py args...]
 """
 
 import argparse
@@ -19,12 +19,9 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 import tempfile
-import shutil
 
-# Import from malca package
-sys.path.insert(0, str(Path(__file__).parent / "malca"))
-from manifest import build_manifest_dataframe
-from pre_filter import apply_pre_filters
+from malca.manifest import build_manifest_dataframe
+from malca.pre_filter import apply_pre_filters
 
 
 def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -87,8 +84,8 @@ def main():
 
     # Determine file names
     mag_bin_tag = args.mag_bin[0] if len(args.mag_bin) == 1 else "multi"
-    manifest_file = args.manifest_file or Path(f"lc_manifest_{mag_bin_tag}.parquet")
-    filtered_file = args.filtered_file or Path(f"lc_filtered_{mag_bin_tag}.parquet")
+    manifest_file = args.manifest_file or Path(f"/output/lc_manifest_{mag_bin_tag}.parquet")
+    filtered_file = args.filtered_file or Path(f"/output/lc_filtered_{mag_bin_tag}.parquet")
 
     # Step 1: Build or load manifest
     if args.force_manifest or not manifest_file.exists():
@@ -155,13 +152,13 @@ def main():
     print(f"\nPreparing to run events.py on {len(file_paths)} light curves...")
 
     # Write paths to temp file for events.py to consume
-    paths_file = Path(f"filtered_paths_{mag_bin_tag}.txt")
+    paths_file = Path(f"/output/filtered_paths_{mag_bin_tag}.txt")
     with open(paths_file, "w") as f:
         for path in file_paths:
             f.write(f"{path}\n")
 
     # Resume logic: skip paths already recorded in events checkpoint log if present
-    base_output = parse_output_path(events_args) or Path("./output/lc_events_results.csv")
+    base_output = parse_output_path(events_args) or Path("/output/lc_events_results.csv")
     checkpoint_log = base_output.with_name(f"{base_output.stem}_PROCESSED.txt")
     processed_paths: set[str] = set()
     if checkpoint_log.exists():
