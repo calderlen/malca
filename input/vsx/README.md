@@ -1,10 +1,10 @@
 # VSX Crossmatch Data
 
-**NOTE**: The default catalog locations for pre_filter.py are in `results_crossmatch/`:
-- `results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv`
-- `results_crossmatch/vsx_cleaned_20250926_1557.csv`
+**NOTE**: The default catalog locations for pre_filter.py are in `input/vsx/`:
+- `input/vsx/asassn_catalog.csv`
+- `input/vsx/vsx_cleaned.csv`
 
-This directory can be used for alternative VSX/ASAS-SN catalog files.
+This directory contains VSX and ASAS-SN catalog files for crossmatching.
 
 ## Required File Formats
 

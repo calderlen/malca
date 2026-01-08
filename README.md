@@ -6,8 +6,8 @@
   - Index CSVs: `index*.csv` with columns like `asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec, ...`
   - Light curves: `lc<num>_cal/` folders containing `<asas_sn_id>.dat2` (preferred) or `<asas_sn_id>.csv`
 - Optional catalogs (only needed if you turn on those filters):
-  - VSX: `results_crossmatch/vsx_cleaned_*.csv`
-  - ASAS-SN bright-star index: `results_crossmatch/asassn_index_masked_concat_cleaned_*.csv`
+  - VSX: `input/vsx/vsx_cleaned.csv`
+  - ASAS-SN bright-star index: `input/vsx/asassn_catalog.csv`
 
 #### Typical run (large batches)
 1) Build a manifest (map IDs -> light-curve directories):

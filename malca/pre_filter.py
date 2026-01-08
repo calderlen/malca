@@ -309,7 +309,7 @@ def filter_vsx_match(
     *,
     max_sep_arcsec: float = 3.0,
     exclude_classes: list[str] | None = None,
-    vsx_catalog_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.csv",
+    vsx_catalog_csv: str | Path = "input/vsx/vsx_cleaned.csv",
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -318,7 +318,7 @@ def filter_vsx_match(
     Remove candidates that match known variables with specified classes.
 
     If vsx_match_sep_arcsec and vsx_class columns exist, use them.
-    Otherwise, perform crossmatch using VSX catalog from results_crossmatch/vsx_cleaned_*.csv
+    Otherwise, perform crossmatch using VSX catalog from input/vsx/vsx_cleaned.csv
 
     Required columns for crossmatch: ra_deg, dec_deg, pm_ra, pm_dec
     Raises ValueError if required columns or catalog file are missing.
@@ -372,7 +372,7 @@ def filter_vsx_match(
 def filter_bns(
     df: pd.DataFrame,
     *,
-    asassn_catalog_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
+    asassn_catalog_csv: str | Path = "input/vsx/asassn_catalog.csv",
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -491,12 +491,12 @@ def apply_pre_filters(
     *,
     # Filter 1: BNS (catalog membership filter)
     apply_bns: bool = False,
-    asassn_catalog_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
+    asassn_catalog_csv: str | Path = "input/vsx/asassn_catalog.csv",
     # Filter 2: VSX crossmatch
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
-    vsx_catalog_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.csv",
+    vsx_catalog_csv: str | Path = "input/vsx/vsx_cleaned.csv",
     # Filter 3: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,

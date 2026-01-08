@@ -10,8 +10,8 @@ MAG_BINS = ("12_12.5", "12.5_13", "13_13.5", "13.5_14", "14_14.5", "14.5_15")
 
 DEFAULT_LC_DIR = Path("/data/poohbah/1/assassin/rowan.90/lcsv2")
 DEFAULT_LC_DIR_MASKED = Path("/data/poohbah/1/assassin/lenhart/code/calder/lcsv2_masked")
-DEFAULT_VSX_FILE = Path("/data/poohbah/1/assassin/lenhart/code/calder/vsxcat.090525")
-DEFAULT_OUTPUT_DIR = Path("/data/poohbah/1/assassin/lenhart/code/calder/calder/output")
+DEFAULT_VSX_FILE = Path(__file__).parent.parent / "input" / "vsx" / "vsxcat.090525"
+DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent / "input" / "vsx"
 
 
 colspecs = [
@@ -303,9 +303,15 @@ def write_clean_outputs(
     """Write cleaned ASAS-SN index and VSX CSVs, returning their paths."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    stamp = stamp or datetime.now().strftime("%Y%m%d_%H%M")
-    asas_out = output_dir / f"asassn_index_masked_concat_cleaned_{stamp}.csv"
-    vsx_out = output_dir / f"vsx_cleaned_{stamp}.csv"
+
+    if stamp:
+        asas_out = output_dir / f"asassn_index_masked_concat_cleaned_{stamp}.csv"
+        vsx_out = output_dir / f"vsx_cleaned_{stamp}.csv"
+    else:
+        # Use simple default names matching pre_filter.py expectations
+        asas_out = output_dir / "asassn_catalog.csv"
+        vsx_out = output_dir / "vsx_cleaned.csv"
+
     df_asassn.to_csv(asas_out, index=False)
     df_vsx.to_csv(vsx_out, index=False)
     return asas_out, vsx_out
