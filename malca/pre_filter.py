@@ -2,21 +2,23 @@
 Pre-filters that run BEFORE events.py.
 These filters depend only on raw light curve data (dat2 files) and external catalogs.
 
-Filters:
-1. filter_sparse_lightcurves - remove LCs with insufficient time span or cadence
-2. filter_periodic_candidates - remove strongly periodic sources
-3. filter_vsx_match - remove known variable stars from VSX
-4. filter_bright_nearby_stars - remove sources contaminated by nearby stars
-5. filter_multi_camera - remove single-camera detections
+Filters (ordered by execution speed for efficiency):
+1. filter_bns - filter by catalog membership (assumes pre-cleaned catalog)
+2. filter_vsx_match - remove known variable stars from VSX
+3. filter_sparse_lightcurves - remove LCs with insufficient time span or cadence
+4. filter_multi_camera - remove single-camera detections
+5. filter_periodic_candidates - remove strongly periodic sources
 
 Input format:
     DataFrame with columns: asas_sn_id (or id/source_id), path (to directory containing dat2 files)
 
-    Filters will compute required stats from dat2 files on-the-fly:
+    filter_bns enriches data with catalog astrometry:
+    - ra_deg, dec_deg, pm_ra, pm_ra_d, pm_dec, pm_dec_d
+
+    Other filters compute required stats from dat2 files on-the-fly:
     - time_span_days, points_per_day (computed from JD column)
     - ls_max_power, best_period (computed via Lomb-Scargle periodogram)
-    - vsx_match_sep_arcsec, vsx_class (computed via VSX crossmatch using data in input/vsx/)
-    - bns_separation_arcsec, bns_delta_mag (computed via ASAS-SN catalog crossmatch)
+    - vsx_match_sep_arcsec, vsx_class (computed via VSX crossmatch)
     - n_cameras (counted from camera# column)
 """
 
@@ -27,7 +29,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 from astropy import units as u
-from astropy.coordinates import SkyCoord
 from tqdm.auto import tqdm
 
 from malca.utils import (
@@ -368,137 +369,63 @@ def filter_vsx_match(
     return out
 
 
-def filter_bright_nearby_stars(
+def filter_bns(
     df: pd.DataFrame,
     *,
-    max_separation_arcsec: float = 5.0,
-    max_mag_diff: float = 3.0,
     asassn_catalog_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
-    Filter out candidates with bright nearby stars that could contaminate photometry.
+    Filter candidates by matching asas_sn_id to a pre-cleaned ASAS-SN catalog.
 
-    If bns_separation_arcsec and bns_delta_mag columns exist, use them.
-    Otherwise, perform catalog crossmatch using ASAS-SN index from results_crossmatch/asassn_index_*.csv
+    This filter assumes the catalog has already been cleaned to remove sources
+    with bright nearby star contamination. Sources are filtered by simple
+    catalog membership (inner join on asas_sn_id).
 
-    Required columns for crossmatch: ra_deg, dec_deg, and a magnitude column
-    (gaia_mag, pstarrs_g_mag, mag, mean_mag, or median_mag)
+    Additionally enriches the dataframe with catalog astrometry:
+    - ra_deg, dec_deg
+    - pm_ra, pm_ra_d, pm_dec, pm_dec_d (proper motion and errors)
 
-    For each candidate, finds all catalog sources within max_separation_arcsec and checks
-    if any are brighter by less than max_mag_diff. Such candidates are rejected.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe with asas_sn_id column
+    asassn_catalog_csv : str | Path
+        Path to cleaned ASAS-SN catalog CSV
+    show_tqdm : bool
+        Show progress bar
+    rejected_log_csv : str | Path | None
+        Path to log rejected candidates
 
-    The ASAS-SN index file contains: asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec,
-    gaia_mag, pstarrs_g_mag, pstarrs_r_mag, and other photometric columns.
-
-    Raises ValueError if required columns or catalog file are missing.
+    Returns
+    -------
+    pd.DataFrame
+        Filtered dataframe with catalog data attached
     """
-    n0 = len(df)
+    with tqdm(total=2, desc="filter_bns", leave=False, disable=not show_tqdm) as pbar:
+        # Load catalog
+        catalog = pd.read_csv(asassn_catalog_csv)
+        catalog["asas_sn_id"] = catalog["asas_sn_id"].astype(str)
+        pbar.update(1)
 
-    # Check if we need to compute crossmatch
-    need_compute = ("bns_separation_arcsec" not in df.columns) or ("bns_delta_mag" not in df.columns)
+        # Select columns to attach from catalog
+        cols_to_attach = [
+            "ra_deg", "dec_deg", "pm_ra", "pm_ra_d", "pm_dec", "pm_dec_d",
+        ]
+        cols_available = ["asas_sn_id"] + [c for c in cols_to_attach if c in catalog.columns]
 
-    if need_compute:
-        # Load ASAS-SN catalog
-        catalog_path = Path(asassn_catalog_csv)
-        catalog = pd.read_csv(catalog_path)
-
-        # Verify required columns in input
-        required_cols = ["ra_deg", "dec_deg"]
-        missing_cols = [c for c in required_cols if c not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns for BNS filter: {missing_cols}")
-
-        # Find magnitude column from input
-        mag_col = None
-        for col in ["gaia_mag", "pstarrs_g_mag", "mag", "mean_mag", "median_mag", "photometry_median_mag"]:
-            if col in df.columns:
-                mag_col = col
-                break
-
-        if mag_col is None:
-            raise ValueError(f"No magnitude column found in input DataFrame. Expected one of: gaia_mag, pstarrs_g_mag, mag, mean_mag, median_mag")
-
-        # Build coordinate arrays
-        coords_candidates = SkyCoord(
-            ra=df["ra_deg"].values * u.deg,
-            dec=df["dec_deg"].values * u.deg,
-        )
-
-        coords_catalog = SkyCoord(
-            ra=catalog["ra_deg"].values * u.deg,
-            dec=catalog["dec_deg"].values * u.deg,
-        )
-
-        # For each candidate, find minimum separation and mag diff to nearby sources
-        df_with_bns = df.copy()
-        df_with_bns["bns_separation_arcsec"] = 999.0
-        df_with_bns["bns_delta_mag"] = 999.0
-
-        pbar = tqdm(total=len(df), desc="filter_bright_nearby_stars (crossmatch)", leave=False, disable=not show_tqdm)
-
-        for idx, row in df.iterrows():
-            coord = coords_candidates[idx]
-            candidate_mag = row[mag_col]
-
-            if not np.isfinite(candidate_mag):
-                if pbar:
-                    pbar.update(1)
-                continue
-
-            # Find all catalog sources within max_separation_arcsec
-            seps = coord.separation(coords_catalog)
-            nearby_mask = seps < (max_separation_arcsec * u.arcsec)
-
-            if not nearby_mask.any():
-                if pbar:
-                    pbar.update(1)
-                continue
-
-            # Get nearby catalog sources
-            nearby_catalog = catalog[nearby_mask].copy()
-            nearby_seps = seps[nearby_mask].arcsec
-
-            # Find magnitude column in catalog
-            catalog_mag_col = None
-            for col in ["gaia_mag", "pstarrs_g_mag", "pstarrs_r_mag", "mag", "mean_mag", "median_mag", "g_mag", "v_mag"]:
-                if col in nearby_catalog.columns:
-                    catalog_mag_col = col
-                    break
-
-            if catalog_mag_col is None:
-                raise ValueError(f"No magnitude column found in catalog. Expected one of: gaia_mag, pstarrs_g_mag, pstarrs_r_mag, mag")
-
-            # Compute mag differences (positive means catalog star is brighter)
-            mag_diffs = candidate_mag - nearby_catalog[catalog_mag_col].values
-
-            # Find the closest bright nearby star
-            bright_mask = (mag_diffs > 0) & np.isfinite(mag_diffs)
-            if bright_mask.any():
-                min_idx = np.argmin(nearby_seps[bright_mask])
-                df_with_bns.loc[idx, "bns_separation_arcsec"] = nearby_seps[bright_mask][min_idx]
-                df_with_bns.loc[idx, "bns_delta_mag"] = mag_diffs[bright_mask][min_idx]
-
-            if pbar:
-                pbar.update(1)
-
-        if pbar:
-            pbar.close()
-
-        df = df_with_bns
-
-    # Apply filter
-    has_bns = (df["bns_separation_arcsec"].fillna(999) <= max_separation_arcsec) & \
-              (df["bns_delta_mag"].fillna(999) <= max_mag_diff)
-    mask = ~has_bns
-    out = df.loc[mask].reset_index(drop=True)
+        # Perform inner join - only keep sources in cleaned catalog
+        df_ids = df.assign(asas_sn_id=df["asas_sn_id"].astype(str))
+        df_out = df_ids.merge(catalog[cols_available], on="asas_sn_id", how="inner").reset_index(drop=True)
+        pbar.update(1)
 
     if show_tqdm:
-        tqdm.write(f"[filter_bright_nearby_stars] kept {len(out)}/{n0}")
-    log_rejections(df, out, "filter_bright_nearby_stars", rejected_log_csv)
+        tqdm.write(f"[filter_bns] kept {len(df_out)}/{len(df)}")
 
-    return out
+    log_rejections(df_ids, df_out, "filter_bns", rejected_log_csv)
+
+    return df_out
 
 
 def filter_multi_camera(
@@ -562,28 +489,26 @@ def filter_multi_camera(
 def apply_pre_filters(
     df: pd.DataFrame,
     *,
-    # Filter 1: sparse lightcurves
-    apply_sparse: bool = True,
-    min_time_span: float = 100.0,
-    min_points_per_day: float = 0.05,
-    # Filter 2: periodic candidates
-    apply_periodic: bool = True,
-    max_power: float = 0.5,
-    min_period: float | None = None,
-    max_period: float | None = None,
-    # Filter 3: VSX crossmatch
+    # Filter 1: BNS (catalog membership filter)
+    apply_bns: bool = False,
+    asassn_catalog_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
+    # Filter 2: VSX crossmatch
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
     vsx_catalog_csv: str | Path = "results_crossmatch/vsx_cleaned_20250926_1557.csv",
-    # Filter 4: bright nearby stars
-    apply_bns: bool = False,
-    bns_max_separation_arcsec: float = 5.0,
-    bns_max_mag_diff: float = 3.0,
-    asassn_catalog_csv: str | Path = "results_crossmatch/asassn_index_masked_concat_cleaned_20250926_1557.csv",
-    # Filter 5: multi camera
+    # Filter 3: sparse lightcurves
+    apply_sparse: bool = True,
+    min_time_span: float = 100.0,
+    min_points_per_day: float = 0.05,
+    # Filter 4: multi camera
     apply_multi_camera: bool = True,
     min_cameras: int = 2,
+    # Filter 5: periodic candidates
+    apply_periodic: bool = True,
+    max_power: float = 0.5,
+    min_period: float | None = None,
+    max_period: float | None = None,
     # General
     n_workers: int = 1,
     show_tqdm: bool = True,
@@ -591,6 +516,9 @@ def apply_pre_filters(
 ) -> pd.DataFrame:
     """
     Apply pre-filters before running events.py.
+
+    Filters are applied in order of execution speed (fast to slow) for efficiency.
+    filter_bns must run first as it provides astrometry data needed by filter_vsx_match.
 
     Parameters
     ----------
@@ -600,7 +528,7 @@ def apply_pre_filters(
         Whether to apply each filter
     n_workers : int
         Number of parallel workers for computing stats (default 1 = sequential).
-        Filters 1, 2, and 5 (sparse, periodic, multi_camera) can benefit from parallelization.
+        Filters 3, 4, and 5 (sparse, multi_camera, periodic) can benefit from parallelization.
     show_tqdm : bool
         Show progress bars
     rejected_log_csv : str | Path | None
@@ -643,25 +571,15 @@ def apply_pre_filters(
 
     filters = []
 
-    if apply_sparse:
-        filters.append(("sparse", filter_sparse_lightcurves, {
-            "min_time_span": min_time_span,
-            "min_points_per_day": min_points_per_day,
+    # Filter 1: BNS (catalog membership) - FAST, must run first
+    if apply_bns:
+        filters.append(("bns", filter_bns, {
+            "asassn_catalog_csv": asassn_catalog_csv,
             "show_tqdm": show_tqdm,
-            "compute_stats": not precomputed_time,
             "rejected_log_csv": rejected_log_csv,
         }))
 
-    if apply_periodic:
-        filters.append(("periodic", filter_periodic_candidates, {
-            "max_power": max_power,
-            "min_period": min_period,
-            "max_period": max_period,
-            "show_tqdm": show_tqdm,
-            "compute_stats": not precomputed_period,
-            "rejected_log_csv": rejected_log_csv,
-        }))
-
+    # Filter 2: VSX crossmatch - requires ra_deg, dec_deg, pm_ra, pm_dec from filter_bns
     if apply_vsx:
         filters.append(("vsx_match", filter_vsx_match, {
             "max_sep_arcsec": vsx_max_sep_arcsec,
@@ -671,20 +589,33 @@ def apply_pre_filters(
             "rejected_log_csv": rejected_log_csv,
         }))
 
-    if apply_bns:
-        filters.append(("bright_nearby_stars", filter_bright_nearby_stars, {
-            "max_separation_arcsec": bns_max_separation_arcsec,
-            "max_mag_diff": bns_max_mag_diff,
-            "asassn_catalog_csv": asassn_catalog_csv,
+    # Filter 3: Sparse lightcurves - reads dat2 files
+    if apply_sparse:
+        filters.append(("sparse", filter_sparse_lightcurves, {
+            "min_time_span": min_time_span,
+            "min_points_per_day": min_points_per_day,
             "show_tqdm": show_tqdm,
+            "compute_stats": not precomputed_time,
             "rejected_log_csv": rejected_log_csv,
         }))
 
+    # Filter 4: Multi camera - reads dat2 files
     if apply_multi_camera:
         filters.append(("multi_camera", filter_multi_camera, {
             "min_cameras": min_cameras,
             "show_tqdm": show_tqdm,
             "compute_stats": not precomputed_cameras,
+            "rejected_log_csv": rejected_log_csv,
+        }))
+
+    # Filter 5: Periodic candidates - SLOWEST, runs on smallest dataset
+    if apply_periodic:
+        filters.append(("periodic", filter_periodic_candidates, {
+            "max_power": max_power,
+            "min_period": min_period,
+            "max_period": max_period,
+            "show_tqdm": show_tqdm,
+            "compute_stats": not precomputed_period,
             "rejected_log_csv": rejected_log_csv,
         }))
 
