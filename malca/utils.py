@@ -14,6 +14,13 @@ colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5
               '#a1b055']
 
 
+def gaussian(t, amp, t0, sigma, baseline):
+    """
+    Gaussian kernel + baseline term (shared between events and dipper scoring).
+    """
+    return baseline + amp * np.exp(-0.5 * ((t - t0) / sigma) ** 2)
+
+
 def get_id_col(df: pd.DataFrame) -> str:
     """Find the ID column in a dataframe."""
     for candidate in ["asas_sn_id", "id", "source_id", "path"]:

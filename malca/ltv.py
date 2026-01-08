@@ -117,8 +117,8 @@ def parse_args() -> Config:
     )
     p.add_argument("--workers",
                    type=int,
-                   default=max(1, mp.cpu_count() // 16),
-                   help="Number of parallel workers (default: cpu_count//16)")
+                   default=10,
+                   help="Number of parallel workers (default: 10)")
     p.add_argument("--chunk-size",
                    type=int,
                    default=10000,

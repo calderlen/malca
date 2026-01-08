@@ -808,7 +808,12 @@ if __name__ == "__main__":
     parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Specify bins to run; omit to process all.",)
     parser.add_argument("--out-dir", default=None)
     parser.add_argument("--format", choices=("parquet", "csv"), default="csv")
-    parser.add_argument("--n-workers", type=int, default=10, help="Parallel processes",)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=10,
+        help="Parallel processes.",
+    )
     parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per CSV flush",)
     args = parser.parse_args()
     bins = args.mag_bins or MAG_BINS
@@ -818,6 +823,6 @@ if __name__ == "__main__":
         mag_bins=bins,
         out_dir=args.out_dir,
         out_format=args.format,
-        n_workers=args.n_workers,
+        n_workers=args.workers,
         chunk_size=args.chunk_size,
     )

@@ -9,14 +9,19 @@
   - VSX: `input/vsx/vsx_cleaned.csv` (pre-filtered to exclude known periodic/eclipsing/transient variables)
   - Note: Bright nearby star (BNS) filtering is handled upstream by ASAS-SN during LC generation
 
+#### Dependencies
+- Core pipeline: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm
+- Optional outputs: pyarrow (parquet), duckdb
+- Notebooks/EDA: jupyterlab, ipykernel, seaborn, scikit-learn, joblib
+
 #### Typical run (large batches)
 1) Build a manifest (map IDs -> light-curve directories):
    ```bash
-   python malca/manifest.py --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --mag-bin 13_13.5 --out /output/lc_manifest_13_13.5.parquet --workers 8
+   python malca/manifest.py --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --mag-bin 13_13.5 --out /output/lc_manifest_13_13.5.parquet --workers 10
    ```
 2) Pre-filter and run events in batches with resume support:
    ```bash
-   python -m malca.events_filtered --mag-bin 13_13.5 --n-workers 20 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-catalog input/vsx/vsx_cleaned.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /output/lc_events_results_13_13.5.csv --workers 20
+   python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-catalog input/vsx/vsx_cleaned.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /output/lc_events_results_13_13.5.csv --workers 10
    ```
    - The wrapper builds/loads the manifest, runs pre-filters from `malca/pre_filter.py`, then calls `malca/events.py` in batches.
    - Pre-filters: sparse LC removal, multi-camera requirement, VSX known variable rejection
@@ -52,17 +57,22 @@
 - Pre-filter only (expects columns `asas_sn_id` and `path` pointing to lc_dir):
   `python -m malca.pre_filter --help`
 - Events only:
-  `python -m malca.events --input /path/to/lc*_cal/*.dat2 --output /output/results.parquet --workers 16`
+  `python -m malca.events --input /path/to/lc*_cal/*.dat2 --output /output/results.parquet --workers 10`
+  - Default Bayesian grid is 12x12 (12 p-grid points × 12 mag-grid points). Change p-grid with `--p-points`.
 - Post-filter only:
   `python -m malca.post_filter --input /output/results.parquet --output /output/results_filtered.parquet`
 - Targeted reproduction of specific candidates (Bayesian):
-  `python malca/reproduce_candidates.py --method bayes --manifest /output/lc_manifest.parquet --candidates my_targets.csv --out-dir /output/results_repro --out-format csv --n-workers 8`
+  `python malca/reproduce_candidates.py --method bayes --manifest /output/lc_manifest.parquet --candidates my_targets.csv --out-dir /output/results_repro --out-format csv --workers 10`
 - Batch reproduction helper (same idea, alternate entry point):
-  `python malca/reproduction.py --method bayes --manifest /output/lc_manifest.parquet --candidates my_targets.csv --out-dir /output/results_repro --out-format csv --n-workers 8`
+  `python malca/reproduction.py --method bayes --manifest /output/lc_manifest.parquet --candidates my_targets.csv --out-dir /output/results_repro --out-format csv --workers 10`
 - Plot a single light curve with baseline/residuals:
   `python -m malca.plot --input /path/to/lc123.dat2 --output /output/plot.png`
+- Plot all light curves that survive post-filtering (PNG default, PDF optional):
+  `python -m malca.plot --events /output/lc_events_results_13_13.5_filtered.csv --out-dir /output/plots --format png`
 - Batch plot Bayesian results:
   `python malca/plot_results_bayes.py --input /output/lc_events_results_13_13.5.csv --out-dir /output/plots`
+- Dipper scoring metric on events output (dip_significant by default):
+  `python -m malca.dipper_score --events /output/lc_events_results_13_13.5.csv --output /output/dipper_scores.csv`
 - Plot metrics (multiple y vs p_points/mag_points; optional 3D scatter via matplotlib 3D):
   ```python
   import pandas as pd

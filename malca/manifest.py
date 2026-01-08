@@ -190,8 +190,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=1,
-        help="Parallel workers to read index CSVs (default: 1, uses ProcessPoolExecutor).",
+        default=10,
+        help="Parallel workers to read index CSVs (default: 10, uses ProcessPoolExecutor).",
     )
     parser.add_argument(
         "--overwrite",

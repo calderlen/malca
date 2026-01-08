@@ -12,6 +12,8 @@ dependencies:
   - astropy
   - matplotlib
   - seaborn
+  - scikit-learn
+  - joblib
   - pyarrow
   - duckdb
   - tqdm

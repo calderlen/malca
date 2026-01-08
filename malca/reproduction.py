@@ -733,7 +733,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the targeted reproduction search and summarize results.")
     parser.add_argument("--out-dir", default="./results_test", help="Directory for peak_results output")
     parser.add_argument("--out-format", choices=("csv", "parquet"), default="csv")
-    parser.add_argument("--n-workers", type=int, default=10, help="ProcessPool worker count for dip_finder_naive")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=10,
+        help="ProcessPool worker count for dip_finder_naive.",
+    )
     parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per chunk flush for CSV output")
     parser.add_argument("--metrics-dip-threshold", type=float, default=0.3, help="Dip threshold for run_metrics")
 
@@ -831,7 +836,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         candidates=candidate_data,
         out_dir=args.out_dir,
         out_format=args.out_format,
-        n_workers=args.n_workers,
+        n_workers=args.workers,
         chunk_size=args.chunk_size,
         metrics_dip_threshold=args.metrics_dip_threshold,
         bayes_significance_threshold=bayes_significance_threshold,

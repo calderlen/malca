@@ -28,12 +28,13 @@ warnings.filterwarnings("ignore", message=".*Covariance of the parameters could 
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
-from malca.utils import read_lc_dat2, read_lc_csv, clean_lc
+from malca.utils import read_lc_dat2, read_lc_csv, clean_lc, gaussian
 from malca.baseline import (
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
     per_camera_trend_baseline,
 )
+from malca.dipper_score import compute_dipper_score
 
 from numba import njit
 
@@ -48,12 +49,6 @@ DEFAULT_BASELINE_KWARGS = dict(
     sigma_floor=None,
     add_sigma_eff_col=True,
 )
-
-def gaussian(t, amp, t0, sigma, baseline):
-    """
-    gaussian kernel + baseline term
-    """
-    return baseline + amp * np.exp(-0.5 * ((t - t0) / sigma) ** 2)
 
 def paczynski(t, amp, t0, tE, baseline):
     """
@@ -75,7 +70,7 @@ def log_gaussian(x, mu, sigma):
     return -0.5 * z**2 - np.log(sigma) - 0.5 * np.log(2.0 * np.pi)
 
 
-def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=80):
+def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=12):
     """
     probability grid that is uniform in logit space, with minimum of 1e-12 and maximum of 1-1e-12
     """
@@ -87,7 +82,7 @@ def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=80):
     return 1.0 / (1.0 + np.exp(-q))
 
 
-def default_mag_grid(baseline_mag: float, mags: np.ndarray, kind: str, n=60):
+def default_mag_grid(baseline_mag: float, mags: np.ndarray, kind: str, n=12):
     """
     
     """
@@ -496,7 +491,7 @@ def bayesian_event_significance(
 
     p_min: float | None = None,
     p_max: float | None = None,
-    p_points: int = 80,
+    p_points: int = 12,
     mag_grid: np.ndarray | None = None,
 
     trigger_mode: str = "posterior_prob", # posterior probability or logbf
@@ -654,7 +649,7 @@ def bayesian_event_significance(
     p_grid = logit_spaced_grid(p_min=p_min, p_max=p_max, n=p_points)
 
     if mag_grid is None:
-        mag_grid = default_mag_grid(baseline_mag, mags, kind, n=60)
+        mag_grid = default_mag_grid(baseline_mag, mags, kind, n=12)
     else:
         mag_grid = np.asarray(mag_grid, float)
 
@@ -897,7 +892,7 @@ def run_bayesian_significance(
     baseline_func=per_camera_gp_baseline,
     baseline_kwargs: dict | None = None,
 
-    p_points: int = 80,
+    p_points: int = 12,
     p_min_dip: float | None = None,
     p_max_dip: float | None = None,
     p_min_jump: float | None = None,
@@ -1157,6 +1152,15 @@ def process_one(
     camera_max_points = int(cam_counts.max()) if len(cam_counts) else 0
     camera_ids = ",".join(unique_cams)
 
+    dipper_score = 0.0
+    dipper_n_dips = 0
+    dipper_n_valid_dips = 0
+    if bool(dip["significant"]):
+        score, dips = compute_dipper_score(df)
+        dipper_score = float(score)
+        dipper_n_dips = int(len(dips))
+        dipper_n_valid_dips = int(sum(1 for d in dips if d.valid))
+
     return dict(
         path=str(path),
 
@@ -1211,6 +1215,10 @@ def process_one(
         camera_min_points=int(camera_min_points),
         camera_max_points=int(camera_max_points),
 
+        dipper_score=float(dipper_score),
+        dipper_n_dips=int(dipper_n_dips),
+        dipper_n_valid_dips=int(dipper_n_valid_dips),
+
         used_sigma_eff=bool(dip.get("used_sigma_eff", False) and jump.get("used_sigma_eff", False)),
         baseline_source=str(dip.get("baseline_source", jump.get("baseline_source", "unknown"))),
         trigger_mode=str(trigger_mode),
@@ -1227,12 +1235,12 @@ def main():
     parser.add_argument("inputs", nargs="*", help="Legacy positional light-curve paths or globs (optional if using --input/--mag-bin).")
     parser.add_argument("--mag-bin", dest="mag_bins", action="append", choices=MAG_BINS, help="Process all light curves in this magnitude bin (choices: 12_12.5, 12.5_13, 13_13.5, 13.5_14, 14_14.5, 14.5_15).")
     parser.add_argument("--lc-path", type=str, default="/data/poohbah/1/assassin/rowan.90/lcsv2", help="Base path to light curve directories")
-    parser.add_argument("--workers", type=int, default=max(1, (mp.cpu_count() or 1) // 16), help="Number of worker processes")
+    parser.add_argument("--workers", type=int, default=10, help="Number of worker processes")
     parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"], help="Triggering mode: logbf = per-point log Bayes factor threshold; posterior_prob = posterior probability threshold (requires event probs).")
     parser.add_argument("--logbf-threshold-dip", type=float, default=5.0, help="Per-point dip trigger")
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger")
     parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Only used if --trigger-mode posterior_prob")
-    parser.add_argument("--p-points", type=int, default=80, help="Number of points in the logit-spaced p grid")
+    parser.add_argument("--p-points", type=int, default=12, help="Number of points in the logit-spaced p grid")
     parser.add_argument("--run-min-points", type=int, default=3, help="Min triggered points in a run")
     parser.add_argument("--run-allow-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")

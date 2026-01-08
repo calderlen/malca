@@ -78,7 +78,7 @@ def main():
     parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX known variable filter")
     parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
     parser.add_argument("--vsx-catalog", type=Path, default=Path("input/vsx/vsx_cleaned.csv"), help="Path to VSX catalog CSV")
-    parser.add_argument("--n-workers", type=int, default=16, help="Workers for pre-filter stats")
+    parser.add_argument("--workers", type=int, default=10, help="Workers for pre-filter stats.")
     parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call to limit arg size and allow resume")
 
     # Parse known args, rest go to events.py
@@ -125,7 +125,7 @@ def main():
 
     # Step 2: Apply pre-filters
     if args.force_filter or not filtered_file.exists():
-        print(f"\nApplying pre-filters with {args.n_workers} workers...")
+        print(f"\nApplying pre-filters with {args.workers} workers...")
 
         # Use lc_dir as the directory path for pre_filter compatibility (path/<id>.dat2)
         df_to_filter = df_manifest.rename(columns={"lc_dir": "path"}).copy()
@@ -140,7 +140,7 @@ def main():
             vsx_catalog_csv=args.vsx_catalog,
             apply_multi_camera=not args.skip_multi_camera,
             min_cameras=args.min_cameras,
-            n_workers=args.n_workers,
+            n_workers=args.workers,
             show_tqdm=True,
             rejected_log_csv=str(out_dir / f"rejected_pre_filter_{mag_bin_tag}.csv")
         )

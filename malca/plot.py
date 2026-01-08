@@ -18,6 +18,7 @@ from malca.events import (
     gaussian,
     paczynski,
 )
+from malca.utils import read_lc_dat2
 from malca.baseline import (
     per_camera_gp_baseline,
     global_mean_baseline,
@@ -146,9 +147,57 @@ def load_lightcurve_df(path):
     """
     path = Path(path)
     suffix = path.suffix.lower()
+    if suffix == ".dat2":
+        dfg, dfv = read_lc_dat2(path.stem, str(path.parent))
+        if dfg.empty and dfv.empty:
+            return pd.DataFrame()
+        return pd.concat([dfg, dfv], ignore_index=True)
     if suffix == ".csv":
         return read_skypatrol_csv(path)
+    if suffix == ".dat":
+        return read_asassn_dat(path)
     return read_asassn_dat(path)
+
+
+def load_events_paths(
+    events_path: Path,
+    *,
+    path_col: str = "path",
+    only_significant: bool = False,
+    max_plots: int | None = None,
+) -> list[Path]:
+    """
+    Load events/post-filter output and return unique LC paths.
+    Supports CSV/Parquet and (if installed) DuckDB.
+    """
+    events_path = Path(events_path)
+    suffix = events_path.suffix.lower()
+
+    if suffix == ".parquet":
+        df = pd.read_parquet(events_path)
+    elif suffix == ".duckdb":
+        try:
+            import duckdb
+        except ImportError as exc:
+            raise SystemExit(f"duckdb output specified but duckdb is not installed: {exc}") from exc
+        con = duckdb.connect(str(events_path), read_only=True)
+        df = con.execute("SELECT * FROM results").df()
+        con.close()
+    else:
+        df = pd.read_csv(events_path)
+
+    if path_col not in df.columns:
+        raise KeyError(f"Missing '{path_col}' column in {events_path}")
+
+    if only_significant and {"dip_significant", "jump_significant"}.issubset(df.columns):
+        df = df[(df["dip_significant"].fillna(False)) | (df["jump_significant"].fillna(False))]
+
+    paths = df[path_col].dropna().astype(str).tolist()
+    seen: set[str] = set()
+    paths = [p for p in paths if not (p in seen or seen.add(p))]
+    if max_plots is not None:
+        paths = paths[:max_plots]
+    return [Path(p) for p in paths]
 
 
 def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
@@ -308,7 +357,16 @@ def plot_bayes_results(
     fig, axes = plt.subplots(2, 2, figsize=figsize, constrained_layout=True, sharex="col")
     
                        
-    camera_ids = sorted(df["camera#"].dropna().unique())
+    if "camera_name" in df.columns:
+        df["camera_label"] = df["camera_name"].astype(str)
+    elif "camera#" in df.columns:
+        df["camera_label"] = df["camera#"].astype(str)
+    elif "camera" in df.columns:
+        df["camera_label"] = df["camera"].astype(str)
+    else:
+        df["camera_label"] = "unknown"
+
+    camera_ids = sorted(df["camera_label"].dropna().unique())
     cmap = plt.get_cmap("tab20", max(len(camera_ids), 1))
     camera_colors = {cam: cmap(i % cmap.N) for i, cam in enumerate(camera_ids)}
     
@@ -331,7 +389,7 @@ def plot_bayes_results(
         
                                     
         for cam in camera_ids:
-            subset = band_df[band_df["camera#"] == cam]
+            subset = band_df[band_df["camera_label"] == cam]
             if subset.empty:
                 continue
             color = camera_colors[cam]
@@ -496,7 +554,7 @@ def plot_bayes_results(
         ax_resid = axes[1, band_idx]
         if "resid" in band_df.columns:
             for cam in camera_ids:
-                subset = band_df[band_df["camera#"] == cam]
+                subset = band_df[band_df["camera_label"] == cam]
                 if subset.empty:
                     continue
                 color = camera_colors[cam]
@@ -563,7 +621,28 @@ def main():
     parser = argparse.ArgumentParser(
         description="Plot light curves with Bayesian event detection results"
     )
-    parser.add_argument("csv_paths", nargs="+", help="Path(s) to light curve CSV file(s)")
+    parser.add_argument("csv_paths", nargs="*", help="Path(s) to light curve file(s)")
+    parser.add_argument(
+        "--events",
+        type=Path,
+        help="Events/post-filter output (CSV/Parquet/DuckDB) with a path column.",
+    )
+    parser.add_argument(
+        "--path-col",
+        default="path",
+        help="Column in events/post-filter output that contains LC paths.",
+    )
+    parser.add_argument(
+        "--only-significant",
+        action="store_true",
+        help="If events output has dip_significant/jump_significant, plot only those.",
+    )
+    parser.add_argument(
+        "--max-plots",
+        type=int,
+        default=None,
+        help="Maximum number of light curves to plot.",
+    )
     parser.add_argument(
         "--results-csv",
         type=Path,
@@ -599,6 +678,12 @@ def main():
         action="store_true",
         help="Skip Bayesian event detection; plot baseline/residuals only",
     )
+    parser.add_argument(
+        "--format",
+        choices=("png", "pdf"),
+        default="png",
+        help="Output format for plots (default: png).",
+    )
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
     
     args = parser.parse_args()
@@ -609,23 +694,34 @@ def main():
     args.out_dir.mkdir(parents=True, exist_ok=True)
     
                                               
-    csv_paths = [Path(p) for p in args.csv_paths]
+    if args.events:
+        csv_paths = load_events_paths(
+            args.events,
+            path_col=args.path_col,
+            only_significant=args.only_significant,
+            max_plots=args.max_plots,
+        )
+        print(f"Loaded {len(csv_paths)} light curves from {args.events}")
+    else:
+        csv_paths = [Path(p) for p in args.csv_paths]
+
     if args.results_csv and args.results_csv.exists():
         results_df = pd.read_csv(args.results_csv)
-                                  
+
         results_ids = set()
         for path in results_df["path"]:
-                                                                                 
             if "-light-curves.csv" in str(path):
                 id_str = str(path).split("/")[-1].replace("-light-curves.csv", "")
                 results_ids.add(id_str)
-        
-                          
-        csv_paths = [
-            p for p in csv_paths
-            if p.stem.split("-")[0] in results_ids
-        ]
+
+        csv_paths = [p for p in csv_paths if p.stem.split("-")[0] in results_ids]
         print(f"Filtered to {len(csv_paths)} light curves from results CSV")
+
+    if not csv_paths:
+        raise SystemExit("No light curve paths provided (use positional paths or --events).")
+
+    if args.max_plots is not None:
+        csv_paths = csv_paths[: args.max_plots]
     
                            
     for csv_path in csv_paths:
@@ -635,7 +731,7 @@ def main():
             continue
         
         asas_sn_id = csv_path.stem.split("-")[0]
-        out_path = args.out_dir / f"{asas_sn_id}_dips.png"
+        out_path = args.out_dir / f"{asas_sn_id}_dips.{args.format}"
         
         try:
             plot_bayes_results(
