@@ -9,7 +9,7 @@ Workflow:
 4. Pass to events.py
 
 Usage:
-    python -m filtered_events --mag-bin 13_13.5 [events.py args...]
+    python -m events_filtered --mag-bin 13_13.5 [events.py args...]
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ import pandas as pd
 from tqdm import tqdm
 import tempfile
 
-from malca.manifest import build_manifest_dataframe
-from malca.pre_filter import apply_pre_filters
+from manifest import build_manifest_dataframe
+from pre_filter import apply_pre_filters
 
 
 def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -72,11 +72,12 @@ def main():
     # Pre-filter args
     parser.add_argument("--min-time-span", type=float, default=100.0, help="Min time span (days)")
     parser.add_argument("--min-points-per-day", type=float, default=0.05, help="Min cadence")
-    parser.add_argument("--max-power", type=float, default=0.5, help="Max LS power for periodic filter")
     parser.add_argument("--min-cameras", type=int, default=2, help="Min cameras required")
     parser.add_argument("--skip-sparse", action="store_true", help="Skip sparse LC filter")
-    parser.add_argument("--skip-periodic", action="store_true", help="Skip periodic filter")
     parser.add_argument("--skip-multi-camera", action="store_true", help="Skip multi-camera filter")
+    parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX known variable filter")
+    parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
+    parser.add_argument("--vsx-catalog", type=Path, default=Path("input/vsx/vsx_cleaned.csv"), help="Path to VSX catalog CSV")
     parser.add_argument("--n-workers", type=int, default=16, help="Workers for pre-filter stats")
     parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call to limit arg size and allow resume")
 
@@ -134,10 +135,9 @@ def main():
             apply_sparse=not args.skip_sparse,
             min_time_span=args.min_time_span,
             min_points_per_day=args.min_points_per_day,
-            apply_periodic=not args.skip_periodic,
-            max_power=args.max_power,
-            apply_vsx=False,  # Disable for now, requires VSX catalog
-            apply_bns=False,  # Disable for now, requires ASASSN catalog
+            apply_vsx=not args.skip_vsx,
+            vsx_max_sep_arcsec=args.vsx_max_sep,
+            vsx_catalog_csv=args.vsx_catalog,
             apply_multi_camera=not args.skip_multi_camera,
             min_cameras=args.min_cameras,
             n_workers=args.n_workers,
@@ -199,7 +199,7 @@ def main():
         print(f"\nRunning batch {batch_idx + 1}/{total_batches} ({len(batch_paths)} LCs)...")
 
         events_cmd = [
-            "python", "-m", "malca.events",
+            "python", "-m", "events",
             *events_args,
             *batch_paths,
         ]

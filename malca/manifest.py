@@ -39,18 +39,7 @@ def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: 
 
     for source_id in ids:
         dat2_path = lc_dir / f"{source_id}.dat2"
-        csv_path_lc = lc_dir / f"{source_id}.csv"
-
-        if dat2_path.exists():
-            file_path = dat2_path
-            file_exists = True
-        elif csv_path_lc.exists():
-            file_path = csv_path_lc
-            file_exists = True
-        else:
-            file_path = dat2_path
-            file_exists = False
-
+        file_exists = dat2_path.exists()
         records.append({
             "source_id": source_id,
             "mag_bin": mag_bin,
@@ -58,7 +47,7 @@ def _process_index_file(csv_path: Path, mag_bin: str, lc_root: Path, id_column: 
             "index_csv": str(csv_path),
             "lc_dir": str(lc_dir),
             "lc_dir_exists": lc_dir.exists(),
-            "dat_path": str(file_path),
+            "dat_path": str(dat2_path),
             "dat_exists": file_exists,
         })
     return records

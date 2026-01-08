@@ -3,23 +3,24 @@ Pre-filters that run BEFORE events.py.
 These filters depend only on raw light curve data (dat2 files) and external catalogs.
 
 Filters (ordered by execution speed for efficiency):
-1. filter_bns - filter by catalog membership (assumes pre-cleaned catalog)
-2. filter_vsx_match - remove known variable stars from VSX
-3. filter_sparse_lightcurves - remove LCs with insufficient time span or cadence
-4. filter_multi_camera - remove single-camera detections
-5. filter_periodic_candidates - remove strongly periodic sources
+1. filter_sparse_lightcurves - remove LCs with insufficient time span or cadence
+2. filter_multi_camera - remove single-camera detections
+3. filter_vsx_match - remove known variable stars from VSX
 
 Input format:
     DataFrame with columns: asas_sn_id (or id/source_id), path (to directory containing dat2 files)
 
-    filter_bns enriches data with catalog astrometry:
-    - ra_deg, dec_deg, pm_ra, pm_ra_d, pm_dec, pm_dec_d
+    Index files provide astrometry: ra_deg, dec_deg, pm_ra, pm_dec
 
-    Other filters compute required stats from dat2 files on-the-fly:
+    Filters compute required stats from dat2 files on-the-fly:
     - time_span_days, points_per_day (computed from JD column)
-    - ls_max_power, best_period (computed via Lomb-Scargle periodogram)
     - vsx_match_sep_arcsec, vsx_class (computed via VSX crossmatch)
     - n_cameras (counted from camera# column)
+
+Note:
+- Bright nearby star (BNS) filtering is handled upstream by ASAS-SN pipeline.
+  LC files are only generated for sources without BNS contamination.
+- Periodic variable filtering moved to post_filter.py (expensive LSP, run after event detection).
 """
 
 from __future__ import annotations
@@ -31,14 +32,14 @@ import pandas as pd
 from astropy import units as u
 from tqdm.auto import tqdm
 
-from malca.utils import (
+from utils import (
     read_lc_dat2,
     get_id_col,
     compute_time_stats,
     compute_periodogram,
     compute_n_cameras,
 )
-from malca.vsx_crossmatch import propagate_asassn_coords, vsx_coords
+from vsx_crossmatch import propagate_asassn_coords, vsx_coords
 
 
 def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, compute_period: bool, compute_cameras: bool) -> dict:
@@ -234,76 +235,6 @@ def filter_sparse_lightcurves(
     return out
 
 
-def filter_periodic_candidates(
-    df: pd.DataFrame,
-    *,
-    max_power: float = 0.5,
-    min_period: float | None = None,
-    max_period: float | None = None,
-    show_tqdm: bool = False,
-    compute_stats: bool = True,
-    rejected_log_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Remove candidates with strong periodicity.
-
-    Stats are computed from the dat2 files; set compute_stats=False only if the
-    columns were already added upstream.
-    """
-    n0 = len(df)
-
-    if compute_stats:
-        id_col = get_id_col(df)
-        path_col = "path" if "path" in df.columns else None
-
-        if path_col is None:
-            raise ValueError("Need 'path' column to read dat2 files")
-
-        df_with_stats = df.copy()
-        df_with_stats["ls_max_power"] = 0.0
-        df_with_stats["best_period"] = np.nan
-
-        pbar = tqdm(total=len(df), desc="filter_periodic_candidates (computing periodogram)", leave=False, disable=not show_tqdm)
-        for idx, row in df.iterrows():
-            asas_sn_id = str(row[id_col])
-            dir_path = str(row[path_col])
-
-            df_g, df_v = read_lc_dat2(asas_sn_id, dir_path)
-            df_lc = pd.concat([df_g, df_v], ignore_index=True) if not df_g.empty or not df_v.empty else pd.DataFrame()
-
-            stats = compute_periodogram(df_lc)
-            df_with_stats.loc[idx, "ls_max_power"] = stats["ls_max_power"]
-            df_with_stats.loc[idx, "best_period"] = stats["best_period"]
-
-            if pbar:
-                pbar.update(1)
-
-        if pbar:
-            pbar.close()
-
-        df = df_with_stats
-    else:
-        missing_cols = [c for c in ("ls_max_power", "best_period") if c not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns: {missing_cols}. Set compute_stats=True to compute from dat2.")
-
-    # Apply filter
-    mask = df["ls_max_power"] <= max_power
-
-    if min_period is not None:
-        mask &= (df["best_period"] >= min_period) | df["best_period"].isna()
-    if max_period is not None:
-        mask &= (df["best_period"] <= max_period) | df["best_period"].isna()
-
-    out = df.loc[mask].reset_index(drop=True)
-
-    if show_tqdm:
-        tqdm.write(f"[filter_periodic_candidates] kept {len(out)}/{n0}")
-    log_rejections(df, out, "filter_periodic_candidates", rejected_log_csv)
-
-    return out
-
-
 def filter_vsx_match(
     df: pd.DataFrame,
     *,
@@ -358,8 +289,16 @@ def filter_vsx_match(
 
     # Apply filter
     has_match = df["vsx_match_sep_arcsec"].fillna(999) <= max_sep_arcsec
-    is_excluded_type = df["vsx_class"].fillna("").isin(exclude_classes) if exclude_classes else False
-    mask = ~(has_match & is_excluded_type)
+
+    if exclude_classes is not None:
+        # Reject only specific classes
+        is_excluded_type = df["vsx_class"].fillna("").isin(exclude_classes)
+        mask = ~(has_match & is_excluded_type)
+    else:
+        # Default: reject ALL VSX matches (vsx_cleaned.csv is pre-filtered to safe types only)
+        # This means if it matches ANY VSX entry, it's a known variable we should exclude
+        mask = ~has_match
+
     out = df.loc[mask].reset_index(drop=True)
 
     if show_tqdm:
@@ -367,65 +306,6 @@ def filter_vsx_match(
     log_rejections(df, out, "filter_vsx_match", rejected_log_csv)
 
     return out
-
-
-def filter_bns(
-    df: pd.DataFrame,
-    *,
-    asassn_catalog_csv: str | Path = "input/vsx/asassn_catalog.csv",
-    show_tqdm: bool = False,
-    rejected_log_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Filter candidates by matching asas_sn_id to a pre-cleaned ASAS-SN catalog.
-
-    This filter assumes the catalog has already been cleaned to remove sources
-    with bright nearby star contamination. Sources are filtered by simple
-    catalog membership (inner join on asas_sn_id).
-
-    Additionally enriches the dataframe with catalog astrometry:
-    - ra_deg, dec_deg
-    - pm_ra, pm_ra_d, pm_dec, pm_dec_d (proper motion and errors)
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input dataframe with asas_sn_id column
-    asassn_catalog_csv : str | Path
-        Path to cleaned ASAS-SN catalog CSV
-    show_tqdm : bool
-        Show progress bar
-    rejected_log_csv : str | Path | None
-        Path to log rejected candidates
-
-    Returns
-    -------
-    pd.DataFrame
-        Filtered dataframe with catalog data attached
-    """
-    with tqdm(total=2, desc="filter_bns", leave=False, disable=not show_tqdm) as pbar:
-        # Load catalog
-        catalog = pd.read_csv(asassn_catalog_csv)
-        catalog["asas_sn_id"] = catalog["asas_sn_id"].astype(str)
-        pbar.update(1)
-
-        # Select columns to attach from catalog
-        cols_to_attach = [
-            "ra_deg", "dec_deg", "pm_ra", "pm_ra_d", "pm_dec", "pm_dec_d",
-        ]
-        cols_available = ["asas_sn_id"] + [c for c in cols_to_attach if c in catalog.columns]
-
-        # Perform inner join - only keep sources in cleaned catalog
-        df_ids = df.assign(asas_sn_id=df["asas_sn_id"].astype(str))
-        df_out = df_ids.merge(catalog[cols_available], on="asas_sn_id", how="inner").reset_index(drop=True)
-        pbar.update(1)
-
-    if show_tqdm:
-        tqdm.write(f"[filter_bns] kept {len(df_out)}/{len(df)}")
-
-    log_rejections(df_ids, df_out, "filter_bns", rejected_log_csv)
-
-    return df_out
 
 
 def filter_multi_camera(
@@ -489,26 +369,18 @@ def filter_multi_camera(
 def apply_pre_filters(
     df: pd.DataFrame,
     *,
-    # Filter 1: BNS (catalog membership filter)
-    apply_bns: bool = False,
-    asassn_catalog_csv: str | Path = "input/vsx/asassn_catalog.csv",
-    # Filter 2: VSX crossmatch
+    # Filter 1: VSX crossmatch
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
     vsx_catalog_csv: str | Path = "input/vsx/vsx_cleaned.csv",
-    # Filter 3: sparse lightcurves
+    # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,
     min_points_per_day: float = 0.05,
-    # Filter 4: multi camera
+    # Filter 3: multi camera
     apply_multi_camera: bool = True,
     min_cameras: int = 2,
-    # Filter 5: periodic candidates
-    apply_periodic: bool = True,
-    max_power: float = 0.5,
-    min_period: float | None = None,
-    max_period: float | None = None,
     # General
     n_workers: int = 1,
     show_tqdm: bool = True,
@@ -518,17 +390,17 @@ def apply_pre_filters(
     Apply pre-filters before running events.py.
 
     Filters are applied in order of execution speed (fast to slow) for efficiency.
-    filter_bns must run first as it provides astrometry data needed by filter_vsx_match.
+    Note: Periodic variable filtering moved to post_filter.py (expensive, run after event detection).
 
     Parameters
     ----------
     df : pd.DataFrame
-        Input dataframe with ID and path columns
+        Input dataframe with ID, path, and astrometry columns (ra_deg, dec_deg, pm_ra, pm_dec)
     apply_* : bool
         Whether to apply each filter
     n_workers : int
         Number of parallel workers for computing stats (default 1 = sequential).
-        Filters 3, 4, and 5 (sparse, multi_camera, periodic) can benefit from parallelization.
+        Filters 2 and 3 (sparse, multi_camera) can benefit from parallelization.
     show_tqdm : bool
         Show progress bars
     rejected_log_csv : str | Path | None
@@ -543,7 +415,6 @@ def apply_pre_filters(
     n_start = len(df_filtered)
 
     precomputed_time = False
-    precomputed_period = False
     precomputed_cameras = False
 
     # Pre-compute stats in parallel if requested and needed
@@ -551,45 +422,25 @@ def apply_pre_filters(
         id_col = get_id_col(df_filtered)
 
         compute_time = apply_sparse
-        compute_period = apply_periodic
         compute_cameras = apply_multi_camera
 
-        if compute_time or compute_period or compute_cameras:
+        if compute_time or compute_cameras:
             if show_tqdm:
                 tqdm.write(f"[apply_pre_filters] Pre-computing stats with {n_workers} workers")
             df_filtered = _compute_stats_parallel(
                 df_filtered, id_col, "path",
                 compute_time=compute_time,
-                compute_period=compute_period,
+                compute_period=False,
                 compute_cameras=compute_cameras,
                 n_workers=n_workers,
                 show_tqdm=show_tqdm
             )
             precomputed_time = compute_time
-            precomputed_period = compute_period
             precomputed_cameras = compute_cameras
 
     filters = []
 
-    # Filter 1: BNS (catalog membership) - FAST, must run first
-    if apply_bns:
-        filters.append(("bns", filter_bns, {
-            "asassn_catalog_csv": asassn_catalog_csv,
-            "show_tqdm": show_tqdm,
-            "rejected_log_csv": rejected_log_csv,
-        }))
-
-    # Filter 2: VSX crossmatch - requires ra_deg, dec_deg, pm_ra, pm_dec from filter_bns
-    if apply_vsx:
-        filters.append(("vsx_match", filter_vsx_match, {
-            "max_sep_arcsec": vsx_max_sep_arcsec,
-            "exclude_classes": vsx_exclude_classes,
-            "vsx_catalog_csv": vsx_catalog_csv,
-            "show_tqdm": show_tqdm,
-            "rejected_log_csv": rejected_log_csv,
-        }))
-
-    # Filter 3: Sparse lightcurves - reads dat2 files
+    # Filter 1: Sparse lightcurves - cheap, reads dat2 files
     if apply_sparse:
         filters.append(("sparse", filter_sparse_lightcurves, {
             "min_time_span": min_time_span,
@@ -599,7 +450,7 @@ def apply_pre_filters(
             "rejected_log_csv": rejected_log_csv,
         }))
 
-    # Filter 4: Multi camera - reads dat2 files
+    # Filter 2: Multi camera - cheap, reads dat2 files
     if apply_multi_camera:
         filters.append(("multi_camera", filter_multi_camera, {
             "min_cameras": min_cameras,
@@ -608,14 +459,13 @@ def apply_pre_filters(
             "rejected_log_csv": rejected_log_csv,
         }))
 
-    # Filter 5: Periodic candidates - SLOWEST, runs on smallest dataset
-    if apply_periodic:
-        filters.append(("periodic", filter_periodic_candidates, {
-            "max_power": max_power,
-            "min_period": min_period,
-            "max_period": max_period,
+    # Filter 3: VSX crossmatch - moderate cost, catalog-only
+    if apply_vsx:
+        filters.append(("vsx_match", filter_vsx_match, {
+            "max_sep_arcsec": vsx_max_sep_arcsec,
+            "exclude_classes": vsx_exclude_classes,
+            "vsx_catalog_csv": vsx_catalog_csv,
             "show_tqdm": show_tqdm,
-            "compute_stats": not precomputed_period,
             "rejected_log_csv": rejected_log_csv,
         }))
 

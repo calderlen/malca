@@ -219,6 +219,211 @@ def filter_morphology(
 
 
 # =============================================================================
+# Validation filters (expensive checks, run after event detection)
+# =============================================================================
+
+def validate_periodicity(
+    df: pd.DataFrame,
+    *,
+    max_power: float = 0.5,
+    n_bootstrap: int = 1000,
+    significance_level: float = 0.01,
+    exclude_alias_periods: bool = True,
+    show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Detailed periodicity validation on candidates (like ZTF paper Section 4.5).
+
+    Uses bootstrap Lomb-Scargle periodogram with significance testing to identify:
+    - Eclipsing binaries (short periods ~1 day)
+    - Rotating variables (periods ~30 days)
+    - Other periodic contamination
+
+    Much more expensive than pre-filter LSP - uses bootstrap for significance.
+    Only run on detected candidates, not all sources.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Candidates from events.py (must have 'path' column)
+    max_power : float
+        Maximum LSP power to keep (default 0.5)
+    n_bootstrap : int
+        Number of bootstrap iterations for significance (default 1000)
+    significance_level : float
+        Significance threshold (default 0.01 = 1% like paper)
+    exclude_alias_periods : bool
+        Exclude known alias periods (sidereal day, lunar month, ZTF cadence)
+    show_tqdm : bool
+        Show progress
+    rejected_log_csv : str | Path | None
+        Log file for rejected candidates
+
+    Returns
+    -------
+    pd.DataFrame
+        Candidates without strong periodic signals
+
+    Notes
+    -----
+    This implements the paper's approach:
+    - Bootstrap LSP for significance levels
+    - Phase-fold at best period
+    - Exclude alias frequencies
+    - Flag coherent periodic structure
+
+    TODO: Implement full bootstrap LSP with light curve reading
+    For now, returns input unchanged (placeholder).
+    """
+    n0 = len(df)
+
+    if show_tqdm:
+        tqdm.write(f"[validate_periodicity] TODO: Implement bootstrap LSP - currently placeholder")
+        tqdm.write(f"[validate_periodicity] kept {len(df)}/{n0} (no filtering applied)")
+
+    # TODO: Implement:
+    # 1. Read light curves from 'path' column
+    # 2. Compute LSP for each
+    # 3. Bootstrap for significance levels
+    # 4. Identify significant periods
+    # 5. Exclude alias periods (1 day, 29.6 days, etc.)
+    # 6. Phase-fold and check for coherent structure
+    # 7. Flag/reject strongly periodic sources
+
+    return df
+
+
+def validate_gaia_ruwe(
+    df: pd.DataFrame,
+    *,
+    gaia_catalog: pd.DataFrame | Path | None = None,
+    max_ruwe: float = 1.4,
+    flag_only: bool = True,
+    show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Validate candidates using Gaia RUWE (Renormalized Unit Weight Error).
+
+    RUWE > 1.4 indicates potential companion (binary contamination).
+    Paper identifies 5/81 candidates with high RUWE.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Candidates (must have ra_deg, dec_deg columns)
+    gaia_catalog : pd.DataFrame | Path | None
+        Gaia DR3 catalog with RUWE values, or path to CSV
+        If None, attempts to query Gaia archive (slow)
+    max_ruwe : float
+        RUWE threshold (default 1.4, from paper)
+    flag_only : bool
+        If True, add 'ruwe' and 'high_ruwe_flag' columns but don't reject
+        If False, reject sources with RUWE > max_ruwe
+    show_tqdm : bool
+        Show progress
+    rejected_log_csv : str | Path | None
+        Log file for rejected candidates
+
+    Returns
+    -------
+    pd.DataFrame
+        Candidates with RUWE information added
+
+    Notes
+    -----
+    Paper approach:
+    - RUWE ~ 1 consistent with single stars
+    - RUWE > 1.4 indicates binarity
+    - 5/81 candidates flagged (potential companions)
+    - Still need follow-up (imaging, RV) to confirm
+
+    TODO: Implement Gaia crossmatch
+    For now, returns input unchanged (placeholder).
+    """
+    n0 = len(df)
+
+    if show_tqdm:
+        tqdm.write(f"[validate_gaia_ruwe] TODO: Implement Gaia RUWE crossmatch - currently placeholder")
+        tqdm.write(f"[validate_gaia_ruwe] kept {len(df)}/{n0} (no filtering applied)")
+
+    # TODO: Implement:
+    # 1. Crossmatch to Gaia DR3 using ra_deg, dec_deg
+    # 2. Add 'ruwe' column from Gaia
+    # 3. Flag high RUWE sources (> 1.4)
+    # 4. Optionally reject (if flag_only=False)
+
+    return df
+
+
+def validate_periodic_catalog(
+    df: pd.DataFrame,
+    *,
+    catalog_path: Path | None = None,
+    max_sep_arcsec: float = 3.0,
+    flag_only: bool = True,
+    show_tqdm: bool = False,
+    rejected_log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Crossmatch candidates to known periodic variable catalogs.
+
+    Paper crossmatched to Chen+2020 ZTF periodic catalog and found
+    14 matches, including 1 compelling BY Dra variable.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Candidates (must have ra_deg, dec_deg columns)
+    catalog_path : Path | None
+        Path to periodic catalog CSV (e.g., Chen+2020, ASAS-SN variables)
+        Must have: ra, dec, period, class columns
+    max_sep_arcsec : float
+        Maximum separation for crossmatch (default 3 arcsec)
+    flag_only : bool
+        If True, add 'periodic_catalog_match' flag but don't reject
+        If False, reject catalog matches
+    show_tqdm : bool
+        Show progress
+    rejected_log_csv : str | Path | None
+        Log file for rejected candidates
+
+    Returns
+    -------
+    pd.DataFrame
+        Candidates with periodic catalog match flags
+
+    Notes
+    -----
+    Paper found:
+    - 14/81 candidates matched Chen+2020 ZTF periodic catalog
+    - Visual inspection showed most lacked coherent phase-folded structure
+    - 1 compelling match: BY Dra variable with 2.57d period
+
+    Suggests many catalog "periodic" sources aren't strongly periodic
+    at the level detected by events.py Bayesian fitting.
+
+    TODO: Implement catalog crossmatch
+    For now, returns input unchanged (placeholder).
+    """
+    n0 = len(df)
+
+    if show_tqdm:
+        tqdm.write(f"[validate_periodic_catalog] TODO: Implement periodic catalog crossmatch - currently placeholder")
+        tqdm.write(f"[validate_periodic_catalog] kept {len(df)}/{n0} (no filtering applied)")
+
+    # TODO: Implement:
+    # 1. Load periodic catalog (Chen+2020, ASAS-SN vars, etc.)
+    # 2. Crossmatch by coordinates
+    # 3. Add 'catalog_period', 'catalog_class' columns
+    # 4. Flag matches
+    # 5. Optionally reject (if flag_only=False)
+
+    return df
+
+
+# =============================================================================
 # Main orchestration
 # =============================================================================
 
