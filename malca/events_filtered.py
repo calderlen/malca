@@ -55,7 +55,7 @@ def parse_output_format(events_args: list[str]) -> str:
     return "csv"
 
 
-def clear_existing_output(path: Path | None, fmt: str) -> None:
+def clear_existing_output(path: Path | None, fmt: str, quiet: bool = False) -> None:
     if path is None or (not path.exists()):
         return
     try:
@@ -65,12 +65,15 @@ def clear_existing_output(path: Path | None, fmt: str) -> None:
                 child.unlink()
                 removed_any = True
             if removed_any:
-                print(f"Overwriting existing output chunks in {path}")
+                if not quiet:
+                    print(f"Overwriting existing output chunks in {path}")
         else:
             path.unlink()
-            print(f"Overwriting existing output file: {path}")
+            if not quiet:
+                print(f"Overwriting existing output file: {path}")
     except Exception as e:
-        print(f"Warning: could not remove existing output {path}: {e}")
+        if not quiet:
+            print(f"Warning: could not remove existing output {path}: {e}")
 
 
 def main():
@@ -108,9 +111,18 @@ def main():
     parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call to limit arg size and allow resume")
     parser.add_argument("-o", "--overwrite", action="store_true",
                         help="Overwrite checkpoint log and existing output if present (start fresh).")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Enable verbose output (default: quiet).")
 
     # Parse known args, rest go to events.py
     args, events_args = parser.parse_known_args()
+    events_args = [arg for arg in events_args if arg != "--"]
+    if args.verbose and "--verbose" not in events_args and "-v" not in events_args:
+        events_args = ["--verbose", *events_args]
+
+    def log(message: str) -> None:
+        if args.verbose:
+            print(message)
 
     # Determine file names
     mag_bin_tag = args.mag_bin[0] if len(args.mag_bin) == 1 else "multi"
@@ -133,28 +145,28 @@ def main():
 
     # Step 1: Build or load manifest
     if args.force_manifest or not manifest_file.exists():
-        print(f"Building manifest for mag_bin={args.mag_bin}...")
+        log(f"Building manifest for mag_bin={args.mag_bin}...")
         df_manifest = build_manifest_dataframe(
             args.index_root,
             args.lc_root,
             mag_bins=args.mag_bin,
             id_column="asas_sn_id",
-            show_progress=True
+            show_progress=args.verbose
         )
 
         # Only keep sources where .dat2 or .csv files exist
         df_manifest = df_manifest[df_manifest["dat_exists"]].reset_index(drop=True)
 
-        print(f"Saving manifest to {manifest_file} ({len(df_manifest)} sources)")
+        log(f"Saving manifest to {manifest_file} ({len(df_manifest)} sources)")
         safe_write_parquet(df_manifest, manifest_file)
     else:
-        print(f"Loading existing manifest from {manifest_file}")
+        log(f"Loading existing manifest from {manifest_file}")
         df_manifest = pd.read_parquet(manifest_file)
-        print(f"Loaded {len(df_manifest)} sources")
+        log(f"Loaded {len(df_manifest)} sources")
 
     # Step 2: Apply pre-filters
     if args.force_filter or not filtered_file.exists():
-        print(f"\nApplying pre-filters with {args.workers} workers...")
+        log(f"\nApplying pre-filters with {args.workers} workers...")
 
         # Use lc_dir as the directory path for pre_filter compatibility (path/<id>.dat2)
         df_to_filter = df_manifest.rename(columns={"lc_dir": "path"}).copy()
@@ -170,17 +182,17 @@ def main():
             apply_multi_camera=not args.skip_multi_camera,
             min_cameras=args.min_cameras,
             n_workers=args.workers,
-            show_tqdm=True,
+            show_tqdm=args.verbose,
             rejected_log_csv=str(out_dir / f"rejected_pre_filter_{mag_bin_tag}.csv")
         )
 
-        print(f"\nKept {len(df_filtered)}/{len(df_manifest)} sources after pre-filtering")
-        print(f"Saving filtered manifest to {filtered_file}")
+        log(f"\nKept {len(df_filtered)}/{len(df_manifest)} sources after pre-filtering")
+        log(f"Saving filtered manifest to {filtered_file}")
         safe_write_parquet(df_filtered, filtered_file)
     else:
-        print(f"\nLoading existing filtered manifest from {filtered_file}")
+        log(f"\nLoading existing filtered manifest from {filtered_file}")
         df_filtered = pd.read_parquet(filtered_file)
-        print(f"Loaded {len(df_filtered)} filtered sources")
+        log(f"Loaded {len(df_filtered)} filtered sources")
 
     # Step 3: Construct file paths (use full dat_path for events.py input)
     file_col = "dat_path" if "dat_path" in df_filtered.columns else "path"
@@ -188,11 +200,11 @@ def main():
     file_paths = df_filtered[file_col].tolist()
 
     if not file_paths:
-        print("\nNo sources to process after filtering!")
+        log("\nNo sources to process after filtering!")
         return
 
     # Step 4: Call events.py with the filtered paths in batches, with resume support
-    print(f"\nPreparing to run events.py on {len(file_paths)} light curves...")
+    log(f"\nPreparing to run events.py on {len(file_paths)} light curves...")
 
     # Write paths to temp file for events.py to consume
     paths_file = out_dir / f"filtered_paths_{mag_bin_tag}.txt"
@@ -212,24 +224,24 @@ def main():
         try:
             with open(checkpoint_log, "w"):
                 pass
-            print(f"Overwriting checkpoint log: {checkpoint_log}")
+            log(f"Overwriting checkpoint log: {checkpoint_log}")
         except Exception as e:
-            print(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
+            log(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
 
     if args.overwrite:
-        clear_existing_output(base_output, events_format)
+        clear_existing_output(base_output, events_format, quiet=not args.verbose)
 
     if checkpoint_log.exists() and not args.overwrite:
         try:
             with open(checkpoint_log, "r") as f:
                 processed_paths = {line.strip() for line in f if line.strip()}
-            print(f"Checkpoint detected, skipping {len(processed_paths)} already-processed paths")
+            log(f"Checkpoint detected, skipping {len(processed_paths)} already-processed paths")
         except Exception as e:
-            print(f"Warning: could not read checkpoint log {checkpoint_log}: {e}")
+            log(f"Warning: could not read checkpoint log {checkpoint_log}: {e}")
 
     remaining = [p for p in file_paths if str(p) not in processed_paths]
     if not remaining:
-        print("All paths already processed according to checkpoint. Exiting.")
+        log("All paths already processed according to checkpoint. Exiting.")
         return
 
     # Batch and run
@@ -240,7 +252,7 @@ def main():
         end = min(len(remaining), start + batch_size)
         batch_paths = remaining[start:end]
 
-        print(f"\nRunning batch {batch_idx + 1}/{total_batches} ({len(batch_paths)} LCs)...")
+        log(f"\nRunning batch {batch_idx + 1}/{total_batches} ({len(batch_paths)} LCs)...")
 
         events_cmd = [
             sys.executable, "-m", "malca.events",
@@ -266,7 +278,7 @@ def main():
             for p in batch_paths:
                 f.write(f"{p}\n")
 
-    print("\nAll batches completed.")
+    log("\nAll batches completed.")
 
 
 if __name__ == "__main__":

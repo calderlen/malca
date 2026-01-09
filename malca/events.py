@@ -5,6 +5,7 @@ _os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 _os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 import argparse
+import sys
 import glob
 import os
 import multiprocessing as mp
@@ -1290,6 +1291,8 @@ def main():
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format for results.")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output (default: quiet).")
+    parser.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
 
     args = parser.parse_args()
     if args.trigger_mode == "posterior_prob" and args.no_event_prob:
@@ -1301,6 +1304,11 @@ def main():
     baseline_tag = args.baseline_func
 
     output_format = args.output_format.lower()
+    quiet = not args.verbose
+
+    def log(message: str) -> None:
+        if not quiet:
+            print(message, flush=True)
 
     def ensure_suffix(path: Path | None, fmt: str) -> Path | None:
         if path is None:
@@ -1339,7 +1347,7 @@ def main():
             if "path" in df_existing.columns:
                 return set(df_existing["path"].astype(str))
         except Exception as e:
-            print(f"Warning: could not read existing output {path} to skip duplicates: {e}", flush=True)
+            log(f"Warning: could not read existing output {path} to skip duplicates: {e}")
         return set()
 
     def clear_existing_output(path: Path | None, fmt: str) -> None:
@@ -1352,12 +1360,12 @@ def main():
                     child.unlink()
                     removed_any = True
                 if removed_any:
-                    print(f"Overwriting existing output chunks in {path}", flush=True)
+                    log(f"Overwriting existing output chunks in {path}")
             else:
                 path.unlink()
-                print(f"Overwriting existing output file: {path}", flush=True)
+                log(f"Overwriting existing output file: {path}")
         except Exception as e:
-            print(f"Warning: Could not remove existing output {path} ({e}). Will append.", flush=True)
+            log(f"Warning: Could not remove existing output {path} ({e}). Will append.")
 
     # checkpoint
     base_output_path = ensure_suffix(Path(args.output).expanduser() if args.output else None, output_format)
@@ -1376,22 +1384,22 @@ def main():
         try:
             with open(checkpoint_log, "w"):
                 pass
-            print(f"Overwriting checkpoint log: {checkpoint_log}", flush=True)
+            log(f"Overwriting checkpoint log: {checkpoint_log}")
         except Exception as e:
-            print(f"Warning: Could not overwrite checkpoint file ({e}). Continuing without resume.", flush=True)
+            log(f"Warning: Could not overwrite checkpoint file ({e}). Continuing without resume.")
 
     if args.overwrite:
         clear_existing_output(base_output_path, output_format)
 
     if checkpoint_log and checkpoint_log.exists() and not args.overwrite:
-        print(f"--- RESUME DETECTED ---", flush=True)
-        print(f"Reading processed files from: {checkpoint_log}", flush=True)
+        log("--- RESUME DETECTED ---")
+        log(f"Reading processed files from: {checkpoint_log}")
         try:
             with open(checkpoint_log, "r") as f:
                 processed_files = set(line.strip() for line in f)
-            print(f"Found {len(processed_files)} previously processed files.", flush=True)
+            log(f"Found {len(processed_files)} previously processed files.")
         except Exception as e:
-            print(f"Warning: Could not read checkpoint file ({e}). Starting fresh.", flush=True)
+            log(f"Warning: Could not read checkpoint file ({e}). Starting fresh.")
 
     # existing output (avoid duplicates if checkpoint was out-of-sync)
     if not args.overwrite:
@@ -1418,8 +1426,10 @@ def main():
     for pattern in input_patterns:
         if '*' in pattern or '?' in pattern or '[' in pattern:
             matches = glob.glob(pattern)
-            if matches: expanded_inputs.extend(sorted(matches))
-            else: print(f"Warning: glob pattern '{pattern}' matched no files", flush=True)
+            if matches:
+                expanded_inputs.extend(sorted(matches))
+            else:
+                log(f"Warning: glob pattern '{pattern}' matched no files")
         else: expanded_inputs.append(pattern)
     
     seen = set()
@@ -1430,10 +1440,10 @@ def main():
     # --- CHECKPOINT FILTERING ---
     original_count = len(expanded_inputs)
     expanded_inputs = [x for x in expanded_inputs if str(x) not in processed_files]
-    print(f"Processing {len(expanded_inputs)} light curve file(s) (Filtered from {original_count})...", flush=True)
+    log(f"Processing {len(expanded_inputs)} light curve file(s) (Filtered from {original_count})...")
     
     if len(expanded_inputs) == 0:
-        print("All files have been processed according to checkpoint! Exiting.", flush=True)
+        log("All files have been processed according to checkpoint! Exiting.")
         return
 
     results = []
@@ -1443,7 +1453,7 @@ def main():
         if len(expanded_inputs) < 10000: chunk_size = 500
         elif len(expanded_inputs) < 100000: chunk_size = 1000
         else: chunk_size = 5000
-        print(f"Auto-selected chunk size: {chunk_size}", flush=True)
+        log(f"Auto-selected chunk size: {chunk_size}")
     elif args.chunk_size > 0:
         chunk_size = args.chunk_size
     else:
@@ -1594,16 +1604,16 @@ def main():
                     for row in chunk_results:
                         f.write(str(row['path']) + "\n")
             except Exception as e:
-                print(f"WARNING: Could not update checkpoint log: {e}", flush=True)
+                log(f"WARNING: Could not update checkpoint log: {e}")
 
         total_written += len(chunk_results)
         if is_final:
             if writer is not None:
                 writer.close()
             if args.output:
-                print(f"Wrote {total_written} total rows to {args.output}", flush=True)
+                log(f"Wrote {total_written} total rows to {args.output}")
         else:
-            print(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})", flush=True)
+            log(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})")
 
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         futs = {
@@ -1620,7 +1630,7 @@ def main():
             ): path for path in expanded_inputs
         }
 
-        for fut in tqdm(as_completed(futs), total=len(futs), desc="LCs", unit="lc"):
+        for fut in tqdm(as_completed(futs), total=len(futs), desc="LCs", unit="lc", disable=quiet):
             path = futs[fut]
             try:
                 result = fut.result()
@@ -1640,8 +1650,9 @@ def main():
     elif args.output and total_written == 0:
         pass
     else:
-        for row in results:
-            print(f"{row['path']}\tmode={row['trigger_mode']}\tdip_sig={row['dip_significant']} jump_sig={row['jump_significant']}")
+        if not quiet:
+            for row in results:
+                print(f"{row['path']}\tmode={row['trigger_mode']}\tdip_sig={row['dip_significant']} jump_sig={row['jump_significant']}")
 
     if errors:
         print(f"Completed with {len(errors)} failures.", flush=True)
