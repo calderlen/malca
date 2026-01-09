@@ -125,7 +125,7 @@ def main():
     elif events_output is not None:
         out_dir = events_output.parent
     else:
-        out_dir = Path.home() / "malca_output"
+        out_dir = Path("/home/lenhart.106/code/malca/output")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_file = Path(args.manifest_file).expanduser() if args.manifest_file else (out_dir / f"lc_manifest_{mag_bin_tag}.parquet")

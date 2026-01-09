@@ -6,7 +6,7 @@
   - Index CSVs: `index*.csv` with columns like `asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec, ...`
 - Light curves: `lc<num>_cal/` folders containing `<asas_sn_id>.dat2`
 - Optional catalogs:
-  - VSX: `input/vsx/vsx_cleaned.csv` (pre-filtered to exclude known periodic/eclipsing/transient variables)
+  - VSX: `input/vsx/vsxcat.090525.csv`
   - Note: Bright nearby star (BNS) filtering is handled upstream by ASAS-SN during LC generation
 
 #### Dependencies
@@ -21,7 +21,7 @@
    ```
 2) Pre-filter and run events in batches with resume support:
    ```bash
-   python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-catalog input/vsx/vsx_cleaned.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /output/lc_events_results_13_13.5.csv --workers 10
+   python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-catalog input/vsx/vsxcat.090525.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /output/lc_events_results_13_13.5.csv --workers 10
    ```
    - The wrapper builds/loads the manifest, runs pre-filters from `malca/pre_filter.py`, then calls `malca/events.py` in batches.
    - Pre-filters: sparse LC removal, multi-camera requirement, VSX known variable rejection
@@ -139,7 +139,7 @@
 
 ### CLI modules
 - `malca.manifest`: `python -m malca.manifest --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --mag-bin 13_13.5 --out /output/lc_manifest_13_13.5.parquet --workers 10`
-- `malca.events_filtered`: `python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-catalog input/vsx/vsx_cleaned.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /output/lc_events_results_13_13.5.csv --workers 10`
+- `malca.events_filtered`: `python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-catalog input/vsx/vsxcat.090525.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /output/lc_events_results_13_13.5.csv --workers 10`
 - `malca.events`: `python -m malca.events --input /path/to/lc*_cal/*.dat2 --output /output/results.csv --workers 10`
 - `malca.post_filter`: `python -m malca.post_filter --input /output/results.csv --output /output/results_filtered.csv`
 - `malca.plot`: `python -m malca.plot --input /path/to/lc123.dat2 --out-dir /output/plots --format png`
@@ -165,7 +165,7 @@
 
 ### Notes
 - Always generate the manifest first; everything else depends on knowing where each `<asas_sn_id>.dat2` lives.
-- VSX filter is enabled by default in `events_filtered.py` - requires `input/vsx/vsx_cleaned.csv` catalog
+- VSX filter is enabled by default in `events_filtered.py` - requires `input/vsx/vsxcat.090525.csv` catalog
   - To disable: add `--skip-vsx` flag
   - The catalog is pre-filtered to exclude known periodic/eclipsing/transient variables
 - Bright nearby star (BNS) filtering is NOT needed - ASAS-SN already filtered this during LC generation

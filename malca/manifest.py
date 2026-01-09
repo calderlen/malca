@@ -168,7 +168,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("/output/lc_manifest.parquet"),
+        default=Path("/home/lenhart.106/code/malca/output/lc_manifest.parquet"),
         help="Output Parquet file path. Default: %(default)s",
     )
     parser.add_argument(

@@ -522,7 +522,7 @@ def main() -> None:
         description="Compute event scores for events.py results (dips or microlensing)."
     )
     parser.add_argument("--events", type=Path, required=True, help="events.py results CSV/Parquet")
-    parser.add_argument("--output", type=Path, default=Path("/output/event_scores.csv"), help="Output CSV path")
+    parser.add_argument("--output", type=Path, default=Path("/home/lenhart.106/code/malca/output/event_scores.csv"), help="Output CSV path")
     parser.add_argument(
         "--event-type",
         type=str,

@@ -11,7 +11,7 @@ from astropy.time import Time
 
 DEFAULT_ASASSN_PATH = Path(__file__).parent.parent / "input" / "vsx" / "asassn_x_vsx_matches_20250919_2252.csv"
 DEFAULT_VSX_PATH = Path(__file__).parent.parent / "input" / "vsx" / "vsxcat.090525.csv"
-DEFAULT_OUTPUT_DIR = Path(__file__).parent.parent / "output"
+DEFAULT_OUTPUT_DIR = Path("/home/lenhart.106/code/malca/output")
 
 
 def load_asassn_catalog(path: Path) -> pd.DataFrame:
