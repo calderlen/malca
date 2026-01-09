@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-from astropy.timeseries import LombScargle
+from astropy.stats import mad_std, sigma_clip
 from tqdm import tqdm
 
 colors = ["#6b8bcd", "#b3b540", "#8f62ca", "#5eb550", "#c75d9c", "#4bb092", "#c5562f", "#6c7f39",
@@ -29,11 +29,28 @@ def get_id_col(df: pd.DataFrame) -> str:
     raise ValueError("No ID column found. Expected one of: asas_sn_id, id, source_id, path")
 
 
-def clean_lc(df):
-    mask = np.ones(len(df), dtype=bool)
-    mask &= (df["saturated"] == 0)
-    mask &= df["JD"].notna() & df["mag"].notna()
-    mask &= df["error"].notna() & (df["error"] > 0.0) & (df["error"] < 1.0)
+def clean_lc(df, max_error_absolute=1.0, max_error_sigma=5.0):
+    base_mask = np.ones(len(df), dtype=bool)
+    base_mask &= (df["saturated"] == 0)
+    base_mask &= df["JD"].notna() & df["mag"].notna()
+    base_mask &= df["error"].notna() & (df["error"] > 0.0)
+
+    mask = base_mask.copy()
+    if base_mask.sum() > 0:
+        errors = df.loc[base_mask, "error"].values
+        mask &= (df["error"] < max_error_absolute)
+
+        clipped = sigma_clip(
+            errors,
+            sigma=max_error_sigma,
+            cenfunc="median",
+            stdfunc=mad_std,
+        )
+        clipped_mask = np.asarray(clipped.mask)
+        if clipped_mask.shape == errors.shape:
+            base_idx = np.flatnonzero(base_mask)
+            mask[base_idx] &= ~clipped_mask
+
     df = df.loc[mask]
     df = df.sort_values("JD").reset_index(drop=True)
     return df
@@ -55,42 +72,6 @@ def compute_time_stats(df_lc: pd.DataFrame) -> dict:
     return {
         "time_span_days": time_span_days,
         "points_per_day": points_per_day,
-    }
-
-
-def compute_periodogram(df_lc: pd.DataFrame) -> dict:
-    """Compute Lomb-Scargle periodogram stats from a light curve DataFrame."""
-    if df_lc.empty:
-        return {"ls_max_power": 0.0, "best_period": np.nan}
-
-    mask = np.isfinite(df_lc["JD"]) & np.isfinite(df_lc["mag"])
-    mask &= np.isfinite(df_lc["error"]) & (df_lc["error"] > 0)
-
-    jd = df_lc.loc[mask, "JD"].values
-    mag = df_lc.loc[mask, "mag"].values
-
-    if len(jd) < 10:
-        return {"ls_max_power": 0.0, "best_period": np.nan}
-
-    # Compute time span for frequency grid
-    t_span = jd.max() - jd.min()
-    if t_span < 1.0:
-        return {"ls_max_power": 0.0, "best_period": np.nan}
-
-    # Run Lomb-Scargle
-    try:
-        ls = LombScargle(jd, mag)
-        freq, power = ls.autopower(minimum_frequency=1.0/365.0, maximum_frequency=10.0)
-        max_idx = np.argmax(power)
-        ls_max_power = float(power[max_idx])
-        best_period = float(1.0 / freq[max_idx])
-    except Exception:
-        ls_max_power = 0.0
-        best_period = np.nan
-
-    return {
-        "ls_max_power": ls_max_power,
-        "best_period": best_period,
     }
 
 
@@ -164,67 +145,8 @@ def read_lc_dat2(asassn_id, path):
 
         return df_g, df_v
 
-                                                           
-    csv_candidates = [
-        os.path.join(path, f"{asassn_id}-light-curves.csv"),
-        os.path.join(path, f"{asassn_id}.csv"),
-    ]
-    csv_path = next((p for p in csv_candidates if os.path.exists(p)), None)
-    if csv_path:
-                                                                                         
-        df = pd.read_csv(csv_path, comment='#', skip_blank_lines=True)
-                                              
-        rename_map = {
-            "Mag": "mag",
-            "Mag Error": "error",
-            "JD": "JD",
-            "Filter": "filter",
-            "Camera": "camera",
-        }
-        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-        
-                                                                    
-        if "camera" in df.columns:
-            df["camera"] = df["camera"].astype(str).str.strip()
-            df["camera#"] = df["camera"]
-            df["cam_field"] = df["camera#"]
-        else:
-            df["camera"] = ""
-            df["camera#"] = ""
-            df["cam_field"] = ""
-        
-                                                     
-        df["saturated"] = df.get("saturated", 0)
-        
-                                        
-        if "Quality" in df.columns:
-            df["quality_flag"] = df["Quality"].astype(str).str.strip().str.upper()
-            df["good_bad"] = (df["quality_flag"] == "G").astype(int)
-        else:
-            df["quality_flag"] = "G"
-            df["good_bad"] = 1
-
-        def band_flag(val: str) -> int:
-            v = str(val).upper()
-            if v.startswith("V"):
-                return 1          
-            return 0                                           
-
-        df["v_g_band"] = df["filter"].map(band_flag) if "filter" in df.columns else 0
-
-                      
-        for col in ["JD", "mag", "error"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        df_g = df.loc[df["v_g_band"] == 0].reset_index(drop=True)
-        df_v = df.loc[df["v_g_band"] == 1].reset_index(drop=True)
-        return df_g, df_v
-
-
     raise FileNotFoundError(
-        f"Light curve file not found for {asassn_id} in {path}. "
-        f"Tried: {asassn_id}.dat2, {asassn_id}-light-curves.csv, {asassn_id}.csv"
+        f"Light curve file not found: {dat2_path}"
     )
 
 def read_lc_csv(asassn_id, path):

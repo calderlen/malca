@@ -14,5 +14,6 @@ output/
 input/*.csv
 input/*.zip
 input/*.parquet
+input/vsx/*
 input/vsx/vsxcat.090525
 input/vsx/vsxcat.090525.save

@@ -36,13 +36,12 @@ from utils import (
     read_lc_dat2,
     get_id_col,
     compute_time_stats,
-    compute_periodogram,
     compute_n_cameras,
 )
 from vsx_crossmatch import propagate_asassn_coords, vsx_coords
 
 
-def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, compute_period: bool, compute_cameras: bool) -> dict:
+def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, compute_cameras: bool) -> dict:
     """
     Helper function for parallel processing. Computes requested stats for a single light curve.
     Returns a dict with requested stats.
@@ -57,10 +56,6 @@ def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, c
             time_stats = compute_time_stats(df_lc)
             result.update(time_stats)
 
-        if compute_period:
-            period_stats = compute_periodogram(df_lc)
-            result.update(period_stats)
-
         if compute_cameras:
             result["n_cameras"] = compute_n_cameras(df_lc)
 
@@ -69,9 +64,6 @@ def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, c
         if compute_time:
             result["time_span_days"] = 0.0
             result["points_per_day"] = 0.0
-        if compute_period:
-            result["ls_max_power"] = 0.0
-            result["best_period"] = np.nan
         if compute_cameras:
             result["n_cameras"] = 0
 
@@ -79,7 +71,7 @@ def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, c
 
 
 def _compute_stats_parallel(df: pd.DataFrame, id_col: str, path_col: str, compute_time: bool = False,
-                            compute_period: bool = False, compute_cameras: bool = False,
+                            compute_cameras: bool = False,
                             n_workers: int = 4, show_tqdm: bool = False) -> pd.DataFrame:
     """
     Compute stats for all rows in parallel using ProcessPoolExecutor.
@@ -91,9 +83,6 @@ def _compute_stats_parallel(df: pd.DataFrame, id_col: str, path_col: str, comput
     if compute_time:
         df_with_stats["time_span_days"] = 0.0
         df_with_stats["points_per_day"] = 0.0
-    if compute_period:
-        df_with_stats["ls_max_power"] = 0.0
-        df_with_stats["best_period"] = np.nan
     if compute_cameras:
         df_with_stats["n_cameras"] = 0
 
@@ -109,7 +98,7 @@ def _compute_stats_parallel(df: pd.DataFrame, id_col: str, path_col: str, comput
 
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = {
-            executor.submit(_compute_stats_for_row, asas_sn_id, dir_path, compute_time, compute_period, compute_cameras): idx
+            executor.submit(_compute_stats_for_row, asas_sn_id, dir_path, compute_time, compute_cameras): idx
             for idx, asas_sn_id, dir_path in tasks
         }
 
@@ -120,9 +109,6 @@ def _compute_stats_parallel(df: pd.DataFrame, id_col: str, path_col: str, comput
             if compute_time:
                 df_with_stats.loc[idx, "time_span_days"] = result["time_span_days"]
                 df_with_stats.loc[idx, "points_per_day"] = result["points_per_day"]
-            if compute_period:
-                df_with_stats.loc[idx, "ls_max_power"] = result["ls_max_power"]
-                df_with_stats.loc[idx, "best_period"] = result["best_period"]
             if compute_cameras:
                 df_with_stats.loc[idx, "n_cameras"] = result["n_cameras"]
 
@@ -240,7 +226,7 @@ def filter_vsx_match(
     *,
     max_sep_arcsec: float = 3.0,
     exclude_classes: list[str] | None = None,
-    vsx_catalog_csv: str | Path = "input/vsx/vsx_cleaned.csv",
+    vsx_catalog_csv: str | Path = "input/vsx/vsxcat.090525.csv",
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -249,7 +235,7 @@ def filter_vsx_match(
     Remove candidates that match known variables with specified classes.
 
     If vsx_match_sep_arcsec and vsx_class columns exist, use them.
-    Otherwise, perform crossmatch using VSX catalog from input/vsx/vsx_cleaned.csv
+    Otherwise, perform crossmatch using VSX catalog from input/vsx/vsxcat.090525.csv
 
     Required columns for crossmatch: ra_deg, dec_deg, pm_ra, pm_dec
     Raises ValueError if required columns or catalog file are missing.
@@ -295,7 +281,7 @@ def filter_vsx_match(
         is_excluded_type = df["vsx_class"].fillna("").isin(exclude_classes)
         mask = ~(has_match & is_excluded_type)
     else:
-        # Default: reject ALL VSX matches (vsx_cleaned.csv is pre-filtered to safe types only)
+        # Default: reject ALL VSX matches (assumes VSX catalog is pre-filtered to safe types only)
         # This means if it matches ANY VSX entry, it's a known variable we should exclude
         mask = ~has_match
 
@@ -373,7 +359,7 @@ def apply_pre_filters(
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
-    vsx_catalog_csv: str | Path = "input/vsx/vsx_cleaned.csv",
+    vsx_catalog_csv: str | Path = "input/vsx/vsxcat.090525.csv",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,
@@ -430,7 +416,6 @@ def apply_pre_filters(
             df_filtered = _compute_stats_parallel(
                 df_filtered, id_col, "path",
                 compute_time=compute_time,
-                compute_period=False,
                 compute_cameras=compute_cameras,
                 n_workers=n_workers,
                 show_tqdm=show_tqdm

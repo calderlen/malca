@@ -103,7 +103,7 @@ def main():
     parser.add_argument("--skip-multi-camera", action="store_true", help="Skip multi-camera filter")
     parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX known variable filter")
     parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
-    parser.add_argument("--vsx-catalog", type=Path, default=Path("input/vsx/vsx_cleaned.csv"), help="Path to VSX catalog CSV")
+    parser.add_argument("--vsx-catalog", type=Path, default=Path("input/vsx/vsxcat.090525.csv"), help="Path to VSX catalog CSV")
     parser.add_argument("--workers", type=int, default=10, help="Workers for pre-filter stats.")
     parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call to limit arg size and allow resume")
     parser.add_argument("-o", "--overwrite", action="store_true",

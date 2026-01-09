@@ -18,7 +18,7 @@ from malca.events import (
     gaussian,
     paczynski,
 )
-from malca.utils import read_lc_dat2
+from malca.utils import clean_lc, read_lc_dat2
 from malca.baseline import (
     per_camera_gp_baseline,
     global_mean_baseline,
@@ -315,10 +315,17 @@ def plot_bayes_results(
     plot_fits=False,
     jd_offset=2458000.0,
     detection_results_csv=None,
+    clean_max_error_absolute=1.0,
+    clean_max_error_sigma=5.0,
 ):
     """Plot a light curve with Bayesian detection results and run fits."""
                       
     df = load_lightcurve_df(csv_path)
+    df = clean_lc(
+        df,
+        max_error_absolute=clean_max_error_absolute,
+        max_error_sigma=clean_max_error_sigma,
+    )
     if df.empty:
         raise ValueError(f"Light curve file is empty: {csv_path.name}")
 
@@ -757,6 +764,18 @@ def main():
         default=2458000.0,
         help="JD offset for plotting (default: 2458000.0)",
     )
+    parser.add_argument(
+        "--clean-max-error-absolute",
+        type=float,
+        default=1.0,
+        help="Absolute error cutoff for clean_lc (default: 1.0)",
+    )
+    parser.add_argument(
+        "--clean-max-error-sigma",
+        type=float,
+        default=5.0,
+        help="Sigma cutoff for clean_lc MAD filter (default: 5.0)",
+    )
     parser.add_argument("--gp-sigma", type=float, default=None, help="GP sigma parameter.")
     parser.add_argument("--gp-rho", type=float, default=None, help="GP rho parameter.")
     parser.add_argument("--gp-q", type=float, default=None, help="GP Q parameter (default: 0.7).")
@@ -851,10 +870,12 @@ def main():
             logbf_threshold_dip=args.logbf_threshold_dip,
             logbf_threshold_jump=args.logbf_threshold_jump,
             skip_events=args.skip_events,
-            plot_fits=args.plot_fits,
-            jd_offset=args.jd_offset,
-            detection_results_csv=args.detection_results,
-        )
+        plot_fits=args.plot_fits,
+        jd_offset=args.jd_offset,
+        detection_results_csv=args.detection_results,
+        clean_max_error_absolute=args.clean_max_error_absolute,
+        clean_max_error_sigma=args.clean_max_error_sigma,
+    )
 
 
 if __name__ == "__main__":

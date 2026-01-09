@@ -100,9 +100,9 @@
   plot_3d_surface(df, x_col="p_points", y_col="mag_points", z_col="dip_bd", color_col="elapsed_s")
   ```
 - Injection-recovery testing (validate pipeline completeness/contamination):
-  `python -m malca.injection_recovery --manifest /output/lc_manifest_13_13.5.parquet --out /output/injection_recovery_13_13.5.csv --workers 10`
+  `python -m malca.injection --manifest /output/lc_manifest_13_13.5.parquet --out /output/injection_recovery_13_13.5.csv --workers 10`
   ```python
-  from malca.injection_recovery import (
+  from malca.injection import (
       select_control_sample,
       run_injection_recovery,
       compute_detection_efficiency,
@@ -144,7 +144,7 @@
 - `malca.post_filter`: `python -m malca.post_filter --input /output/results.csv --output /output/results_filtered.csv`
 - `malca.plot`: `python -m malca.plot --input /path/to/lc123.dat2 --out-dir /output/plots --format png`
 - `malca.score`: `python -m malca.score --events /output/results.csv --output /output/dipper_scores.csv --event-type dip`
-- `malca.injection_recovery`: `python -m malca.injection_recovery --manifest /output/lc_manifest_13_13.5.parquet --out /output/injection_recovery_13_13.5.csv --workers 10`
+- `malca.injection`: `python -m malca.injection --manifest /output/lc_manifest_13_13.5.parquet --out /output/injection_recovery_13_13.5.csv --workers 10`
 - `malca.ltv`: `python -m malca.ltv --mag-bin 13_13.5 --output /output/ltv_13_13.5.csv --workers 10`
 - `malca.stats`: `python -m malca.stats /path/to/lc123.dat2`
 - `malca.fp_analysis`: `python -m malca.fp_analysis --pre /output/pre.csv --post /output/post.csv`

@@ -24,7 +24,7 @@ Rewrote `malca/pre_filter.py` to compute required statistics from dat2 files on-
 ### 3. **filter_vsx_match** - Inline VSX crossmatch
 - **Before**: Assumed `vsx_match_sep_arcsec` and `vsx_class` columns existed
 - **After**: Checks if columns exist; if not, performs crossmatch:
-  - Loads VSX catalog from `input/vsx/vsx_cleaned.csv` (default)
+  - Loads VSX catalog from `input/vsx/vsxcat.090525.csv` (default)
   - **Requires** `ra_deg`, `dec_deg`, `pm_ra`, `pm_dec` in input DataFrame
   - Uses `propagate_asassn_coords()` to propagate proper motion
   - Performs spatial match with `match_to_catalog_sky()`
@@ -35,7 +35,7 @@ Rewrote `malca/pre_filter.py` to compute required statistics from dat2 files on-
 ### 4. **filter_bright_nearby_stars** - Catalog crossmatch for BNS
 - **Before**: Assumed `bns_separation_arcsec` and `bns_delta_mag` columns existed
 - **After**: Checks if columns exist; if not, performs crossmatch:
-  - Loads ASAS-SN index from `input/vsx/asassn_catalog.csv` (default)
+  - Loads ASAS-SN index from `input/vsx/asassn_x_vsx_matches_20250919_2252.csv` (default)
   - Index contains: `asas_sn_id`, `ra_deg`, `dec_deg`, `pm_ra`, `pm_dec`, `gaia_mag`, `pstarrs_g_mag`, etc.
   - **Requires** `ra_deg`, `dec_deg`, and a magnitude column in input DataFrame
   - Looks for magnitude in order: `gaia_mag`, `pstarrs_g_mag`, `mag`, etc.
@@ -110,7 +110,7 @@ import pandas as pd
 from malca.pre_filter import apply_pre_filters
 
 # Option 1: Load from ASAS-SN index file (recommended - already has all columns)
-df_index = pd.read_csv("input/vsx/asassn_catalog.csv")
+df_index = pd.read_csv("input/vsx/asassn_x_vsx_matches_20250919_2252.csv")
 # Index already has: asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec, gaia_mag, pstarrs_g_mag, etc.
 # Add path column for dat2 files
 df_index["path"] = "/data/lc/12_12.5/lc0_cal"  # or construct from asas_sn_id

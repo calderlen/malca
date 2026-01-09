@@ -539,7 +539,7 @@ def bayesian_event_significance(
       - global bayes_factor
     """
     df = clean_lc(df)
-    cam_vec = df["camera"].to_numpy() if "camera" in df.columns else None
+    cam_vec = df["camera#"].to_numpy() if "camera#" in df.columns else None
     jd = np.asarray(df["JD"], float)
     mags = np.asarray(df[mag_col], float)
 
@@ -1172,13 +1172,14 @@ def process_one(
     dip_morph, dip_dbic, dip_param = get_best_morph_info(dip["run_summaries"])
     jump_morph, jump_dbic, jump_param = get_best_morph_info(jump["run_summaries"])
 
-    cams = df["camera"].dropna()
-    unique_cams = np.unique(cams.astype(str))
+    cams = df["camera#"].dropna() if "camera#" in df.columns else pd.Series([], dtype=str)
+
+    unique_cams = np.unique(cams.astype(str)) if len(cams) > 0 else np.array([], dtype=str)
     n_cameras = int(unique_cams.size)
-    cam_counts = cams.value_counts()
+    cam_counts = cams.value_counts() if len(cams) > 0 else pd.Series([], dtype=int)
     camera_min_points = int(cam_counts.min()) if len(cam_counts) else 0
     camera_max_points = int(cam_counts.max()) if len(cam_counts) else 0
-    camera_ids = ",".join(unique_cams)
+    camera_ids = ",".join(unique_cams) if len(unique_cams) > 0 else ""
 
     dipper_score = 0.0
     dipper_n_dips = 0

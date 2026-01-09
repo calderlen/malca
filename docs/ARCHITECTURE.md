@@ -34,6 +34,21 @@
   - event scoring metric for both dips (Gaussian fits) and microlensing (Paczyński curves)
   - computes scores based on event amplitude, width, detections, and fit chi2
 
+## VSX/ASAS-SN catalog data
+- Default catalog locations (relative to repo root):
+  - ASAS-SN catalog for crossmatch: `input/vsx/asassn_x_vsx_matches_20250919_2252.csv`
+  - VSX catalog: `input/vsx/vsxcat.090525.csv`
+- ASAS-SN catalog columns (minimum):
+  - `asas_sn_id`, `ra_deg`, `dec_deg`, `pm_ra`, `pm_dec`
+  - Photometric columns (e.g., `gaia_mag`, `pstarrs_g_mag`, `pstarrs_r_mag`)
+  - Catalog cross-refs (e.g., `gaia_id`, `hip_id`, `tyc_id`, `tmass_id`)
+- VSX catalog columns (minimum):
+  - `ra`, `dec`
+  - `class` (variable star classification)
+- Usage:
+  - `malca/vsx_crossmatch.py` can generate ASAS-SN ↔ VSX crossmatches.
+  - `malca/pre_filter.py` can crossmatch on-the-fly (see `filter_vsx_match`).
+
 ## Legacy Python modules (`malca/old/`)
 - `df_utils.py`
   - legacy peak search utilities and metrics helpers
