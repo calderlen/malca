@@ -23,6 +23,12 @@ from malca.baseline import (
     per_camera_trend_baseline,
 )
 
+PER_CAMERA_BASELINES = {
+    per_camera_mean_baseline,
+    per_camera_median_baseline,
+    per_camera_trend_baseline,
+}
+
 
 def parse_peaks_jd(peaks_jd_str):
     """Parse peaks_jd string from CSV (e.g., "[2458327.89, 2458480.59]") into list of floats."""
@@ -163,6 +169,7 @@ def plot_skypatrol_with_peaks(
                                                                                      
             baseline_func_to_use = baseline_func or per_camera_median_baseline
             baseline_kwargs_to_use = baseline_kwargs or {}
+            per_camera_baseline = baseline_func_to_use in PER_CAMERA_BASELINES
             
                                                                           
             if baseline_func_to_use in (per_camera_median_baseline, per_camera_mean_baseline):
@@ -272,16 +279,32 @@ def plot_skypatrol_with_peaks(
         if not band_df_baseline.empty and "baseline" in band_df_baseline.columns:
             baseline_finite = band_df_baseline[np.isfinite(band_df_baseline["baseline"])]
             if not baseline_finite.empty:
-                ax_main.plot(
-                    baseline_finite["JD_plot"],
-                    baseline_finite["baseline"],
-                    color="orange",
-                    linestyle="-",
-                    linewidth=2,
-                    alpha=0.8,
-                    label="Baseline",
-                    zorder=5,
-                )
+                if per_camera_baseline:
+                    for cam in camera_ids:
+                        cam_baseline = baseline_finite[baseline_finite["camera#"] == cam]
+                        if cam_baseline.empty:
+                            continue
+                        cam_sorted = cam_baseline.sort_values("JD_plot")
+                        ax_main.plot(
+                            cam_sorted["JD_plot"],
+                            cam_sorted["baseline"],
+                            color=camera_colors[cam],
+                            linestyle="-",
+                            linewidth=1.6,
+                            alpha=0.8,
+                            zorder=5,
+                        )
+                else:
+                    ax_main.plot(
+                        baseline_finite["JD_plot"],
+                        baseline_finite["baseline"],
+                        color="orange",
+                        linestyle="-",
+                        linewidth=2,
+                        alpha=0.8,
+                        label="Baseline",
+                        zorder=5,
+                    )
         
                                                 
         peaks_plot = band_peaks[band]
@@ -419,6 +442,7 @@ def plot_skypatrol_with_peaks(
                                                                    
                 padding = max(resid_range * 0.01, 0.05)
                 ax_resid.set_ylim(resid_min - padding, resid_max + padding)
+        ax_resid.invert_yaxis()
     
                                               
                                               

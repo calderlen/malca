@@ -217,13 +217,15 @@ def read_lc_dat2(asassn_id, path):
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        df_g = df.loc[df["v_g_band"] == 0].reset_index(drop=True)    
+        df_g = df.loc[df["v_g_band"] == 0].reset_index(drop=True)
         df_v = df.loc[df["v_g_band"] == 1].reset_index(drop=True)
         return df_g, df_v
 
-                   
-    print(f"[error] {asassn_id}: file not found in {path}")
-    return pd.DataFrame(), pd.DataFrame()
+
+    raise FileNotFoundError(
+        f"Light curve file not found for {asassn_id} in {path}. "
+        f"Tried: {asassn_id}.dat2, {asassn_id}-light-curves.csv, {asassn_id}.csv"
+    )
 
 def read_lc_csv(asassn_id, path):
     csv_path = os.path.join(path, f"{asassn_id}.csv")

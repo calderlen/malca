@@ -1,12 +1,14 @@
 """
 Post-filters that run AFTER events.py.
-These filters depend only on the output columns from events.py.
+Most filters depend only on the output columns from events.py; the camera
+median validation also reads per-camera stats from .raw2 files via path.
 
 Filters:
 7. filter_posterior_strength - require strong Bayes factors
 8. filter_event_probability - require high event probabilities
 9. filter_run_robustness - require sufficient run count and points
 10. filter_morphology - require specific morphology with good BIC
+11. validate_camera_medians - require camera median agreement from .raw2
 
 Required input columns (from events.py):
     dip_bayes_factor, jump_bayes_factor,
@@ -16,12 +18,14 @@ Required input columns (from events.py):
     dip_max_run_points, jump_max_run_points,
     dip_max_run_cameras, jump_max_run_cameras,
     dip_best_morph, jump_best_morph,
-    dip_best_delta_bic, jump_best_delta_bic
+    dip_best_delta_bic, jump_best_delta_bic,
+    path (for logging and camera median validation)
 """
 
 from __future__ import annotations
 from pathlib import Path
 from time import perf_counter
+import re
 import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
@@ -58,6 +62,7 @@ def filter_posterior_strength(
     min_bayes_factor: float = 10.0,
     require_finite_local_bf: bool = True,
     show_tqdm: bool = False,
+    verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
@@ -82,7 +87,7 @@ def filter_posterior_strength(
     if pbar:
         pbar.update(1)
 
-    if show_tqdm:
+    if show_tqdm and verbose:
         tqdm.write(f"[filter_posterior_strength] kept {len(out)}/{n0}")
     log_rejections(df, out, "filter_posterior_strength", rejected_log_csv)
 
@@ -102,6 +107,7 @@ def filter_event_probability(
     *,
     min_event_prob: float = 0.5,
     show_tqdm: bool = False,
+    verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
@@ -118,7 +124,7 @@ def filter_event_probability(
     if pbar:
         pbar.update(1)
 
-    if show_tqdm:
+    if show_tqdm and verbose:
         tqdm.write(f"[filter_event_probability] kept {len(out)}/{n0}")
     log_rejections(df, out, "filter_event_probability", rejected_log_csv)
 
@@ -140,6 +146,7 @@ def filter_run_robustness(
     min_run_points: int = 2,
     min_run_cameras: int = 2,
     show_tqdm: bool = False,
+    verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
@@ -171,7 +178,7 @@ def filter_run_robustness(
     if pbar:
         pbar.update(1)
 
-    if show_tqdm:
+    if show_tqdm and verbose:
         tqdm.write(f"[filter_run_robustness] kept {len(out)}/{n0}")
     log_rejections(df, out, "filter_run_robustness", rejected_log_csv)
 
@@ -193,6 +200,7 @@ def filter_morphology(
     jump_morphology: str = "paczynski",
     min_delta_bic: float = 10.0,
     show_tqdm: bool = False,
+    verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
@@ -216,7 +224,7 @@ def filter_morphology(
     if pbar:
         pbar.update(1)
 
-    if show_tqdm:
+    if show_tqdm and verbose:
         tqdm.write(f"[filter_morphology] kept {len(out)}/{n0}")
     log_rejections(df, out, "filter_morphology", rejected_log_csv)
 
@@ -231,6 +239,186 @@ def filter_morphology(
 # Validation filters (expensive checks, run after event detection)
 # =============================================================================
 
+RAW_STATS_COLUMNS = [
+    "camera",
+    "median",
+    "sig1_low",
+    "sig1_high",
+    "p90_low",
+    "p90_high",
+]
+
+
+def _parse_mag_bin_range(mag_bin: str | None) -> tuple[float, float] | None:
+    if not mag_bin:
+        return None
+    token = mag_bin.strip().replace("-", "_")
+    parts = token.split("_")
+    if len(parts) != 2:
+        return None
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+
+
+def _mag_bin_range_from_path(path: Path) -> tuple[float, float] | None:
+    match = re.search(r"(\d+(?:\.\d+)?_\d+(?:\.\d+)?)", str(path))
+    if not match:
+        return None
+    return _parse_mag_bin_range(match.group(1))
+
+
+def _find_raw_stats_path(path: Path) -> Path | None:
+    path = Path(path)
+    if path.suffix.lower() == ".raw2":
+        return path if path.exists() else None
+    candidate = path.with_suffix(".raw2")
+    return candidate if candidate.exists() else None
+
+
+def _read_raw_camera_stats(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(
+        path,
+        sep=r"\s+",
+        names=RAW_STATS_COLUMNS,
+        comment="#",
+        header=None,
+    )
+    for col in ("median", "sig1_low", "sig1_high", "p90_low", "p90_high"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df[df["median"].notna()].reset_index(drop=True)
+    return df
+
+
+def validate_camera_medians(
+    df: pd.DataFrame,
+    *,
+    max_median_spread: float = 0.3,
+    mag_bin: str | None = None,
+    mag_tolerance: float = 0.5,
+    allow_missing_raw: bool = False,
+    show_tqdm: bool = False,
+    verbose: bool = False,
+    rejected_log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Validate candidates using per-camera median magnitudes from .raw2 files.
+
+    Rejects candidates where camera medians disagree strongly, or where the
+    camera medians fall outside the expected magnitude bin (with tolerance).
+    """
+    if "path" not in df.columns:
+        raise KeyError("validate_camera_medians requires a 'path' column")
+
+    mag_bin_range = _parse_mag_bin_range(mag_bin)
+
+    min_medians = []
+    max_medians = []
+    mean_medians = []
+    median_spreads = []
+    n_cameras = []
+    valid_flags = []
+    reasons = []
+    mag_min_bounds = []
+    mag_max_bounds = []
+    keep_flags = []
+
+    paths = df["path"].astype(str).tolist()
+    iterator = enumerate(paths)
+    if show_tqdm:
+        iterator = tqdm(iterator, total=len(paths), desc="validate_camera_medians", leave=False)
+
+    for _, path_str in iterator:
+        path = Path(path_str)
+        raw_path = _find_raw_stats_path(path)
+
+        if raw_path is None:
+            min_medians.append(np.nan)
+            max_medians.append(np.nan)
+            mean_medians.append(np.nan)
+            median_spreads.append(np.nan)
+            n_cameras.append(0)
+            valid_flags.append(False)
+            reasons.append("missing_raw")
+            mag_min_bounds.append(np.nan)
+            mag_max_bounds.append(np.nan)
+            keep_flags.append(bool(allow_missing_raw))
+            continue
+
+        try:
+            stats = _read_raw_camera_stats(raw_path)
+        except Exception:
+            stats = pd.DataFrame()
+
+        if stats.empty or "median" not in stats.columns:
+            min_medians.append(np.nan)
+            max_medians.append(np.nan)
+            mean_medians.append(np.nan)
+            median_spreads.append(np.nan)
+            n_cameras.append(0)
+            valid_flags.append(False)
+            reasons.append("empty_raw_stats")
+            mag_min_bounds.append(np.nan)
+            mag_max_bounds.append(np.nan)
+            keep_flags.append(bool(allow_missing_raw))
+            continue
+
+        medians = stats["median"].to_numpy(dtype=float)
+        med_min = float(np.nanmin(medians)) if medians.size else np.nan
+        med_max = float(np.nanmax(medians)) if medians.size else np.nan
+        med_mean = float(np.nanmean(medians)) if medians.size else np.nan
+        spread = float(med_max - med_min) if np.isfinite(med_min) and np.isfinite(med_max) else np.nan
+
+        row_range = mag_bin_range or _mag_bin_range_from_path(path)
+        if row_range is not None:
+            mag_min = float(row_range[0] - mag_tolerance)
+            mag_max = float(row_range[1] + mag_tolerance)
+        else:
+            mag_min = np.nan
+            mag_max = np.nan
+
+        row_valid = True
+        row_reasons = []
+
+        if np.isfinite(spread) and max_median_spread is not None:
+            if spread > max_median_spread:
+                row_valid = False
+                row_reasons.append(f"spread>{max_median_spread}")
+
+        if np.isfinite(med_min) and np.isfinite(med_max) and np.isfinite(mag_min) and np.isfinite(mag_max):
+            if med_min < mag_min or med_max > mag_max:
+                row_valid = False
+                row_reasons.append("outside_mag_bin")
+
+        min_medians.append(med_min)
+        max_medians.append(med_max)
+        mean_medians.append(med_mean)
+        median_spreads.append(spread)
+        n_cameras.append(int(stats["camera"].nunique()))
+        valid_flags.append(row_valid)
+        reasons.append(";".join(row_reasons) if row_reasons else "")
+        mag_min_bounds.append(mag_min)
+        mag_max_bounds.append(mag_max)
+        keep_flags.append(row_valid)
+
+    df_out = df.copy()
+    df_out["camera_median_min"] = min_medians
+    df_out["camera_median_max"] = max_medians
+    df_out["camera_median_mean"] = mean_medians
+    df_out["camera_median_spread"] = median_spreads
+    df_out["camera_median_n_cameras"] = n_cameras
+    df_out["camera_median_valid"] = valid_flags
+    df_out["camera_median_reason"] = reasons
+    df_out["camera_median_mag_min"] = mag_min_bounds
+    df_out["camera_median_mag_max"] = mag_max_bounds
+
+    out = df_out.loc[keep_flags].reset_index(drop=True)
+    if show_tqdm and verbose:
+        tqdm.write(f"[validate_camera_medians] kept {len(out)}/{len(df_out)}")
+    log_rejections(df_out, out, "validate_camera_medians", rejected_log_csv)
+    return out
+
 def validate_periodicity(
     df: pd.DataFrame,
     *,
@@ -239,6 +427,7 @@ def validate_periodicity(
     significance_level: float = 0.01,
     exclude_alias_periods: bool = True,
     show_tqdm: bool = False,
+    verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
@@ -287,7 +476,7 @@ def validate_periodicity(
     """
     n0 = len(df)
 
-    if show_tqdm:
+    if show_tqdm and verbose:
         tqdm.write(f"[validate_periodicity] TODO: Implement bootstrap LSP - currently placeholder")
         tqdm.write(f"[validate_periodicity] kept {len(df)}/{n0} (no filtering applied)")
 
@@ -310,6 +499,7 @@ def validate_gaia_ruwe(
     max_ruwe: float = 1.4,
     flag_only: bool = True,
     show_tqdm: bool = False,
+    verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
@@ -353,7 +543,7 @@ def validate_gaia_ruwe(
     """
     n0 = len(df)
 
-    if show_tqdm:
+    if show_tqdm and verbose:
         tqdm.write(f"[validate_gaia_ruwe] TODO: Implement Gaia RUWE crossmatch - currently placeholder")
         tqdm.write(f"[validate_gaia_ruwe] kept {len(df)}/{n0} (no filtering applied)")
 
@@ -373,6 +563,7 @@ def validate_periodic_catalog(
     max_sep_arcsec: float = 3.0,
     flag_only: bool = True,
     show_tqdm: bool = False,
+    verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
@@ -418,7 +609,7 @@ def validate_periodic_catalog(
     """
     n0 = len(df)
 
-    if show_tqdm:
+    if show_tqdm and verbose:
         tqdm.write(f"[validate_periodic_catalog] TODO: Implement periodic catalog crossmatch - currently placeholder")
         tqdm.write(f"[validate_periodic_catalog] kept {len(df)}/{n0} (no filtering applied)")
 
@@ -456,8 +647,15 @@ def apply_post_filters(
     dip_morphology: str = "gaussian",
     jump_morphology: str = "paczynski",
     min_delta_bic: float = 10.0,
+    # Validation: camera medians
+    apply_camera_median_validation: bool = False,
+    max_camera_median_spread: float = 0.3,
+    mag_bin: str | None = None,
+    mag_tolerance: float = 0.5,
+    allow_missing_raw: bool = False,
     # General
     show_tqdm: bool = True,
+    verbose: bool = False,
     rejected_log_csv: str | Path | None = "rejected_post_filter.csv",
 ) -> pd.DataFrame:
     """
@@ -471,6 +669,8 @@ def apply_post_filters(
         Whether to apply each filter
     show_tqdm : bool
         Show progress bars
+    verbose : bool
+        Print per-filter summaries and totals
     rejected_log_csv : str | Path | None
         Path to log rejected candidates
 
@@ -489,6 +689,7 @@ def apply_post_filters(
             "min_bayes_factor": min_bayes_factor,
             "require_finite_local_bf": require_finite_local_bf,
             "show_tqdm": show_tqdm,
+            "verbose": verbose,
             "rejected_log_csv": rejected_log_csv,
         }))
 
@@ -496,6 +697,7 @@ def apply_post_filters(
         filters.append(("event_probability", filter_event_probability, {
             "min_event_prob": min_event_prob,
             "show_tqdm": show_tqdm,
+            "verbose": verbose,
             "rejected_log_csv": rejected_log_csv,
         }))
 
@@ -505,6 +707,7 @@ def apply_post_filters(
             "min_run_points": min_run_points,
             "min_run_cameras": min_run_cameras,
             "show_tqdm": show_tqdm,
+            "verbose": verbose,
             "rejected_log_csv": rejected_log_csv,
         }))
 
@@ -514,6 +717,18 @@ def apply_post_filters(
             "jump_morphology": jump_morphology,
             "min_delta_bic": min_delta_bic,
             "show_tqdm": show_tqdm,
+            "verbose": verbose,
+            "rejected_log_csv": rejected_log_csv,
+        }))
+
+    if apply_camera_median_validation:
+        filters.append(("camera_medians", validate_camera_medians, {
+            "max_median_spread": max_camera_median_spread,
+            "mag_bin": mag_bin,
+            "mag_tolerance": mag_tolerance,
+            "allow_missing_raw": allow_missing_raw,
+            "show_tqdm": show_tqdm,
+            "verbose": verbose,
             "rejected_log_csv": rejected_log_csv,
         }))
 
@@ -528,11 +743,14 @@ def apply_post_filters(
                 elapsed = perf_counter() - start
                 n_after = len(df_filtered)
 
-                pbar.set_postfix_str(f"{label}: {n_before} → {n_after} ({elapsed:.2f}s)")
+                if verbose:
+                    pbar.set_postfix_str(f"{label}: {n_before} → {n_after} ({elapsed:.2f}s)")
+                else:
+                    pbar.set_postfix_str("")
                 pbar.update(1)
 
     n_end = len(df_filtered)
-    if show_tqdm:
+    if show_tqdm and verbose:
         tqdm.write(f"\n[apply_post_filters] Total: {n_start} → {n_end} ({n_end/n_start*100:.1f}% kept)")
 
     return df_filtered.reset_index(drop=True)
@@ -564,6 +782,8 @@ Example usage:
     parser.add_argument("--skip-event-probability", action="store_true", help="Skip event probability filter")
     parser.add_argument("--skip-run-robustness", action="store_true", help="Skip run robustness filter")
     parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter (off by default)")
+    parser.add_argument("--apply-camera-median-validation", action="store_true",
+                        help="Apply camera median validation using .raw2 files (off by default)")
 
     # Posterior strength parameters
     parser.add_argument("--min-bayes-factor", type=float, default=10.0,
@@ -593,8 +813,19 @@ Example usage:
     parser.add_argument("--min-delta-bic", type=float, default=10.0,
                         help="Minimum delta BIC for morphology filter (default: 10)")
 
+    # Camera median validation parameters
+    parser.add_argument("--max-camera-median-spread", type=float, default=0.3,
+                        help="Max allowed spread between camera medians (default: 0.3)")
+    parser.add_argument("--mag-bin", type=str, default=None,
+                        help="Expected magnitude bin (e.g., 13_13.5). If omitted, try to parse from path.")
+    parser.add_argument("--mag-tolerance", type=float, default=0.5,
+                        help="Allowed magnitude tolerance beyond mag bin (default: 0.5)")
+    parser.add_argument("--allow-missing-raw", action="store_true",
+                        help="Do not reject candidates missing .raw2 stats")
+
     # General options
     parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Print per-filter summaries (default: off)")
     parser.add_argument("--no-reject-log", action="store_true", help="Disable rejection logging")
     parser.add_argument("--reject-log", type=Path, default=None,
                         help="Path to rejection log CSV (default: rejected_post_filter.csv)")
@@ -626,6 +857,7 @@ Example usage:
         apply_event_probability=not args.skip_event_probability,
         apply_run_robustness=not args.skip_run_robustness,
         apply_morphology=args.apply_morphology,
+        apply_camera_median_validation=args.apply_camera_median_validation,
         # Posterior strength
         min_bayes_factor=args.min_bayes_factor,
         require_finite_local_bf=not args.allow_infinite_local_bf,
@@ -639,8 +871,14 @@ Example usage:
         dip_morphology=args.dip_morphology,
         jump_morphology=args.jump_morphology,
         min_delta_bic=args.min_delta_bic,
+        # Camera median validation
+        max_camera_median_spread=args.max_camera_median_spread,
+        mag_bin=args.mag_bin,
+        mag_tolerance=args.mag_tolerance,
+        allow_missing_raw=args.allow_missing_raw,
         # General
         show_tqdm=not args.no_tqdm,
+        verbose=args.verbose,
         rejected_log_csv=reject_log,
     )
 

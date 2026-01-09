@@ -32,8 +32,6 @@ from malca.baseline import (
 )
 
 
-PLOT_OUTPUT_DIR = Path("lc_plots")
-DETECTION_RESULTS_FILE = Path("detection_results.csv")
 JD_OFFSET = 2458000.0
 
 asassn_columns = [
@@ -200,10 +198,13 @@ def load_events_paths(
     return [Path(p) for p in paths]
 
 
-def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
+def load_detection_results(csv_path):
     """
     Load detection_results.csv with trimmed strings; used for metadata lookup.
     """
+    if csv_path is None:
+        return None
+
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(f"detection_results file not found: {csv_path}")
@@ -214,11 +215,16 @@ def load_detection_results(csv_path=DETECTION_RESULTS_FILE):
     return df
 
 
-def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, csv_path=DETECTION_RESULTS_FILE):
+def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, csv_path=None):
     """
     Look up metadata (source/category/vsx class) from detection_results.
     """
+    if csv_path is None:
+        return None
+
     df = load_detection_results(csv_path)
+    if df is None:
+        return None
     matches = pd.DataFrame()
 
     if asassn_id:
@@ -241,7 +247,7 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, c
     }
 
 
-def lookup_metadata_for_path(path: Path):
+def lookup_metadata_for_path(path: Path, detection_results_csv=None):
     """
     Infer metadata for a given light-curve path.
     """
@@ -249,13 +255,13 @@ def lookup_metadata_for_path(path: Path):
     stem = path.stem
     source_type = "SkyPatrol" if path.suffix.lower() == ".csv" else "Internal"
 
-    meta = lookup_source_metadata(asassn_id=stem, dat_path=str(path))
+    meta = lookup_source_metadata(asassn_id=stem, dat_path=str(path), csv_path=detection_results_csv)
 
     if not meta and "-light-curves" in stem:
-        meta = lookup_source_metadata(asassn_id=stem.replace("-light-curves", ""))
+        meta = lookup_source_metadata(asassn_id=stem.replace("-light-curves", ""), csv_path=detection_results_csv)
 
     if not meta and "-" in stem:
-        meta = lookup_source_metadata(asassn_id=stem.split("-")[0])
+        meta = lookup_source_metadata(asassn_id=stem.split("-")[0], csv_path=detection_results_csv)
 
     if not meta:
         return {"data_source": source_type}
@@ -277,6 +283,22 @@ BASELINE_FUNCTIONS = {
     "per_camera_gp_masked": per_camera_gp_baseline_masked,
 }
 
+PER_CAMERA_BASELINES = {
+    per_camera_mean_baseline,
+    per_camera_median_baseline,
+    per_camera_trend_baseline,
+    per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
+}
+
+PER_CAMERA_BASELINE_NAMES = {
+    "per_camera_mean",
+    "per_camera_median",
+    "per_camera_trend",
+    "per_camera_gp",
+    "per_camera_gp_masked",
+}
+
 
 def plot_bayes_results(
     csv_path: Path,
@@ -292,25 +314,36 @@ def plot_bayes_results(
     skip_events=False,
     plot_fits=False,
     jd_offset=2458000.0,
+    detection_results_csv=None,
 ):
     """Plot a light curve with Bayesian detection results and run fits."""
                       
     df = load_lightcurve_df(csv_path)
     if df.empty:
-        print(f"Warning: {csv_path.name} is empty")
-        return None
-    
-                              
+        raise ValueError(f"Light curve file is empty: {csv_path.name}")
+
+
     asas_sn_id = csv_path.stem.split("-")[0]
     
                                                                    
+    baseline_name = None
     if baseline_func is None:
         baseline_func = per_camera_gp_baseline
     if baseline_kwargs is None:
         baseline_kwargs = {}
     # allow alias strings for baseline selection
     if isinstance(baseline_func, str):
+        baseline_name = baseline_func
         baseline_func = BASELINE_FUNCTIONS.get(baseline_func, per_camera_gp_baseline)
+    if baseline_name is None:
+        for name, func in BASELINE_FUNCTIONS.items():
+            if func is baseline_func:
+                baseline_name = name
+                break
+    per_camera_baseline = (
+        baseline_func in PER_CAMERA_BASELINES
+        or (baseline_name in PER_CAMERA_BASELINE_NAMES)
+    )
     
     print(f"Analyzing {asas_sn_id}...")
     
@@ -416,17 +449,33 @@ def plot_bayes_results(
         if "baseline" in band_df.columns:
             baseline_finite = band_df[np.isfinite(band_df["baseline"])]
             if not baseline_finite.empty:
-                baseline_sorted = baseline_finite.sort_values("JD_plot")
-                ax_main.plot(
-                    baseline_sorted["JD_plot"],
-                    baseline_sorted["baseline"],
-                    color="orange",
-                    linestyle="-",
-                    linewidth=2,
-                    alpha=0.8,
-                    label="Baseline",
-                    zorder=5,
-                )
+                if per_camera_baseline:
+                    for cam in camera_ids:
+                        cam_baseline = baseline_finite[baseline_finite["camera_label"] == cam]
+                        if cam_baseline.empty:
+                            continue
+                        cam_sorted = cam_baseline.sort_values("JD_plot")
+                        ax_main.plot(
+                            cam_sorted["JD_plot"],
+                            cam_sorted["baseline"],
+                            color=camera_colors[cam],
+                            linestyle="-",
+                            linewidth=1.6,
+                            alpha=0.8,
+                            zorder=5,
+                        )
+                else:
+                    baseline_sorted = baseline_finite.sort_values("JD_plot")
+                    ax_main.plot(
+                        baseline_sorted["JD_plot"],
+                        baseline_sorted["baseline"],
+                        color="orange",
+                        linestyle="-",
+                        linewidth=2,
+                        alpha=0.8,
+                        label="Baseline",
+                        zorder=5,
+                    )
         
                                                                   
         band_res = band_results[band]
@@ -581,14 +630,15 @@ def plot_bayes_results(
             ax_resid.axhline(0, color="orange", linestyle="-", linewidth=1, alpha=0.5)
             ax_resid.set_ylabel(f"{band_labels[band]} residual [mag]", fontsize=12)
             ax_resid.grid(True, alpha=0.3)
+            ax_resid.invert_yaxis()
         
         if band_idx == 1:
             ax_main.set_xlabel("Julian Date - 2458000 [d]", fontsize=12)
             ax_resid.set_xlabel("Julian Date - 2458000 [d]", fontsize=12)
     
-           
+
     title_parts = [f"ID: {asas_sn_id}"]
-    meta = lookup_metadata_for_path(csv_path) or {}
+    meta = lookup_metadata_for_path(csv_path, detection_results_csv=detection_results_csv) or {}
     if meta.get("source"):
         title_parts.append(str(meta["source"]))
     if meta.get("category"):
@@ -707,12 +757,47 @@ def main():
         default=2458000.0,
         help="JD offset for plotting (default: 2458000.0)",
     )
+    parser.add_argument("--gp-sigma", type=float, default=None, help="GP sigma parameter.")
+    parser.add_argument("--gp-rho", type=float, default=None, help="GP rho parameter.")
+    parser.add_argument("--gp-q", type=float, default=None, help="GP Q parameter (default: 0.7).")
+    parser.add_argument("--gp-s0", type=float, default=None, help="GP S0 parameter (alt parameterization).")
+    parser.add_argument("--gp-w0", type=float, default=None, help="GP w0 parameter (alt parameterization).")
+    parser.add_argument("--gp-jitter", type=float, default=None, help="GP jitter term (default: 0.006).")
+    parser.add_argument("--gp-sigma-floor", type=float, default=None, help="Extra GP sigma floor.")
+    parser.add_argument("--gp-floor-clip", type=float, default=None, help="Sigma floor clipping threshold.")
+    parser.add_argument("--gp-floor-iters", type=int, default=None, help="Sigma floor clipping iterations.")
+    parser.add_argument("--gp-min-floor-points", type=int, default=None, help="Minimum points for sigma floor.")
+    parser.add_argument(
+        "--detection-results",
+        type=Path,
+        default=None,
+        help="Optional detection results CSV for metadata lookup",
+    )
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
 
     args = parser.parse_args()
     
     baseline_func = BASELINE_FUNCTIONS[args.baseline]
     baseline_kwargs = {}
+
+    gp_kwargs = {
+        "sigma": args.gp_sigma,
+        "rho": args.gp_rho,
+        "q": args.gp_q,
+        "S0": args.gp_s0,
+        "w0": args.gp_w0,
+        "jitter": args.gp_jitter,
+        "sigma_floor": args.gp_sigma_floor,
+        "floor_clip": args.gp_floor_clip,
+        "floor_iters": args.gp_floor_iters,
+        "min_floor_points": args.gp_min_floor_points,
+    }
+    gp_kwargs = {k: v for k, v in gp_kwargs.items() if v is not None}
+    if gp_kwargs:
+        if baseline_func in (per_camera_gp_baseline, per_camera_gp_baseline_masked):
+            baseline_kwargs.update(gp_kwargs)
+        else:
+            print("Warning: GP parameters were provided but baseline is not a GP baseline; ignoring.", flush=True)
     
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -752,29 +837,24 @@ def main():
     for csv_path in csv_paths:
         csv_path = Path(csv_path)
         if not csv_path.exists():
-            print(f"Warning: {csv_path} does not exist, skipping")
-            continue
-        
+            raise FileNotFoundError(f"Light curve file does not exist: {csv_path}")
+
         asas_sn_id = csv_path.stem.split("-")[0]
         out_path = args.out_dir / f"{asas_sn_id}_dips.{args.format}"
-        
-        try:
-            plot_bayes_results(
-                csv_path,
-                out_path=out_path,
-                show=args.show,
-                baseline_func=baseline_func,
-                baseline_kwargs=baseline_kwargs,
-                logbf_threshold_dip=args.logbf_threshold_dip,
-                logbf_threshold_jump=args.logbf_threshold_jump,
-                skip_events=args.skip_events,
-                plot_fits=args.plot_fits,
-                jd_offset=args.jd_offset,
-            )
-        except Exception as e:
-            print(f"Error plotting {csv_path}: {e}")
-            import traceback
-            traceback.print_exc()
+
+        plot_bayes_results(
+            csv_path,
+            out_path=out_path,
+            show=args.show,
+            baseline_func=baseline_func,
+            baseline_kwargs=baseline_kwargs,
+            logbf_threshold_dip=args.logbf_threshold_dip,
+            logbf_threshold_jump=args.logbf_threshold_jump,
+            skip_events=args.skip_events,
+            plot_fits=args.plot_fits,
+            jd_offset=args.jd_offset,
+            detection_results_csv=args.detection_results,
+        )
 
 
 if __name__ == "__main__":

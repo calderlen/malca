@@ -42,6 +42,13 @@ BASELINE_FUNCTIONS = {
     "per_camera_gp": per_camera_gp_baseline,
 }
 
+PER_CAMERA_BASELINES = {
+    per_camera_mean_baseline,
+    per_camera_median_baseline,
+    per_camera_trend_baseline,
+    per_camera_gp_baseline,
+}
+
 
 def plot_bayes_results(
     csv_path: Path,
@@ -70,6 +77,7 @@ def plot_bayes_results(
         baseline_func = per_camera_gp_baseline
     if baseline_kwargs is None:
         baseline_kwargs = {}
+    per_camera_baseline = baseline_func in PER_CAMERA_BASELINES
     
     print(f"Analyzing {asas_sn_id}...")
     
@@ -163,17 +171,33 @@ def plot_bayes_results(
         if "baseline" in band_df.columns:
             baseline_finite = band_df[np.isfinite(band_df["baseline"])]
             if not baseline_finite.empty:
-                baseline_sorted = baseline_finite.sort_values("JD_plot")
-                ax_main.plot(
-                    baseline_sorted["JD_plot"],
-                    baseline_sorted["baseline"],
-                    color="orange",
-                    linestyle="-",
-                    linewidth=2,
-                    alpha=0.8,
-                    label="Baseline",
-                    zorder=5,
-                )
+                if per_camera_baseline:
+                    for cam in camera_ids:
+                        cam_baseline = baseline_finite[baseline_finite["camera#"] == cam]
+                        if cam_baseline.empty:
+                            continue
+                        cam_sorted = cam_baseline.sort_values("JD_plot")
+                        ax_main.plot(
+                            cam_sorted["JD_plot"],
+                            cam_sorted["baseline"],
+                            color=camera_colors[cam],
+                            linestyle="-",
+                            linewidth=1.6,
+                            alpha=0.8,
+                            zorder=5,
+                        )
+                else:
+                    baseline_sorted = baseline_finite.sort_values("JD_plot")
+                    ax_main.plot(
+                        baseline_sorted["JD_plot"],
+                        baseline_sorted["baseline"],
+                        color="orange",
+                        linestyle="-",
+                        linewidth=2,
+                        alpha=0.8,
+                        label="Baseline",
+                        zorder=5,
+                    )
         
                                                                   
         band_res = band_results[band]
@@ -322,6 +346,7 @@ def plot_bayes_results(
             ax_resid.axhline(0, color="orange", linestyle="-", linewidth=1, alpha=0.5)
             ax_resid.set_ylabel(f"{band_labels[band]} residual [mag]", fontsize=12)
             ax_resid.grid(True, alpha=0.3)
+            ax_resid.invert_yaxis()
         
         if band_idx == 1:
             ax_main.set_xlabel("Julian Date - 2458000 [d]", fontsize=12)

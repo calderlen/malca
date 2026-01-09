@@ -137,6 +137,32 @@
 - False-positive reduction summary (pre vs post filter):
   `python -m malca.fp_analysis --pre /output/pre.csv --post /output/post.csv`
 
+### CLI modules
+- `malca.manifest`: `python -m malca.manifest --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --mag-bin 13_13.5 --out /output/lc_manifest_13_13.5.parquet --workers 10`
+- `malca.events_filtered`: `python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-catalog input/vsx/vsx_cleaned.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /output/lc_events_results_13_13.5.csv --workers 10`
+- `malca.events`: `python -m malca.events --input /path/to/lc*_cal/*.dat2 --output /output/results.csv --workers 10`
+- `malca.post_filter`: `python -m malca.post_filter --input /output/results.csv --output /output/results_filtered.csv`
+- `malca.plot`: `python -m malca.plot --input /path/to/lc123.dat2 --out-dir /output/plots --format png`
+- `malca.score`: `python -m malca.score --events /output/results.csv --output /output/dipper_scores.csv --event-type dip`
+- `malca.injection_recovery`: `python -m malca.injection_recovery --manifest /output/lc_manifest_13_13.5.parquet --out /output/injection_recovery_13_13.5.csv --workers 10`
+- `malca.ltv`: `python -m malca.ltv --mag-bin 13_13.5 --output /output/ltv_13_13.5.csv --workers 10`
+- `malca.stats`: `python -m malca.stats /path/to/lc123.dat2`
+- `malca.fp_analysis`: `python -m malca.fp_analysis --pre /output/pre.csv --post /output/post.csv`
+- `malca.reproduction`: `python -m malca.reproduction --method bayes --manifest /output/lc_manifest.parquet --candidates /output/targets.csv --out-dir /output/results_repro --out-format csv --workers 10`
+- `malca.vsx_filter`: `python -m malca.vsx_filter`
+- `malca.vsx_crossmatch`: `python -m malca.vsx_crossmatch`
+- `malca.vsx_reproducibility`: `python -m malca.vsx_reproducibility`
+- `malca.skypatrol_explore`: `python -m malca.skypatrol_explore`
+
+#### Legacy/old scripts
+- `malca.old.plot_results_bayes`: `python -m malca.old.plot_results_bayes /path/to/*-light-curves.csv --results-csv /output/results.csv --out-dir /output/plots`
+- `malca.old.plot_results`: `python -m malca.old.plot_results /output/peaks.csv --csv-dir input/skypatrol2 --out-dir /output/plots`
+- `malca.old.lc_events`: `python -m malca.old.lc_events --mode dips --mag-bin 13_13.5 --out-dir /output/lc_events_old --format csv --workers 10`
+- `malca.old.lc_filter`: `python -m malca.old.lc_filter /output/peaks.csv --output /output/peaks_filtered.csv`
+- `malca.old.falsepositives`: `python -m malca.old.falsepositives --pre /output/pre.csv --post /output/post.csv`
+- `malca.old.stats`: `python -m malca.old.stats /path/to/lc123.dat2`
+- `malca.old.test_skypatrol`: `python -m malca.old.test_skypatrol input/skypatrol2/*.csv --out /output/test_results.csv`
+
 ### Notes
 - Always generate the manifest first; everything else depends on knowing where each `<asas_sn_id>.dat2` lives.
 - VSX filter is enabled by default in `events_filtered.py` - requires `input/vsx/vsx_cleaned.csv` catalog
