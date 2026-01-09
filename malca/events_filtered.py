@@ -243,7 +243,7 @@ def main():
         print(f"\nRunning batch {batch_idx + 1}/{total_batches} ({len(batch_paths)} LCs)...")
 
         events_cmd = [
-            "python", "-m", "events",
+            sys.executable, "-m", "malca.events",
             *events_args,
             *batch_paths,
         ]
