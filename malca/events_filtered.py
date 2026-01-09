@@ -9,7 +9,7 @@ Workflow:
 4. Pass to events.py
 
 Usage:
-    python -m events_filtered --mag-bin 13_13.5 [events.py args...]
+    python -m malca.events_filtered --mag-bin 13_13.5 [events.py args...]
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ import pandas as pd
 from tqdm import tqdm
 import tempfile
 
-from manifest import build_manifest_dataframe
-from pre_filter import apply_pre_filters
+from malca.manifest import build_manifest_dataframe
+from malca.pre_filter import apply_pre_filters
 
 
 def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
