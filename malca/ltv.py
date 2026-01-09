@@ -63,6 +63,7 @@ class Config:
     chunk_size: int
     output_format: str
     resume: bool
+    overwrite: bool
 
 
 def parse_args() -> Config:
@@ -131,6 +132,9 @@ def parse_args() -> Config:
     p.add_argument("--resume",
                    action="store_true",
                    help="Enable checkpointing to resume interrupted runs")
+    p.add_argument("-o", "--overwrite",
+                   action="store_true",
+                   help="Overwrite existing checkpoint log when resuming (implies --resume)")
 
     a = p.parse_args()
 
@@ -142,6 +146,8 @@ def parse_args() -> Config:
     output = Path(out)
 
     n_midpoints = a.n_midpoints if a.n_midpoints is not None else (a.dir_end + 1)
+
+    resume = bool(a.resume or a.overwrite)
 
     return Config(
         root=root,
@@ -159,7 +165,8 @@ def parse_args() -> Config:
         workers=int(a.workers),
         chunk_size=int(a.chunk_size),
         output_format=str(a.output_format),
-        resume=bool(a.resume),
+        resume=resume,
+        overwrite=bool(a.overwrite),
     )
 
 
@@ -541,7 +548,15 @@ def main() -> None:
     checkpoint_log = output_path.with_name(f"{output_path.stem}_PROCESSED.txt") if cfg.resume else None
 
     processed_files = set()
-    if checkpoint_log and checkpoint_log.exists():
+    if checkpoint_log and checkpoint_log.exists() and cfg.overwrite:
+        try:
+            with open(checkpoint_log, "w"):
+                pass
+            print(f"Overwriting checkpoint log: {checkpoint_log}")
+        except Exception as e:
+            print(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
+
+    if checkpoint_log and checkpoint_log.exists() and not cfg.overwrite:
         print(f"Resume mode: loading checkpoint from {checkpoint_log}")
         with open(checkpoint_log, "r") as f:
             processed_files = set(line.strip() for line in f)

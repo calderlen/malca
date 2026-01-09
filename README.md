@@ -28,11 +28,15 @@
    - Resume: if interrupted, it skips already processed paths using the `*_PROCESSED.txt` checkpoint next to the output.
    - To disable VSX filter: add `--skip-vsx`
 
-3) Post-filter events (expensive validations on candidates only):
+3) Post-filter events (strict quality cuts on candidates only):
    ```bash
    python -m malca.post_filter --input /output/lc_events_results_13_13.5.csv --output /output/lc_events_results_13_13.5_filtered.csv
+
+   # With custom thresholds
+   python -m malca.post_filter --input results.csv --output filtered.csv --min-bayes-factor 20 --min-event-prob 0.7 --apply-morphology
    ```
-   - Post-filters: periodicity (LSP), Gaia RUWE, periodic catalog crossmatch
+   - **Implemented filters**: posterior strength (Bayes factors), event probability, run robustness, morphology
+   - **Placeholder filters** (not yet implemented): periodicity (LSP), Gaia RUWE, periodic catalog crossmatch
 
 ## Pipeline Architecture
 
@@ -65,14 +69,27 @@
   `python malca/reproduce_candidates.py --method bayes --manifest /output/lc_manifest.parquet --candidates my_targets.csv --out-dir /output/results_repro --out-format csv --workers 10`
 - Batch reproduction helper (same idea, alternate entry point):
   `python malca/reproduction.py --method bayes --manifest /output/lc_manifest.parquet --candidates my_targets.csv --out-dir /output/results_repro --out-format csv --workers 10`
-- Plot a single light curve with baseline/residuals:
-  `python -m malca.plot --input /path/to/lc123.dat2 --output /output/plot.png`
-- Plot all light curves that survive post-filtering (PNG default, PDF optional):
-  `python -m malca.plot --events /output/lc_events_results_13_13.5_filtered.csv --out-dir /output/plots --format png`
-- Batch plot Bayesian results:
-  `python malca/plot_results_bayes.py --input /output/lc_events_results_13_13.5.csv --out-dir /output/plots`
-- Dipper scoring metric on events output (dip_significant by default):
-  `python -m malca.dipper_score --events /output/lc_events_results_13_13.5.csv --output /output/dipper_scores.csv`
+- Plot light curves with baseline/residuals:
+  ```bash
+  # Single file
+  python -m malca.plot --input /path/to/lc123.dat2 --out-dir /output/plots --format png
+
+  # Multiple files (glob patterns supported)
+  python -m malca.plot --input input/skypatrol2/*.csv --out-dir /output/plots --skip-events
+
+  # All files from events.py results
+  python -m malca.plot --events /output/lc_events_results_13_13.5_filtered.csv --out-dir /output/plots
+  ```
+- Batch plot Bayesian results (SkyPatrol CSVs, filtered by events output):
+  `python -m malca.plot_results_bayes /path/to/*-light-curves.csv --results-csv /output/lc_events_results_13_13.5.csv --out-dir /output/plots`
+- Event scoring (dips or microlensing):
+  ```bash
+  # Score dip events (default)
+  python -m malca.score --events /output/lc_events_results_13_13.5.csv --output /output/dipper_scores.csv --event-type dip
+
+  # Score microlensing events (Paczyński curves)
+  python -m malca.score --events /output/lc_events_results_13_13.5.csv --output /output/microlens_scores.csv --event-type microlensing
+  ```
 - Plot metrics (multiple y vs p_points/mag_points; optional 3D scatter via matplotlib 3D):
   ```python
   import pandas as pd
@@ -83,33 +100,27 @@
   plot_3d_surface(df, x_col="p_points", y_col="mag_points", z_col="dip_bd", color_col="elapsed_s")
   ```
 - Injection-recovery testing (validate pipeline completeness/contamination):
+  `python -m malca.injection_recovery --manifest /output/lc_manifest_13_13.5.parquet --out /output/injection_recovery_13_13.5.csv --workers 10`
   ```python
   from malca.injection_recovery import (
       select_control_sample,
       run_injection_recovery,
       compute_detection_efficiency,
-      plot_detection_efficiency
+      plot_detection_efficiency,
   )
   import pandas as pd
   import numpy as np
 
-  # Load manifest and select 10,000 clean control LCs
   manifest = pd.read_parquet("/output/lc_manifest_13_13.5.parquet")
   control_sample = select_control_sample(manifest, n_sample=10000)
 
-  # Define detection function (your pipeline)
-  def my_detection_func(df_lc):
-      # Run events.py logic on single LC
-      # Return True if dip detected, False otherwise
-      pass
-
-  # Run injection-recovery on amplitude × duration grid
   results = run_injection_recovery(
       control_sample,
-      my_detection_func,
-      amplitude_grid=np.linspace(0.1, 2.0, 100),  # 100 amplitude values
-      duration_grid=np.logspace(0.5, 2.5, 100),   # 100 duration values (log scale)
-      n_injections_per_grid=100                    # 100 trials per grid point
+      detection_kwargs={},  # uses events.py defaults
+      amplitude_grid=np.linspace(0.1, 2.0, 100),
+      duration_grid=np.logspace(0.5, 2.5, 100),
+      n_injections_per_grid=100,
+      workers=10,
   )
 
   # Compute and plot detection efficiency
@@ -119,6 +130,12 @@
   - Injects synthetic dips with skew-normal profiles and realistic noise
   - Measures completeness as function of dip amplitude and duration
   - Generates heatmap like ZTF dipper paper Figure 5
+- Seasonal trend summary (LTVar-style):
+  `python -m malca.ltv --mag-bin 13_13.5 --output /output/ltv_13_13.5.csv --workers 10`
+- Quick stats for a single LC file:
+  `python -m malca.stats /path/to/lc123.dat2`
+- False-positive reduction summary (pre vs post filter):
+  `python -m malca.fp_analysis --pre /output/pre.csv --post /output/post.csv`
 
 ### Notes
 - Always generate the manifest first; everything else depends on knowing where each `<asas_sn_id>.dat2` lives.

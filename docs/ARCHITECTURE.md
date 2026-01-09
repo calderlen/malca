@@ -30,8 +30,9 @@
   - wrapper script: build/load manifest, run pre-filters, and call `malca.events` in batches with resume support
 - `malca/plot_metrics.py`
   - plotting helpers for light-curve metrics (2D multi-metric plots and simple 3D scatter)
-- `malca/dipper_score.py`
-  - dipper scoring metric based on dip depth, width, detections, and Gaussian fit chi2
+- `malca/score.py`
+  - event scoring metric for both dips (Gaussian fits) and microlensing (Paczyński curves)
+  - computes scores based on event amplitude, width, detections, and fit chi2
 
 ## Legacy Python modules (`malca/old/`)
 - `df_utils.py`

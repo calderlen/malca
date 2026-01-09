@@ -47,6 +47,32 @@ def parse_output_path(events_args: list[str]) -> Path | None:
     return None
 
 
+def parse_output_format(events_args: list[str]) -> str:
+    """Find --output-format value in events args if provided."""
+    for i, arg in enumerate(events_args):
+        if arg == "--output-format" and i + 1 < len(events_args):
+            return str(events_args[i + 1]).lower()
+    return "csv"
+
+
+def clear_existing_output(path: Path | None, fmt: str) -> None:
+    if path is None or (not path.exists()):
+        return
+    try:
+        if fmt == "parquet_chunk" and path.is_dir():
+            removed_any = False
+            for child in path.glob("chunk_*.parquet*"):
+                child.unlink()
+                removed_any = True
+            if removed_any:
+                print(f"Overwriting existing output chunks in {path}")
+        else:
+            path.unlink()
+            print(f"Overwriting existing output file: {path}")
+    except Exception as e:
+        print(f"Warning: could not remove existing output {path}: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run events.py on pre-filtered light curves",
@@ -80,6 +106,8 @@ def main():
     parser.add_argument("--vsx-catalog", type=Path, default=Path("input/vsx/vsx_cleaned.csv"), help="Path to VSX catalog CSV")
     parser.add_argument("--workers", type=int, default=10, help="Workers for pre-filter stats.")
     parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call to limit arg size and allow resume")
+    parser.add_argument("-o", "--overwrite", action="store_true",
+                        help="Overwrite checkpoint log and existing output if present (start fresh).")
 
     # Parse known args, rest go to events.py
     args, events_args = parser.parse_known_args()
@@ -89,6 +117,7 @@ def main():
 
     # IMPORTANT: never write to filesystem root (/output). Default to a writable directory.
     events_output = parse_output_path(events_args)
+    events_format = parse_output_format(events_args)
     if args.filtered_file is not None:
         out_dir = Path(args.filtered_file).expanduser().parent
     elif args.manifest_file is not None:
@@ -173,9 +202,24 @@ def main():
 
     # Resume logic: skip paths already recorded in events checkpoint log if present
     base_output = events_output or (out_dir / "lc_events_results.csv")
+    suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None, "duckdb": ".duckdb"}
+    ext = suffix_map.get(events_format)
+    if ext and base_output.suffix.lower() != ext:
+        base_output = base_output.with_suffix(ext)
     checkpoint_log = base_output.with_name(f"{base_output.stem}_PROCESSED.txt")
     processed_paths: set[str] = set()
-    if checkpoint_log.exists():
+    if checkpoint_log.exists() and args.overwrite:
+        try:
+            with open(checkpoint_log, "w"):
+                pass
+            print(f"Overwriting checkpoint log: {checkpoint_log}")
+        except Exception as e:
+            print(f"Warning: could not overwrite checkpoint log {checkpoint_log}: {e}")
+
+    if args.overwrite:
+        clear_existing_output(base_output, events_format)
+
+    if checkpoint_log.exists() and not args.overwrite:
         try:
             with open(checkpoint_log, "r") as f:
                 processed_paths = {line.strip() for line in f if line.strip()}

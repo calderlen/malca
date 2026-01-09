@@ -34,7 +34,7 @@ from malca.baseline import (
     per_camera_gp_baseline_masked,
     per_camera_trend_baseline,
 )
-from malca.dipper_score import compute_dipper_score
+from malca.score import compute_event_score
 
 from numba import njit
 
@@ -275,10 +275,11 @@ def filter_runs(
     jd: np.ndarray,
     score_vec: np.ndarray,
     *,
-    min_points: int = 3,
+    min_points: int = 2,
     min_duration_days: float | None = None,
     per_point_threshold: float | None = None,
     sum_threshold: float | None = None,
+    cam_vec: np.ndarray | None = None,
 ):
     """
     filter runs by minimum points, minimum duration, per_point_threshold, sum_threshold; returns dict of kept runs' starting and ending indices/JDs, number of points
@@ -307,6 +308,12 @@ def filter_runs(
         vals = score_vec[r]
         run_max = float(np.nanmax(vals)) if np.isfinite(vals).any() else np.nan
         run_sum = float(np.nansum(vals)) if np.isfinite(vals).any() else np.nan
+        run_n_cameras = None
+        if cam_vec is not None:
+            cams = np.asarray(cam_vec[r])
+            if cams.size:
+                cams = cams[~pd.isna(cams)]
+            run_n_cameras = int(np.unique(cams.astype(str)).size) if cams.size else 0
 
         ok = True
         if n < int(min_points):
@@ -328,6 +335,7 @@ def filter_runs(
                 duration_days=dur,
                 run_max=run_max,
                 run_sum=run_sum,
+                run_n_cameras=run_n_cameras,
                 kept=bool(ok),
             )
         )
@@ -338,7 +346,12 @@ def filter_runs(
     return kept, summaries
 
 
-def summarize_kept_runs(kept_runs, jd: np.ndarray, score_vec: np.ndarray):
+def summarize_kept_runs(
+    kept_runs,
+    jd: np.ndarray,
+    score_vec: np.ndarray,
+    cam_vec: np.ndarray | None = None,
+):
     """
     
     """
@@ -352,12 +365,14 @@ def summarize_kept_runs(kept_runs, jd: np.ndarray, score_vec: np.ndarray):
             max_run_duration=np.nan,
             max_run_sum=np.nan,
             max_run_max=np.nan,
+            max_run_cameras=0,
         )
 
     max_pts = 0
     max_dur = -np.inf
     max_sum = -np.inf
     max_max = -np.inf
+    max_cams = 0
 
     for r in kept_runs:
         r = np.asarray(r, int)
@@ -371,6 +386,12 @@ def summarize_kept_runs(kept_runs, jd: np.ndarray, score_vec: np.ndarray):
         if np.isfinite(vals).any():
             max_sum = max(max_sum, float(np.nansum(vals)))
             max_max = max(max_max, float(np.nanmax(vals)))
+        if cam_vec is not None:
+            cams = np.asarray(cam_vec[r])
+            if cams.size:
+                cams = cams[~pd.isna(cams)]
+            run_n_cameras = int(np.unique(cams.astype(str)).size) if cams.size else 0
+            max_cams = max(max_cams, run_n_cameras)
 
     return dict(
         n_runs=int(len(kept_runs)),
@@ -378,6 +399,7 @@ def summarize_kept_runs(kept_runs, jd: np.ndarray, score_vec: np.ndarray):
         max_run_duration=float(max_dur) if np.isfinite(max_dur) else np.nan,
         max_run_sum=float(max_sum) if np.isfinite(max_sum) else np.nan,
         max_run_max=float(max_max) if np.isfinite(max_max) else np.nan,
+        max_run_cameras=int(max_cams),
     )
 
 
@@ -498,7 +520,7 @@ def bayesian_event_significance(
     logbf_threshold: float = 5.0,
     significance_threshold: float = 99.99997,
 
-    run_min_points: int = 3,
+    run_min_points: int = 2,
     run_allow_gap_points: int = 1,
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
@@ -517,6 +539,7 @@ def bayesian_event_significance(
       - global bayes_factor
     """
     df = clean_lc(df)
+    cam_vec = df["camera"].to_numpy() if "camera" in df.columns else None
     jd = np.asarray(df["JD"], float)
     mags = np.asarray(df[mag_col], float)
 
@@ -635,6 +658,8 @@ def bayesian_event_significance(
         baseline_mags = baseline_mags[valid_mask]
         baseline_sources = baseline_sources[valid_mask]
         jd = jd[valid_mask]
+        if cam_vec is not None:
+            cam_vec = cam_vec[valid_mask]
 
     baseline_mag = float(np.nanmedian(baseline_mags))
 
@@ -691,6 +716,8 @@ def bayesian_event_significance(
         baseline_mags = baseline_mags[valid_points]
         baseline_sources = baseline_sources[valid_points]
         jd = jd[valid_points]
+        if cam_vec is not None:
+            cam_vec = cam_vec[valid_points]
         log_Pb_grid = log_Pb_grid[:, valid_points]
         log_Pf_grid = log_Pf_grid[:, valid_points]
         if kind == "dip":
@@ -818,7 +845,7 @@ def bayesian_event_significance(
     if raw_idx.size == 0:
         event_indices = np.array([], dtype=int)
         significant = False
-        run_stats = summarize_kept_runs([], jd, score_vec)
+        run_stats = summarize_kept_runs([], jd, score_vec, cam_vec=cam_vec)
     else:
         runs = build_runs(
             raw_idx,
@@ -835,6 +862,7 @@ def bayesian_event_significance(
             min_duration_days=run_min_duration_days,
             per_point_threshold=trigger_threshold_used,
             sum_threshold=run_sum_threshold_eff,
+            cam_vec=cam_vec,
         )
 
         final_summaries = []
@@ -853,7 +881,7 @@ def bayesian_event_significance(
             event_indices = np.array([], dtype=int)
             significant = False
 
-        run_stats = summarize_kept_runs(kept_runs, jd, score_vec)
+        run_stats = summarize_kept_runs(kept_runs, jd, score_vec, cam_vec=cam_vec)
 
     return dict(
         kind=str(kind),
@@ -905,7 +933,7 @@ def run_bayesian_significance(
     logbf_threshold_jump: float = 5.0,
     significance_threshold: float = 99.99997,
 
-    run_min_points: int = 3,
+    run_min_points: int = 2,
     run_allow_gap_points: int = 1,
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
@@ -1156,10 +1184,10 @@ def process_one(
     dipper_n_dips = 0
     dipper_n_valid_dips = 0
     if bool(dip["significant"]):
-        score, dips = compute_dipper_score(df)
+        score, events = compute_event_score(df, event_type='dip')
         dipper_score = float(score)
-        dipper_n_dips = int(len(dips))
-        dipper_n_valid_dips = int(sum(1 for d in dips if d.valid))
+        dipper_n_dips = int(len(events))
+        dipper_n_valid_dips = int(sum(1 for e in events if e.valid))
 
     return dict(
         path=str(path),
@@ -1194,6 +1222,8 @@ def process_one(
         jump_max_run_sum=float(jump.get("max_run_sum", np.nan)),
         dip_max_run_max=float(dip.get("max_run_max", np.nan)),
         jump_max_run_max=float(jump.get("max_run_max", np.nan)),
+        dip_max_run_cameras=int(dip.get("max_run_cameras", 0)),
+        jump_max_run_cameras=int(jump.get("max_run_cameras", 0)),
 
         dip_max_log_bf_local=float(dip.get("max_log_bf_local", np.nan)),
         jump_max_log_bf_local=float(jump.get("max_log_bf_local", np.nan)),
@@ -1241,7 +1271,7 @@ def main():
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger")
     parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Only used if --trigger-mode posterior_prob")
     parser.add_argument("--p-points", type=int, default=12, help="Number of points in the logit-spaced p grid")
-    parser.add_argument("--run-min-points", type=int, default=3, help="Min triggered points in a run")
+    parser.add_argument("--run-min-points", type=int, default=2, help="Min triggered points in a run")
     parser.add_argument("--run-allow-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
     parser.add_argument("--run-min-duration-days", type=float, default=None, help="Require run duration >= this")
@@ -1258,6 +1288,7 @@ def main():
     parser.add_argument("--output", type=str, default="./output/lc_events_results.csv", help="Output path for results (suffix adjusted per format).")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format for results.")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
+    parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
 
     args = parser.parse_args()
     if args.trigger_mode == "posterior_prob" and args.no_event_prob:
@@ -1310,6 +1341,23 @@ def main():
             print(f"Warning: could not read existing output {path} to skip duplicates: {e}", flush=True)
         return set()
 
+    def clear_existing_output(path: Path | None, fmt: str) -> None:
+        if path is None or (not path.exists()):
+            return
+        try:
+            if fmt == "parquet_chunk" and path.is_dir():
+                removed_any = False
+                for child in path.glob("chunk_*.parquet*"):
+                    child.unlink()
+                    removed_any = True
+                if removed_any:
+                    print(f"Overwriting existing output chunks in {path}", flush=True)
+            else:
+                path.unlink()
+                print(f"Overwriting existing output file: {path}", flush=True)
+        except Exception as e:
+            print(f"Warning: Could not remove existing output {path} ({e}). Will append.", flush=True)
+
     # checkpoint
     base_output_path = ensure_suffix(Path(args.output).expanduser() if args.output else None, output_format)
     if args.mag_bins and base_output_path is not None:
@@ -1323,7 +1371,18 @@ def main():
         checkpoint_log = None
 
     processed_files = set()
-    if checkpoint_log and checkpoint_log.exists():
+    if checkpoint_log and checkpoint_log.exists() and args.overwrite:
+        try:
+            with open(checkpoint_log, "w"):
+                pass
+            print(f"Overwriting checkpoint log: {checkpoint_log}", flush=True)
+        except Exception as e:
+            print(f"Warning: Could not overwrite checkpoint file ({e}). Continuing without resume.", flush=True)
+
+    if args.overwrite:
+        clear_existing_output(base_output_path, output_format)
+
+    if checkpoint_log and checkpoint_log.exists() and not args.overwrite:
         print(f"--- RESUME DETECTED ---", flush=True)
         print(f"Reading processed files from: {checkpoint_log}", flush=True)
         try:
@@ -1334,7 +1393,8 @@ def main():
             print(f"Warning: Could not read checkpoint file ({e}). Starting fresh.", flush=True)
 
     # existing output (avoid duplicates if checkpoint was out-of-sync)
-    processed_files |= collect_processed_from_output(base_output_path, output_format)
+    if not args.overwrite:
+        processed_files |= collect_processed_from_output(base_output_path, output_format)
 
     input_patterns: list[str] = []
     if args.input_patterns:

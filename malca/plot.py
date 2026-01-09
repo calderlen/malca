@@ -290,6 +290,8 @@ def plot_bayes_results(
     logbf_threshold_dip=5.0,
     logbf_threshold_jump=5.0,
     skip_events=False,
+    plot_fits=False,
+    jd_offset=2458000.0,
 ):
     """Plot a light curve with Bayesian detection results and run fits."""
                       
@@ -344,7 +346,7 @@ def plot_bayes_results(
     df = df[np.isfinite(df["JD"]) & np.isfinite(df["mag"])].copy()
     median_jd = df["JD"].median()
     if median_jd > 2000000:
-        df["JD_plot"] = df["JD"] - JD_OFFSET
+        df["JD_plot"] = df["JD"] - jd_offset
     else:
         df["JD_plot"] = df["JD"] - 8000.0
     
@@ -438,8 +440,8 @@ def plot_bayes_results(
                 jd_end = run_summary["end_jd"]
                 
                                     
-                jd_plot_start = jd_start - (JD_OFFSET if median_jd > 2000000 else 8000.0)
-                jd_plot_end = jd_end - (JD_OFFSET if median_jd > 2000000 else 8000.0)
+                jd_plot_start = jd_start - (jd_offset if median_jd > 2000000 else 8000.0)
+                jd_plot_end = jd_end - (jd_offset if median_jd > 2000000 else 8000.0)
                 ax_main.axvline(jd_plot_start, color="red", linestyle="--", alpha=0.7, linewidth=1.5)
                 if jd_plot_end != jd_plot_start:
                     ax_main.axvline(jd_plot_end, color="red", linestyle="--", alpha=0.7, linewidth=1.5)
@@ -450,45 +452,47 @@ def plot_bayes_results(
                 
                 if morph == "gaussian" and params:
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
-                    sigma = params.get("sigma", (jd_end - jd_start) / 4)
-                    amp = params.get("amp", 0.1)
-                    baseline = params.get("baseline", band_df["mag"].median())
-                    
-                                               
-                    t_fit = np.linspace(jd_start - 3*sigma, jd_end + 3*sigma, 100)
-                    mag_fit = gaussian(t_fit, amp, t0, sigma, baseline)
-                    
-                    t_fit_plot = t_fit - (JD_OFFSET if median_jd > 2000000 else 8000.0)
-                    ax_main.plot(
-                        t_fit_plot,
-                        mag_fit,
-                        color="red",
-                        linestyle="-",
-                        linewidth=2,
-                        alpha=0.8,
-                        label="Gaussian fit" if run_summary == dip["run_summaries"][0] else "",
-                    )
+                    if t0 is not None and np.isfinite(t0):
+                        t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.axvline(t0_plot, color="red", linestyle="--", alpha=0.7, linewidth=1.0)
+                    if plot_fits:
+                        sigma = params.get("sigma", (jd_end - jd_start) / 4)
+                        amp = params.get("amp", 0.1)
+                        baseline = params.get("baseline", band_df["mag"].median())
+                        t_fit = np.linspace(jd_start - 3 * sigma, jd_end + 3 * sigma, 100)
+                        mag_fit = gaussian(t_fit, amp, t0, sigma, baseline)
+                        t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.plot(
+                            t_fit_plot,
+                            mag_fit,
+                            color="red",
+                            linestyle="-",
+                            linewidth=2,
+                            alpha=0.8,
+                            label="Gaussian fit" if run_summary == dip["run_summaries"][0] else "",
+                        )
                 
                 elif morph == "paczynski" and params:
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
-                    tE = params.get("tE", (jd_end - jd_start) / 2)
-                    amp = params.get("amp", -0.1)
-                    baseline = params.get("baseline", band_df["mag"].median())
-                    
-                                               
-                    t_fit = np.linspace(jd_start - 3*tE, jd_end + 3*tE, 100)
-                    mag_fit = paczynski(t_fit, amp, t0, tE, baseline)
-                    
-                    t_fit_plot = t_fit - (JD_OFFSET if median_jd > 2000000 else 8000.0)
-                    ax_main.plot(
-                        t_fit_plot,
-                        mag_fit,
-                        color="blue",
-                        linestyle="-",
-                        linewidth=2,
-                        alpha=0.8,
-                        label="Paczynski fit" if run_summary == dip["run_summaries"][0] else "",
-                    )
+                    if t0 is not None and np.isfinite(t0):
+                        t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.axvline(t0_plot, color="red", linestyle="--", alpha=0.7, linewidth=1.0)
+                    if plot_fits:
+                        tE = params.get("tE", (jd_end - jd_start) / 2)
+                        amp = params.get("amp", -0.1)
+                        baseline = params.get("baseline", band_df["mag"].median())
+                        t_fit = np.linspace(jd_start - 3 * tE, jd_end + 3 * tE, 100)
+                        mag_fit = paczynski(t_fit, amp, t0, tE, baseline)
+                        t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.plot(
+                            t_fit_plot,
+                            mag_fit,
+                            color="blue",
+                            linestyle="-",
+                            linewidth=2,
+                            alpha=0.8,
+                            label="Paczynski fit" if run_summary == dip["run_summaries"][0] else "",
+                        )
         
                                         
         if (not skip_events) and jump["significant"] and jump.get("run_summaries"):
@@ -496,8 +500,8 @@ def plot_bayes_results(
                 jd_start = run_summary["start_jd"]
                 jd_end = run_summary["end_jd"]
                 
-                jd_plot_start = jd_start - (JD_OFFSET if median_jd > 2000000 else 8000.0)
-                jd_plot_end = jd_end - (JD_OFFSET if median_jd > 2000000 else 8000.0)
+                jd_plot_start = jd_start - (jd_offset if median_jd > 2000000 else 8000.0)
+                jd_plot_end = jd_end - (jd_offset if median_jd > 2000000 else 8000.0)
                 ax_main.axvline(jd_plot_start, color="green", linestyle="--", alpha=0.7, linewidth=1.5)
                 if jd_plot_end != jd_plot_start:
                     ax_main.axvline(jd_plot_end, color="green", linestyle="--", alpha=0.7, linewidth=1.5)
@@ -507,43 +511,47 @@ def plot_bayes_results(
                 
                 if morph == "gaussian" and params:
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
-                    sigma = params.get("sigma", (jd_end - jd_start) / 4)
-                    amp = params.get("amp", -0.1)
-                    baseline = params.get("baseline", band_df["mag"].median())
-                    
-                    t_fit = np.linspace(jd_start - 3*sigma, jd_end + 3*sigma, 100)
-                    mag_fit = gaussian(t_fit, amp, t0, sigma, baseline)
-                    
-                    t_fit_plot = t_fit - (JD_OFFSET if median_jd > 2000000 else 8000.0)
-                    ax_main.plot(
-                        t_fit_plot,
-                        mag_fit,
-                        color="green",
-                        linestyle="-",
-                        linewidth=2,
-                        alpha=0.8,
-                        label="Jump (Gaussian)" if run_summary == jump["run_summaries"][0] else "",
-                    )
+                    if t0 is not None and np.isfinite(t0):
+                        t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.axvline(t0_plot, color="green", linestyle="--", alpha=0.7, linewidth=1.0)
+                    if plot_fits:
+                        sigma = params.get("sigma", (jd_end - jd_start) / 4)
+                        amp = params.get("amp", -0.1)
+                        baseline = params.get("baseline", band_df["mag"].median())
+                        t_fit = np.linspace(jd_start - 3 * sigma, jd_end + 3 * sigma, 100)
+                        mag_fit = gaussian(t_fit, amp, t0, sigma, baseline)
+                        t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.plot(
+                            t_fit_plot,
+                            mag_fit,
+                            color="green",
+                            linestyle="-",
+                            linewidth=2,
+                            alpha=0.8,
+                            label="Jump (Gaussian)" if run_summary == jump["run_summaries"][0] else "",
+                        )
                 
                 elif morph == "paczynski" and params:
                     t0 = params.get("t0", (jd_start + jd_end) / 2)
-                    tE = params.get("tE", (jd_end - jd_start) / 2)
-                    amp = params.get("amp", -0.1)
-                    baseline = params.get("baseline", band_df["mag"].median())
-                    
-                    t_fit = np.linspace(jd_start - 3*tE, jd_end + 3*tE, 100)
-                    mag_fit = paczynski(t_fit, amp, t0, tE, baseline)
-                    
-                    t_fit_plot = t_fit - (JD_OFFSET if median_jd > 2000000 else 8000.0)
-                    ax_main.plot(
-                        t_fit_plot,
-                        mag_fit,
-                        color="cyan",
-                        linestyle="-",
-                        linewidth=2,
-                        alpha=0.8,
-                        label="Jump (Paczynski)" if run_summary == jump["run_summaries"][0] else "",
-                    )
+                    if t0 is not None and np.isfinite(t0):
+                        t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.axvline(t0_plot, color="green", linestyle="--", alpha=0.7, linewidth=1.0)
+                    if plot_fits:
+                        tE = params.get("tE", (jd_end - jd_start) / 2)
+                        amp = params.get("amp", -0.1)
+                        baseline = params.get("baseline", band_df["mag"].median())
+                        t_fit = np.linspace(jd_start - 3 * tE, jd_end + 3 * tE, 100)
+                        mag_fit = paczynski(t_fit, amp, t0, tE, baseline)
+                        t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.plot(
+                            t_fit_plot,
+                            mag_fit,
+                            color="cyan",
+                            linestyle="-",
+                            linewidth=2,
+                            alpha=0.8,
+                            label="Jump (Paczynski)" if run_summary == jump["run_summaries"][0] else "",
+                        )
         
         ax_main.set_ylabel(f"{band_labels[band]} [mag]", fontsize=12)
         ax_main.grid(True, alpha=0.3)
@@ -621,7 +629,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Plot light curves with Bayesian event detection results"
     )
-    parser.add_argument("csv_paths", nargs="*", help="Path(s) to light curve file(s)")
+    parser.add_argument(
+        "--input",
+        nargs="+",
+        help="Path(s) to light curve file(s) (glob patterns supported)",
+    )
     parser.add_argument(
         "--events",
         type=Path,
@@ -651,8 +663,8 @@ def main():
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("results_bayes_logbf"),
-        help="Output directory for plots (default: results_bayes_logbf)",
+        required=True,
+        help="Output directory for plots",
     )
     parser.add_argument(
         "--baseline",
@@ -679,21 +691,32 @@ def main():
         help="Skip Bayesian event detection; plot baseline/residuals only",
     )
     parser.add_argument(
+        "--plot-fits",
+        action="store_true",
+        help="Plot Gaussian/Paczynski fit curves in addition to peak markers.",
+    )
+    parser.add_argument(
         "--format",
         choices=("png", "pdf"),
         default="png",
         help="Output format for plots (default: png).",
     )
+    parser.add_argument(
+        "--jd-offset",
+        type=float,
+        default=2458000.0,
+        help="JD offset for plotting (default: 2458000.0)",
+    )
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
-    
+
     args = parser.parse_args()
     
     baseline_func = BASELINE_FUNCTIONS[args.baseline]
     baseline_kwargs = {}
     
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    
-                                              
+
+
     if args.events:
         csv_paths = load_events_paths(
             args.events,
@@ -702,8 +725,10 @@ def main():
             max_plots=args.max_plots,
         )
         print(f"Loaded {len(csv_paths)} light curves from {args.events}")
+    elif args.input:
+        csv_paths = [Path(p) for p in args.input]
     else:
-        csv_paths = [Path(p) for p in args.csv_paths]
+        csv_paths = []
 
     if args.results_csv and args.results_csv.exists():
         results_df = pd.read_csv(args.results_csv)
@@ -718,7 +743,7 @@ def main():
         print(f"Filtered to {len(csv_paths)} light curves from results CSV")
 
     if not csv_paths:
-        raise SystemExit("No light curve paths provided (use positional paths or --events).")
+        raise SystemExit("No light curve paths provided (use --input or --events).")
 
     if args.max_plots is not None:
         csv_paths = csv_paths[: args.max_plots]
@@ -743,6 +768,8 @@ def main():
                 logbf_threshold_dip=args.logbf_threshold_dip,
                 logbf_threshold_jump=args.logbf_threshold_jump,
                 skip_events=args.skip_events,
+                plot_fits=args.plot_fits,
+                jd_offset=args.jd_offset,
             )
         except Exception as e:
             print(f"Error plotting {csv_path}: {e}")

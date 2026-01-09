@@ -14,6 +14,7 @@ Required input columns (from events.py):
     dip_max_event_prob, jump_max_event_prob,
     dip_run_count, jump_run_count,
     dip_max_run_points, jump_max_run_points,
+    dip_max_run_cameras, jump_max_run_cameras,
     dip_best_morph, jump_best_morph,
     dip_best_delta_bic, jump_best_delta_bic
 """
@@ -136,13 +137,15 @@ def filter_run_robustness(
     df: pd.DataFrame,
     *,
     min_run_count: int = 1,
-    min_run_points: int = 3,
+    min_run_points: int = 2,
+    min_run_cameras: int = 2,
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Require dip_run_count or jump_run_count >= min_run_count.
     Require dip_max_run_points or jump_max_run_points >= min_run_points.
+    Require dip_max_run_cameras or jump_max_run_cameras >= min_run_cameras.
     """
     n0 = len(df)
     pbar = tqdm(total=2, desc="filter_run_robustness", leave=False) if show_tqdm else None
@@ -150,13 +153,19 @@ def filter_run_robustness(
     # Check run counts
     dip_count_ok = df["dip_run_count"].fillna(0) >= min_run_count
     jump_count_ok = df["jump_run_count"].fillna(0) >= min_run_count
-    has_runs = dip_count_ok | jump_count_ok
 
     # Check run points
-    dip_points_ok = (df["dip_max_run_points"].fillna(0) >= min_run_points) | ~dip_count_ok
-    jump_points_ok = (df["jump_max_run_points"].fillna(0) >= min_run_points) | ~jump_count_ok
+    dip_points_ok = df["dip_max_run_points"].fillna(0) >= min_run_points
+    jump_points_ok = df["jump_max_run_points"].fillna(0) >= min_run_points
 
-    mask = has_runs & (dip_points_ok | jump_points_ok)
+    # Check run cameras
+    dip_cams_ok = df["dip_max_run_cameras"].fillna(0) >= min_run_cameras
+    jump_cams_ok = df["jump_max_run_cameras"].fillna(0) >= min_run_cameras
+
+    dip_ok = dip_count_ok & dip_points_ok & dip_cams_ok
+    jump_ok = jump_count_ok & jump_points_ok & jump_cams_ok
+
+    mask = dip_ok | jump_ok
     out = df.loc[mask].reset_index(drop=True)
 
     if pbar:
@@ -440,7 +449,8 @@ def apply_post_filters(
     # Filter 9: run robustness
     apply_run_robustness: bool = True,
     min_run_count: int = 1,
-    min_run_points: int = 3,
+    min_run_points: int = 2,
+    min_run_cameras: int = 2,
     # Filter 10: morphology
     apply_morphology: bool = False,
     dip_morphology: str = "gaussian",
@@ -493,6 +503,7 @@ def apply_post_filters(
         filters.append(("run_robustness", filter_run_robustness, {
             "min_run_count": min_run_count,
             "min_run_points": min_run_points,
+            "min_run_cameras": min_run_cameras,
             "show_tqdm": show_tqdm,
             "rejected_log_csv": rejected_log_csv,
         }))
@@ -525,3 +536,126 @@ def apply_post_filters(
         tqdm.write(f"\n[apply_post_filters] Total: {n_start} → {n_end} ({n_end/n_start*100:.1f}% kept)")
 
     return df_filtered.reset_index(drop=True)
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Apply post-filters to events.py results",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Example usage:
+  python -m malca.post_filter --input results.csv --output results_filtered.csv
+  python -m malca.post_filter --input results.csv --output results_filtered.csv --min-bayes-factor 20 --skip-morphology
+"""
+    )
+
+    # I/O
+    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet from events.py")
+    parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet path")
+
+    # Filter toggles (all enabled by default except morphology)
+    parser.add_argument("--skip-posterior-strength", action="store_true", help="Skip posterior strength filter")
+    parser.add_argument("--skip-event-probability", action="store_true", help="Skip event probability filter")
+    parser.add_argument("--skip-run-robustness", action="store_true", help="Skip run robustness filter")
+    parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter (off by default)")
+
+    # Posterior strength parameters
+    parser.add_argument("--min-bayes-factor", type=float, default=10.0,
+                        help="Minimum Bayes factor for posterior strength filter (default: 10)")
+    parser.add_argument("--allow-infinite-local-bf", action="store_true",
+                        help="Allow infinite local BF (default: require finite)")
+
+    # Event probability parameters
+    parser.add_argument("--min-event-prob", type=float, default=0.5,
+                        help="Minimum event probability (default: 0.5)")
+
+    # Run robustness parameters
+    parser.add_argument("--min-run-count", type=int, default=1,
+                        help="Minimum number of runs (default: 1)")
+    parser.add_argument("--min-run-points", type=int, default=2,
+                        help="Minimum points per run (default: 2)")
+    parser.add_argument("--min-run-cameras", type=int, default=2,
+                        help="Minimum cameras per run (default: 2)")
+
+    # Morphology parameters
+    parser.add_argument("--dip-morphology", type=str, default="gaussian",
+                        choices=["gaussian", "paczynski"],
+                        help="Required morphology for dips (default: gaussian)")
+    parser.add_argument("--jump-morphology", type=str, default="paczynski",
+                        choices=["gaussian", "paczynski"],
+                        help="Required morphology for jumps (default: paczynski)")
+    parser.add_argument("--min-delta-bic", type=float, default=10.0,
+                        help="Minimum delta BIC for morphology filter (default: 10)")
+
+    # General options
+    parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
+    parser.add_argument("--no-reject-log", action="store_true", help="Disable rejection logging")
+    parser.add_argument("--reject-log", type=Path, default=None,
+                        help="Path to rejection log CSV (default: rejected_post_filter.csv)")
+
+    args = parser.parse_args()
+
+    # Load input
+    input_path = args.input.expanduser()
+    if input_path.suffix.lower() in (".parquet", ".pq"):
+        df = pd.read_parquet(input_path)
+    else:
+        df = pd.read_csv(input_path)
+
+    print(f"Loaded {len(df)} rows from {input_path}")
+
+    # Determine reject log path
+    if args.no_reject_log:
+        reject_log = None
+    elif args.reject_log:
+        reject_log = args.reject_log.expanduser()
+    else:
+        reject_log = args.output.parent / "rejected_post_filter.csv"
+
+    # Apply filters
+    df_filtered = apply_post_filters(
+        df,
+        # Filter toggles
+        apply_posterior_strength=not args.skip_posterior_strength,
+        apply_event_probability=not args.skip_event_probability,
+        apply_run_robustness=not args.skip_run_robustness,
+        apply_morphology=args.apply_morphology,
+        # Posterior strength
+        min_bayes_factor=args.min_bayes_factor,
+        require_finite_local_bf=not args.allow_infinite_local_bf,
+        # Event probability
+        min_event_prob=args.min_event_prob,
+        # Run robustness
+        min_run_count=args.min_run_count,
+        min_run_points=args.min_run_points,
+        min_run_cameras=args.min_run_cameras,
+        # Morphology
+        dip_morphology=args.dip_morphology,
+        jump_morphology=args.jump_morphology,
+        min_delta_bic=args.min_delta_bic,
+        # General
+        show_tqdm=not args.no_tqdm,
+        rejected_log_csv=reject_log,
+    )
+
+    # Save output
+    output_path = args.output.expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if output_path.suffix.lower() in (".parquet", ".pq"):
+        df_filtered.to_parquet(output_path, index=False)
+    else:
+        df_filtered.to_csv(output_path, index=False)
+
+    print(f"\nWrote {len(df_filtered)} filtered rows to {output_path}")
+    print(f"Kept {len(df_filtered)}/{len(df)} ({len(df_filtered)/len(df)*100:.1f}%)")
+
+
+if __name__ == "__main__":
+    main()
