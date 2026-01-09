@@ -116,7 +116,7 @@ def main():
 
     # Parse known args, rest go to events.py
     args, events_args = parser.parse_known_args()
-    events_args = [arg for arg in events_args if arg != "--"]
+    events_args = [arg for arg in events_args if arg.strip() != "--"]
     if args.verbose and "--verbose" not in events_args and "-v" not in events_args:
         events_args = ["--verbose", *events_args]
 
@@ -257,6 +257,7 @@ def main():
         events_cmd = [
             sys.executable, "-m", "malca.events",
             *events_args,
+            "--",
             *batch_paths,
         ]
 
