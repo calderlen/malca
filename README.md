@@ -135,9 +135,6 @@ graph TB
 
         CAND --> PLOT
         RAW -.-> PLOT
-        
-        CAND --> SCORE
-        SCORE --> SCORE_OUT[(Scores)]
 
         MAN_OUT --> LTV
         LTV --> LTV_OUT[(LTV Results)]
@@ -153,6 +150,10 @@ graph TB
         CLI -.-> REPRO
         CLI -.-> PLOT
     end
+    
+    %% Score outputs (outside subgraph to avoid cycle)
+    CAND --> SCORE_STANDALONE[score.py<br/>Standalone scoring]
+    SCORE_STANDALONE --> SCORE_OUT[(Scores)]
 
     %% Dependencies
     UTILS -.-> EVENTS
