@@ -143,7 +143,7 @@ graph TB
         FP --> FP_OUT[(FP Report)]
     end
 
-    subgraph "CLI"
+    subgraph "Command Line Interface"
         CLI[__main__.py]
         CLI -.-> MAN
         CLI -.-> EV_FILT
