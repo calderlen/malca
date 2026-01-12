@@ -50,6 +50,14 @@ def main():
     )
     validate_parser.add_argument("--help-full", action="store_true", help="Show full help for validate command")
     
+    # Validation command (results-based, no raw data needed)
+    validation_parser = subparsers.add_parser(
+        "validation",
+        help="Validate results against known candidates",
+        description="Compare detection results to known candidates without raw data"
+    )
+    validation_parser.add_argument("--help-full", action="store_true", help="Show full help for validation command")
+    
     # Plot command
     plot_parser = subparsers.add_parser(
         "plot",
@@ -139,6 +147,16 @@ def main():
             from malca import post_filter
             sys.argv = [sys.argv[0]] + remaining
             post_filter.main()
+    
+    elif args.command == "validation":
+        if hasattr(args, 'help_full') and args.help_full:
+            from malca import validation
+            sys.argv = [sys.argv[0], '--help']
+            validation.main()
+        else:
+            from malca import validation
+            sys.argv = [sys.argv[0]] + remaining
+            validation.main()
     
     return 0
 

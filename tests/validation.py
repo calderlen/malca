@@ -1,0 +1,274 @@
+"""
+Validate detection results against known candidates.
+
+This module compares detection results from events.py against a list of known
+candidates to compute validation metrics (precision, recall, etc.) WITHOUT
+requiring access to the original light curve data.
+
+Usage:
+    python -m malca.validation --results events_output.csv --candidates known_targets.csv
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import Literal
+
+import pandas as pd
+import numpy as np
+
+
+# Default validation candidates (Brayden's list)
+DEFAULT_CANDIDATES = [
+    {"source": "J042214+152530", "source_id": "377957522430", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J202402+383938", "source_id": "42950993887", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J174328+343315", "source_id": "223339338105", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J080327-261620", "source_id": "601296043597", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": False},
+    {"source": "J184916-473251", "source_id": "472447294641", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Known", "expected_detected": True},
+    {"source": "J183153-284827", "source_id": "455267102087", "category": "Dippers", "mag_bin": "13.5_14", "search_method": "Known", "expected_detected": False},
+    {"source": "J070519+061219", "source_id": "266288137752", "category": "Dippers", "mag_bin": "13.5_14", "search_method": "Known", "expected_detected": False},
+    {"source": "J081523-385923", "source_id": "532576686103", "category": "Dippers", "mag_bin": "13.5_14", "search_method": "Known", "expected_detected": False},
+    {"source": "J085816-430955", "source_id": "352187470767", "category": "Dippers", "mag_bin": "12_12.5", "search_method": "Known", "expected_detected": False},
+    {"source": "J114712-621037", "source_id": "609886184506", "category": "Dippers", "mag_bin": "13_13.5", "search_method": "Known", "expected_detected": False},
+    {"source": "J005437+644347", "source_id": "68720274411", "category": "Multiple Eclipse Binaries", "mag_bin": "13_13.5", "search_method": "Known", "expected_detected": True},
+    {"source": "J062510-075341", "source_id": "377958261591", "category": "Multiple Eclipse Binaries", "mag_bin": "13.5_14", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J124745-622756", "source_id": "515397118400", "category": "Multiple Eclipse Binaries", "mag_bin": "13.5_14", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J175912-120956", "source_id": "326417831663", "category": "Multiple Eclipse Binaries", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J181752-580749", "source_id": "644245387906", "category": "Multiple Eclipse Binaries", "mag_bin": "12_12.5", "search_method": "Known", "expected_detected": True},
+    {"source": "J160757-574540", "source_id": "661425129485", "category": "Multiple Eclipse Binaries", "mag_bin": "13.5_14", "search_method": "Pipeline", "expected_detected": False},
+    {"source": "J073924-272916", "source_id": "438086977939", "category": "Single Eclipse Binaries", "mag_bin": "13.5_14", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J074007-161608", "source_id": "360777377116", "category": "Single Eclipse Binaries", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J094848-545959", "source_id": "635655234580", "category": "Single Eclipse Binaries", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J162209-444247", "source_id": "412317159120", "category": "Single Eclipse Binaries", "mag_bin": "13.5_14", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J183606-314826", "source_id": "438086901547", "category": "Single Eclipse Binaries", "mag_bin": "13.5_14", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J205245-713514", "source_id": "463856535113", "category": "Single Eclipse Binaries", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J212132+480140", "source_id": "120259184943", "category": "Single Eclipse Binaries", "mag_bin": "13_13.5", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J225702+562312", "source_id": "25770019815", "category": "Single Eclipse Binaries", "mag_bin": "13.5_14", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J190316-195739", "source_id": "515396514761", "category": "Single Eclipse Binaries", "mag_bin": "13.5_14", "search_method": "Pipeline", "expected_detected": True},
+    {"source": "J175602+013135", "source_id": "231929175915", "category": "Single Eclipse Binaries", "mag_bin": "14_14.5", "search_method": "Known", "expected_detected": True},
+    {"source": "J073234-200049", "source_id": "335007754417", "category": "Single Eclipse Binaries", "mag_bin": "14.5_15", "search_method": "Known", "expected_detected": True},
+    {"source": "J223332+565552", "source_id": "60130040391", "category": "Single Eclipse Binaries", "mag_bin": "12.5_13", "search_method": "Known", "expected_detected": True},
+    {"source": "J183210-173432", "source_id": "317827964025", "category": "Single Eclipse Binaries", "mag_bin": "12.5_13", "search_method": "Pipeline", "expected_detected": False},
+]
+
+
+def validate_detections(
+    results_df: pd.DataFrame,
+    candidates_df: pd.DataFrame,
+    *,
+    id_column: str = "source_id",
+    match_tolerance_arcsec: float = 3.0,
+    event_type: Literal["dip", "jump", "either"] = "dip",
+    significance_column: str | None = None,
+) -> dict:
+    """
+    Validate detection results against known candidates.
+    
+    Args:
+        results_df: Detection results from events.py
+        candidates_df: Known candidates to validate against
+        id_column: Column name for source ID
+        match_tolerance_arcsec: Matching tolerance for coordinate-based matching
+        event_type: Which event type to validate ("dip", "jump", or "either")
+        significance_column: Column indicating significance (e.g., "dip_significant")
+    
+    Returns:
+        Dictionary with validation metrics
+    """
+    # Determine significance column if not provided
+    if significance_column is None:
+        if event_type == "dip":
+            significance_column = "dip_significant"
+        elif event_type == "jump":
+            significance_column = "jump_significant"
+        else:  # either
+            significance_column = None
+    
+    # Extract IDs from both datasets
+    if id_column in results_df.columns:
+        detected_ids = set(results_df[id_column].astype(str))
+    else:
+        # Try to extract from path column
+        if "path" in results_df.columns:
+            detected_ids = set(
+                results_df["path"].apply(lambda x: Path(x).stem.replace(".dat2", "").replace(".csv", ""))
+            )
+        else:
+            raise ValueError(f"Cannot find ID column '{id_column}' or 'path' in results")
+    
+    if id_column in candidates_df.columns:
+        expected_ids = set(candidates_df[id_column].astype(str))
+    else:
+        raise ValueError(f"Cannot find ID column '{id_column}' in candidates")
+    
+    # Filter to significant detections if column exists
+    if significance_column and significance_column in results_df.columns:
+        significant_mask = results_df[significance_column].astype(bool)
+        if event_type == "either" and "jump_significant" in results_df.columns:
+            significant_mask |= results_df["jump_significant"].astype(bool)
+        detected_ids = set(
+            results_df[significant_mask][id_column].astype(str)
+            if id_column in results_df.columns
+            else results_df[significant_mask]["path"].apply(
+                lambda x: Path(x).stem.replace(".dat2", "").replace(".csv", "")
+            )
+        )
+    
+    # Compute validation metrics
+    true_positives = detected_ids & expected_ids
+    false_positives = detected_ids - expected_ids
+    false_negatives = expected_ids - detected_ids
+    
+    n_tp = len(true_positives)
+    n_fp = len(false_positives)
+    n_fn = len(false_negatives)
+    n_expected = len(expected_ids)
+    n_detected = len(detected_ids)
+    
+    # Compute metrics
+    precision = n_tp / n_detected if n_detected > 0 else 0.0
+    recall = n_tp / n_expected if n_expected > 0 else 0.0
+    f1_score = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    return {
+        "n_expected": n_expected,
+        "n_detected": n_detected,
+        "n_true_positives": n_tp,
+        "n_false_positives": n_fp,
+        "n_false_negatives": n_fn,
+        "precision": precision,
+        "recall": recall,
+        "f1_score": f1_score,
+        "true_positives": sorted(true_positives),
+        "false_positives": sorted(false_positives),
+        "false_negatives": sorted(false_negatives),
+    }
+
+
+def print_validation_report(metrics: dict, verbose: bool = False) -> None:
+    """Print a formatted validation report."""
+    print("\n" + "=" * 60)
+    print("VALIDATION REPORT")
+    print("=" * 60)
+    print(f"\nExpected candidates:  {metrics['n_expected']}")
+    print(f"Detected candidates:  {metrics['n_detected']}")
+    print(f"\nTrue Positives:       {metrics['n_true_positives']}")
+    print(f"False Positives:      {metrics['n_false_positives']}")
+    print(f"False Negatives:      {metrics['n_false_negatives']}")
+    print(f"\nPrecision:            {metrics['precision']:.2%}")
+    print(f"Recall:               {metrics['recall']:.2%}")
+    print(f"F1 Score:             {metrics['f1_score']:.2%}")
+    
+    if verbose:
+        if metrics['false_negatives']:
+            print(f"\nMissed candidates ({len(metrics['false_negatives'])}):")
+            for fn_id in metrics['false_negatives'][:20]:
+                print(f"  - {fn_id}")
+            if len(metrics['false_negatives']) > 20:
+                print(f"  ... and {len(metrics['false_negatives']) - 20} more")
+        
+        if metrics['false_positives']:
+            print(f"\nFalse positives ({len(metrics['false_positives'])}):")
+            for fp_id in metrics['false_positives'][:20]:
+                print(f"  - {fp_id}")
+            if len(metrics['false_positives']) > 20:
+                print(f"  ... and {len(metrics['false_positives']) - 20} more")
+    
+    print("=" * 60 + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Validate detection results against known candidates"
+    )
+    parser.add_argument(
+        "--results",
+        type=str,
+        required=True,
+        help="Path to detection results CSV/Parquet from events.py",
+    )
+    parser.add_argument(
+        "--candidates",
+        type=str,
+        default=None,
+        help="Path to known candidates CSV (optional, uses default Brayden list if not provided)",
+    )
+    parser.add_argument(
+        "--id-column",
+        type=str,
+        default="source_id",
+        help="Column name for source ID (default: source_id)",
+    )
+    parser.add_argument(
+        "--event-type",
+        type=str,
+        choices=["dip", "jump", "either"],
+        default="dip",
+        help="Event type to validate (default: dip)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Optional output CSV for detailed validation results",
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Print detailed validation information",
+    )
+    
+    args = parser.parse_args()
+    
+    # Load results
+    print(f"Loading results from: {args.results}")
+    if args.results.endswith(".parquet"):
+        results_df = pd.read_parquet(args.results)
+    else:
+        results_df = pd.read_csv(args.results)
+    
+    # Load or use default candidates
+    if args.candidates:
+        print(f"Loading candidates from: {args.candidates}")
+        candidates_df = pd.read_csv(args.candidates)
+    else:
+        print("Using default Brayden candidate list")
+        candidates_df = pd.DataFrame(DEFAULT_CANDIDATES)
+        # Filter to only expected detections
+        candidates_df = candidates_df[candidates_df["expected_detected"] == True].copy()
+    
+    # Validate
+    metrics = validate_detections(
+        results_df,
+        candidates_df,
+        id_column=args.id_column,
+        event_type=args.event_type,
+    )
+    
+    # Print report
+    print_validation_report(metrics, verbose=args.verbose)
+    
+    # Save detailed results if requested
+    if args.output:
+        output_df = pd.DataFrame({
+            "metric": ["n_expected", "n_detected", "n_true_positives", 
+                      "n_false_positives", "n_false_negatives",
+                      "precision", "recall", "f1_score"],
+            "value": [
+                metrics["n_expected"],
+                metrics["n_detected"],
+                metrics["n_true_positives"],
+                metrics["n_false_positives"],
+                metrics["n_false_negatives"],
+                metrics["precision"],
+                metrics["recall"],
+                metrics["f1_score"],
+            ],
+        })
+        output_df.to_csv(args.output, index=False)
+        print(f"Saved validation metrics to: {args.output}")
+
+
+if __name__ == "__main__":
+    main()
