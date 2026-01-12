@@ -1,6 +1,5 @@
 # MALCA: Multi-timescale ASAS-SN Light Curve Analysis
 
-## How to use
 #### What files are expected
 - Per-mag-bin directories: `/data/poohbah/1/assassin/rowan.90/lcsv2/<mag_bin>/`
   - Index CSVs: `index*.csv` with columns like `asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec, ...`
@@ -13,6 +12,35 @@
 - Core pipeline: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm
 - Optional outputs: pyarrow (parquet), duckdb
 - Notebooks/EDA: jupyterlab, ipykernel, seaborn, scikit-learn, joblib
+
+## Quick Start
+```bash
+# Build manifest (source_id → path index)
+python -m malca manifest --index-root /path/to/lcsv2 --lc-root /path/to/lcsv2 \
+    --mag-bin 13_13.5 --out output/manifest.parquet --workers 10
+
+# Run event detection pipeline
+python -m malca detect --mag-bin 13_13.5 --workers 10 \
+    --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
+    -- --output output/results.csv --workers 10 --min-mag-offset 0.1
+
+# Validate on known objects
+python -m malca validate --method bayes --manifest output/manifest.parquet \
+    --candidates targets.csv --out-dir output/validation
+
+# Plot light curves
+python -m malca plot --input /path/to/lc123.dat2 --out-dir output/plots
+
+# Score detected events
+python -m malca score --events output/results.csv --output output/scores.csv
+
+# Apply quality filters
+python -m malca filter --input output/results.csv --output output/filtered.csv
+
+# Get help for any command
+python -m malca --help
+python -m malca detect --help
+```
 
 #### Typical run (large batches)
 1) Build a manifest (map IDs -> light-curve directories):
@@ -40,20 +68,112 @@
 
 ## Pipeline Architecture
 
+```mermaid
+graph TB
+    subgraph "Data Sources"
+        RAW[ASAS-SN Raw Data<br/>.dat2 files]
+        VSX_CAT[VSX Catalog]
+        GAIA[Gaia Catalog]
+    end
 
-1. **Pre-filtering**:
-   - Sparse LC removal
-   - Multi-camera requirement
-   - VSX crossmatchg
+    subgraph "Core Libraries"
+        UTILS[utils.py<br/>LC I/O, cleaning]
+        BASE[baseline.py<br/>GP/trend fitting]
+        STATS_LIB[stats.py<br/>Statistics]
+    end
 
-2. **Event detection**:
-   - Run `events.py`
-   - Fit dip models, compute Bayes factors, extract metrics
+    subgraph "Data Management"
+        MAN[manifest.py<br/>Build index]
+        RAW --> MAN
+        MAN --> MAN_OUT[(Manifest)]
+    end
 
-3. **Post-filtering**:
-   - Periodicity: Bootstrap Lomb-Scargle periodogram
-   - Gaia RUWE: Query Gaia catalog for binary contamination
-   - Periodic catalog: Crossmatch to known periodic variables
+    subgraph "VSX Tools"
+        VSX_FILT[vsx/filter.py]
+        VSX_CROSS[vsx/crossmatch.py]
+        VSX_CAT --> VSX_FILT
+        VSX_CAT --> VSX_CROSS
+        VSX_FILT --> VSX_CLEAN[(Cleaned VSX)]
+        VSX_CROSS --> VSX_MATCH[(Crossmatch)]
+    end
+
+    subgraph "Production Pipeline"
+        EV_FILT[events_filtered.py<br/>Wrapper + Batching]
+        PREFILT[pre_filter.py<br/>Quality filters]
+        EVENTS[events.py<br/>Bayesian Detection]
+        FILT[filter.py<br/>Signal amplitude]
+        SCORE[score.py<br/>Event scoring]
+        POSTFILT[post_filter.py<br/>Quality filters]
+
+        MAN_OUT --> EV_FILT
+        VSX_CLEAN -.-> PREFILT
+        EV_FILT --> PREFILT
+        PREFILT --> EVENTS
+        FILT -.-> EVENTS
+        SCORE -.-> EVENTS
+        EVENTS --> POSTFILT
+        GAIA -.-> POSTFILT
+        POSTFILT --> CAND[(Final Candidates)]
+    end
+
+    subgraph "Validation & Testing"
+        REPRO[reproduction.py<br/>Known objects]
+        INJ[injection.py<br/>Synthetic dips]
+
+        MAN_OUT -.-> REPRO
+        CAND -.-> REPRO
+        REPRO --> REPRO_OUT[(Validation)]
+
+        MAN_OUT --> INJ
+        INJ --> INJ_OUT[(Completeness)]
+    end
+
+    subgraph "Analysis"
+        PLOT[plot.py<br/>Visualization]
+        LTV[ltv.py<br/>Seasonal trends]
+        FP[fp_analysis.py<br/>FP analysis]
+
+        CAND --> PLOT
+        RAW -.-> PLOT
+        
+        CAND --> SCORE
+        SCORE --> SCORE_OUT[(Scores)]
+
+        MAN_OUT --> LTV
+        LTV --> LTV_OUT[(LTV Results)]
+
+        CAND --> FP
+        FP --> FP_OUT[(FP Report)]
+    end
+
+    subgraph "CLI"
+        CLI[__main__.py]
+        CLI -.-> MAN
+        CLI -.-> EV_FILT
+        CLI -.-> REPRO
+        CLI -.-> PLOT
+    end
+
+    %% Dependencies
+    UTILS -.-> EVENTS
+    UTILS -.-> REPRO
+    BASE -.-> EVENTS
+    BASE -.-> REPRO
+
+    %% Styling
+    style EVENTS fill:#9cf,stroke:#333,stroke-width:2px
+    style REPRO fill:#ff9,stroke:#333,stroke-width:2px
+    style CLI fill:#fcf,stroke:#333,stroke-width:2px
+```
+
+**Key Components:**
+- **Production**: `manifest.py` → `pre_filter.py` → `events.py` → `post_filter.py`
+- **Validation**: `reproduction.py` (known objects), `injection.py` (synthetic dips)
+- **CLI**: Unified interface via `python -m malca [command]`
+
+See [docs/architecture.md](docs/architecture.md) for detailed documentation.
+
+---
 
 ### Running pieces manually
 - Build manifest only:
@@ -61,14 +181,26 @@
 - Pre-filter only (expects columns `asas_sn_id` and `path` pointing to lc_dir):
   `python -m malca.pre_filter --help`
 - Events only:
-  `python -m malca.events --input /path/to/lc*_cal/*.dat2 --output /home/lenhart.106/code/malca/output/results.parquet --workers 10`
+  ```bash
+  python -m malca.events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10
+  
+  # With signal amplitude filtering (requires |event_mag - baseline_mag| > 0.1)
+  python -m malca.events --input /path/to/lc*_cal/*.dat2 --output output/results.parquet --workers 10 --min-mag-offset 0.1
+  ```
   - Default Bayesian grid is 12x12 (12 p-grid points × 12 mag-grid points). Change p-grid with `--p-points`.
+  - Signal amplitude filter (default: 0.1 mag) ensures detected events have sufficient deviation from baseline.
 - Post-filter only:
   `python -m malca.post_filter --input /home/lenhart.106/code/malca/output/results.parquet --output /home/lenhart.106/code/malca/output/results_filtered.parquet`
-- Targeted reproduction of specific candidates (Bayesian):
-  `python malca/reproduce_candidates.py --method bayes --manifest /home/lenhart.106/code/malca/output/lc_manifest.parquet --candidates my_targets.csv --out-dir /home/lenhart.106/code/malca/output/results_repro --out-format csv --workers 10`
-- Batch reproduction helper (same idea, alternate entry point):
-  `python malca/reproduction.py --method bayes --manifest /home/lenhart.106/code/malca/output/lc_manifest.parquet --candidates my_targets.csv --out-dir /home/lenhart.106/code/malca/output/results_repro --out-format csv --workers 10`
+- Targeted reproduction of specific candidates (Bayesian only):
+  ```bash
+  python -m malca validate --method bayes --manifest output/lc_manifest.parquet \
+      --candidates my_targets.csv --out-dir output/results_repro
+  
+  # Or using the module directly
+  python -m malca.reproduction --method bayes --manifest output/lc_manifest.parquet \
+      --candidates my_targets.csv --out-dir output/results_repro --out-format csv --workers 10
+  ```
+  **Note**: Only `--method bayes` is supported. Legacy methods `naive` and `biweight` have been deprecated.
 - Plot light curves with baseline/residuals:
   ```bash
   # Single file
@@ -148,11 +280,12 @@
 - `malca.ltv`: `python -m malca.ltv --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
 - `malca.stats`: `python -m malca.stats /path/to/lc123.dat2`
 - `malca.fp_analysis`: `python -m malca.fp_analysis --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
-- `malca.reproduction`: `python -m malca.reproduction --method bayes --manifest /home/lenhart.106/code/malca/output/lc_manifest.parquet --candidates /home/lenhart.106/code/malca/output/targets.csv --out-dir /home/lenhart.106/code/malca/output/results_repro --out-format csv --workers 10`
-- `malca.vsx_filter`: `python -m malca.vsx_filter`
-- `malca.vsx_crossmatch`: `python -m malca.vsx_crossmatch`
-- `malca.vsx_reproducibility`: `python -m malca.vsx_reproducibility`
-- `malca.skypatrol_explore`: `python -m malca.skypatrol_explore`
+- `malca.reproduction`: `python -m malca.reproduction --method bayes --manifest output/lc_manifest.parquet --candidates targets.csv --out-dir output/results_repro`
+- **VSX tools** (now in `malca.vsx` subpackage):
+  - `malca.vsx.filter`: `python -m malca.vsx.filter`
+  - `malca.vsx.crossmatch`: `python -m malca.vsx.crossmatch`
+  - `malca.vsx.reproducibility`: `python -m malca.vsx.reproducibility`
+  - Legacy imports (`malca.vsx_filter`, etc.) still work with deprecation warnings
 
 #### Legacy/old scripts
 - `malca.old.plot_results_bayes`: `python -m malca.old.plot_results_bayes /path/to/*-light-curves.csv --results-csv /home/lenhart.106/code/malca/output/results.csv --out-dir /home/lenhart.106/code/malca/output/plots`

@@ -1233,6 +1233,7 @@ def process_one(
         dip_bayes_factor=float(dip["bayes_factor"]),
         jump_bayes_factor=float(jump["bayes_factor"]),
 
+        baseline_mag=float(dip.get("baseline_mag", jump.get("baseline_mag", np.nan))),
         dip_best_p=float(dip["best_p"]),
         jump_best_p=float(jump["best_p"]),
         dip_best_mag_event=float(dip.get("best_mag_event", np.nan)),
@@ -1287,6 +1288,7 @@ def main():
     parser.add_argument("--baseline-func", type=str, default="gp", choices=["gp", "gp_masked", "trend"], help="Baseline function to use")
     parser.add_argument("--no-sigma-eff", action="store_true", help="Do not replace errors with sigma_eff from baseline")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False)")
+    parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Apply signal amplitude filter: require |event_mag - baseline_mag| > threshold (e.g., 0.05)")
     parser.add_argument("--output", type=str, default="/home/lenhart.106/code/malca/output/lc_events_results.csv", help="Output path for results (suffix adjusted per format).")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format for results.")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
@@ -1593,6 +1595,21 @@ def main():
         if not chunk_results: 
             return
         nonlocal total_written, writer
+        
+        # Apply signal amplitude filter if requested
+        if args.min_mag_offset is not None and args.min_mag_offset > 0:
+            from malca.filter import filter_signal_amplitude
+            df_chunk = pd.DataFrame(chunk_results)
+            n_before = len(df_chunk)
+            df_chunk = filter_signal_amplitude(
+                df_chunk,
+                min_mag_offset=args.min_mag_offset,
+                show_tqdm=False,
+            )
+            n_after = len(df_chunk)
+            if n_before > n_after:
+                log(f"Signal amplitude filter: kept {n_after}/{n_before} candidates")
+            chunk_results = df_chunk.to_dict('records')
         
         if writer is not None:
             writer.write_chunk(chunk_results)

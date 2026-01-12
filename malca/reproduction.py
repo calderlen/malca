@@ -10,11 +10,12 @@ import pandas as pd
 from scipy import stats
 import matplotlib.pyplot as pl
 
-from malca.old.lc_events_naive import dip_finder_naive
-from malca.old.lc_events import event_finder
+# NOTE: The 'naive' and 'biweight' methods are legacy implementations
+# kept for backward compatibility. New code should use method='bayes'.
 from malca.events import run_bayesian_significance
 from malca.utils import read_lc_dat2
 from malca.baseline import per_camera_gp_baseline
+
 
 
 CANDIDATE_USECOLS = {
@@ -528,32 +529,17 @@ def build_reproduction_report(
             print(f"[DEBUG] Built records_map from candidates 'path' column: {n_found} light curves found")
 
     if method == "naive":
-        rows = dip_finder_naive(
-            mag_bins=sorted(target_map_dict),
-            out_dir=out_dir,
-            out_format=out_format,
-            n_workers=n_workers,
-            chunk_size=chunk_size,
-            metrics_baseline_func=metrics_baseline_func,
-            metrics_dip_threshold=metrics_dip_threshold,
-            target_ids_by_bin=target_map_dict,
-            records_by_bin=records_map,
-            return_rows=True,
-            **baseline_kwargs,
+        raise DeprecationWarning(
+            "The 'naive' method is deprecated and has been removed. "
+            "Please use method='bayes' instead, which is the current implementation. "
+            "The naive method used legacy code from malca.old.lc_events_naive."
         )
 
     elif method == "biweight":
-        rows = event_finder(
-            mode="dips",
-            mag_bins=sorted(target_map_dict),
-            out_dir=out_dir,
-            out_format=out_format,
-            n_workers=n_workers,
-            chunk_size=chunk_size,
-            target_ids_by_bin=target_map_dict,
-            records_by_bin=records_map,
-            return_rows=True,
-            peak_kwargs={"sigma_threshold": metrics_dip_threshold},
+        raise DeprecationWarning(
+            "The 'biweight' method is deprecated and has been removed. "
+            "Please use method='bayes' instead, which is the current implementation. "
+            "The biweight method used legacy code from malca.old.lc_events."
         )
 
     elif method == "bayes":
@@ -945,9 +931,10 @@ Examples:
     )
     parser.add_argument(
         "--method",
-        choices=("naive", "biweight", "bayes"),
-        default="naive",
-        help="Dip finder to use: baseline-residual (naive), biweight/fit-based (biweight), or Bayesian (bayes).",
+        choices=("bayes",),
+        default="bayes",
+        help="Detection method. Only 'bayes' (Bayesian) is currently supported. "
+             "Legacy methods 'naive' and 'biweight' have been deprecated.",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Print debug info")
     return parser
