@@ -286,7 +286,6 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
   - `malca.vsx.filter`: `python -m malca.vsx.filter`
   - `malca.vsx.crossmatch`: `python -m malca.vsx.crossmatch`
   - `malca.vsx.reproducibility`: `python -m malca.vsx.reproducibility`
-  - Legacy imports (`malca.vsx_filter`, etc.) still work with deprecation warnings
 
 #### Legacy/old scripts
 - `malca.old.plot_results_bayes`: `python -m malca.old.plot_results_bayes /path/to/*-light-curves.csv --results-csv /home/lenhart.106/code/malca/output/results.csv --out-dir /home/lenhart.106/code/malca/output/plots`

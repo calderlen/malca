@@ -38,7 +38,7 @@ from malca.utils import (
     compute_time_stats,
     compute_n_cameras,
 )
-from malca.vsx_crossmatch import propagate_asassn_coords, vsx_coords
+from malca.vsx.crossmatch import propagate_asassn_coords, vsx_coords
 
 
 def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, compute_cameras: bool) -> dict:

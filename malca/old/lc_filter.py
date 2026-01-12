@@ -13,7 +13,7 @@ from tqdm.auto import tqdm
 from astropy.timeseries import LombScargle
 from astropy import units as u
 
-from malca.vsx_crossmatch import propagate_asassn_coords, vsx_coords
+from malca.vsx.crossmatch import propagate_asassn_coords, vsx_coords
 from malca.utils import read_lc_raw
 
 
