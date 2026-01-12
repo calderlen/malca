@@ -116,13 +116,17 @@ graph TB
         POSTFILT --> CAND[(Final Candidates)]
     end
 
-    subgraph "Validation & Testing"
-        REPRO[reproduction.py<br/>Known objects]
+    subgraph "Testing & Validation (tests/)"
+        REPRO[tests/reproduction.py<br/>Known objects]
+        VALID[tests/validation.py<br/>Results validation]
         INJ[injection.py<br/>Synthetic dips]
 
         MAN_OUT -.-> REPRO
         CAND -.-> REPRO
         REPRO --> REPRO_OUT[(Validation)]
+        
+        CAND --> VALID
+        VALID --> VALID_OUT[(Metrics)]
 
         MAN_OUT --> INJ
         INJ --> INJ_OUT[(Completeness)]
@@ -169,7 +173,7 @@ graph TB
 
 **Key Components:**
 - **Production**: `manifest.py` → `pre_filter.py` → `events.py` → `post_filter.py`
-- **Validation**: `reproduction.py` (known objects), `injection.py` (synthetic dips)
+- **Testing**: `tests/reproduction.py` (re-runs detection), `tests/validation.py` (validates results), `injection.py` (synthetic dips)
 - **CLI**: Unified interface via `python -m malca [command]`
 
 See [docs/architecture.md](docs/architecture.md) for detailed documentation.
