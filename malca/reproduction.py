@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -14,6 +15,16 @@ from malca.old.lc_events import event_finder
 from malca.events import run_bayesian_significance
 from malca.utils import read_lc_dat2
 from malca.baseline import per_camera_gp_baseline
+
+
+CANDIDATE_USECOLS = {
+    "path",
+    "source_id",
+    "Source_ID",
+    "Source ID",
+    "asas_sn_id",
+    "mag_bin",
+}
 
 
 brayden_candidates: list[dict[str, object]] = [
@@ -60,6 +71,49 @@ def load_manifest_df(manifest_path: Path | str) -> pd.DataFrame:
         df = df.rename(columns={"asas_sn_id": "source_id"})
     df["source_id"] = df["source_id"].astype(str)
     return df
+
+
+def _candidate_usecols_from_header(path: Path, sep: str) -> list[str]:
+    try:
+        with path.open("r", newline="") as handle:
+            reader = csv.reader(handle, delimiter=sep)
+            header = next(reader, [])
+    except Exception:
+        return []
+
+    return [col for col in header if col in CANDIDATE_USECOLS]
+
+
+def load_candidates_df(cand_path: Path) -> pd.DataFrame:
+    suffix = cand_path.suffix.lower()
+    if suffix in {".csv", ".tsv"}:
+        sep = "\t" if suffix == ".tsv" else ","
+        usecols = _candidate_usecols_from_header(cand_path, sep)
+        if usecols:
+            return pd.read_csv(cand_path, usecols=usecols)
+        return pd.read_csv(cand_path)
+
+    if suffix in {".parquet", ".pq"}:
+        usecols: list[str] | None = None
+        try:
+            import pyarrow.parquet as pq
+        except Exception:
+            usecols = None
+        else:
+            try:
+                schema_cols = pq.ParquetFile(cand_path).schema.names
+                usecols = [col for col in schema_cols if col in CANDIDATE_USECOLS]
+            except Exception:
+                usecols = None
+
+        if usecols:
+            return pd.read_parquet(cand_path, columns=usecols)
+        try:
+            return pd.read_parquet(cand_path, columns=list(CANDIDATE_USECOLS))
+        except Exception:
+            return pd.read_parquet(cand_path)
+
+    raise SystemExit(f"Unsupported candidates file format: {cand_path}")
 
 
 def dataframe_from_candidates(data: Sequence[Mapping[str, object]] | None = None) -> pd.DataFrame:
@@ -121,6 +175,52 @@ def records_from_skypatrol_dir(df_targets: pd.DataFrame, skypatrol_dir: Path) ->
     return records
 
 
+def records_from_candidates_with_paths(
+    df_targets: pd.DataFrame,
+    *,
+    path_prefix: Path | str | None = None,
+    path_root: Path | str | None = None,
+) -> dict[str, list[dict[str, object]]]:
+    """
+    Build records_map from candidates that have a 'path' column.
+    Used when events.py output is passed directly to reproduction.py.
+    """
+    if "path" not in df_targets.columns:
+        return {}
+
+    records: dict[str, list[dict[str, object]]] = {}
+    prefix = Path(path_prefix).expanduser() if path_prefix else None
+    root = Path(path_root).expanduser() if path_root else None
+
+    for _, row in df_targets.iterrows():
+        source_id = str(row.get("source_id"))
+        mag_bin = str(row.get("mag_bin", ""))
+        path_str = str(row.get("path", ""))
+
+        if not path_str or path_str == "nan":
+            continue
+
+        path = Path(path_str)
+        if prefix and root:
+            try:
+                path = root / path.relative_to(prefix)
+            except ValueError:
+                pass
+        lc_dir = str(path.parent)
+
+        rec = {
+            "mag_bin": mag_bin,
+            "index_num": None,
+            "index_csv": None,
+            "lc_dir": lc_dir,
+            "asas_sn_id": source_id,
+            "dat_path": str(path),
+            "found": path.exists(),
+        }
+        records.setdefault(mag_bin, []).append(rec)
+    return records
+
+
 def coerce_candidate_records(data) -> list[dict[str, object]]:
     if data is None:
         return list(brayden_candidates)
@@ -135,16 +235,31 @@ def coerce_candidate_records(data) -> list[dict[str, object]]:
 
     first = records[0]
     if isinstance(first, Mapping):
+        import re
         coerced: list[dict[str, object]] = []
         for rec in records:
             if not isinstance(rec, Mapping):
                 continue
             new = dict(rec)
             source_id = str(new.get("source_id", new.get("Source_ID", ""))).strip()
+
+            if not source_id and "path" in new:
+                path_str = str(new["path"])
+                source_id = Path(path_str).stem
+
             if not source_id:
                 continue
+
             new["source_id"] = source_id
             new.setdefault("source", new.get("source", source_id))
+
+            if "mag_bin" not in new or not new["mag_bin"]:
+                if "path" in new:
+                    path_str = str(new["path"])
+                    mag_bin_match = re.search(r'(\d+(?:\.\d+)?_\d+(?:\.\d+)?)', path_str)
+                    if mag_bin_match:
+                        new["mag_bin"] = mag_bin_match.group(1)
+
             coerced.append(new)
         return coerced
 
@@ -180,12 +295,7 @@ def resolve_candidates(spec: str | None):
 
     cand_path = Path(spec)
     if cand_path.exists():
-        if cand_path.suffix.lower() in {".csv", ".tsv"}:
-            df = pd.read_csv(cand_path)
-        elif cand_path.suffix.lower() in {".parquet", ".pq"}:
-            df = pd.read_parquet(cand_path)
-        else:
-            raise SystemExit(f"Unsupported candidates file format: {cand_path}")
+        df = load_candidates_df(cand_path)
         return coerce_candidate_records(df)
 
     raise SystemExit(f"Unknown candidates spec '{spec}'. Provide a built-in name or a valid file path.")
@@ -371,6 +481,8 @@ def build_reproduction_report(
     bayes_logbf_threshold_dip: float = 5.0,     # trigger if max log BF >= this
     bayes_logbf_threshold_jump: float = 5.0,
     skypatrol_dir: Path | str | None = None,
+    path_prefix: Path | str | None = None,
+    path_root: Path | str | None = None,
     extra_columns: Iterable[str] | None = None,
     manifest_path: Path | str | None = None,
     method: str = "naive",
@@ -396,7 +508,7 @@ def build_reproduction_report(
                 df_targets["mag_bin"] = df_targets["mag_bin_y"].fillna(df_targets["mag_bin_x"])
                 df_targets = df_targets.drop(columns=["mag_bin_x", "mag_bin_y"])
 
-    target_map = target_map(df_targets)
+    target_map_dict = target_map(df_targets)
     records_map = records_from_manifest(manifest_subset) if manifest_subset is not None else None
 
     if (records_map is None or not records_map) and skypatrol_dir is not None:
@@ -405,16 +517,26 @@ def build_reproduction_report(
             n_found = sum(len(v) for v in records_map.values())
             print(f"[DEBUG] Built records_map from skypatrol_dir: {n_found} light curves found")
 
+    if (records_map is None or not records_map) and "path" in df_targets.columns:
+        records_map = records_from_candidates_with_paths(
+            df_targets,
+            path_prefix=path_prefix,
+            path_root=path_root,
+        )
+        if verbose:
+            n_found = sum(len(v) for v in records_map.values())
+            print(f"[DEBUG] Built records_map from candidates 'path' column: {n_found} light curves found")
+
     if method == "naive":
         rows = dip_finder_naive(
-            mag_bins=sorted(target_map),
+            mag_bins=sorted(target_map_dict),
             out_dir=out_dir,
             out_format=out_format,
             n_workers=n_workers,
             chunk_size=chunk_size,
             metrics_baseline_func=metrics_baseline_func,
             metrics_dip_threshold=metrics_dip_threshold,
-            target_ids_by_bin=target_map,
+            target_ids_by_bin=target_map_dict,
             records_by_bin=records_map,
             return_rows=True,
             **baseline_kwargs,
@@ -423,12 +545,12 @@ def build_reproduction_report(
     elif method == "biweight":
         rows = event_finder(
             mode="dips",
-            mag_bins=sorted(target_map),
+            mag_bins=sorted(target_map_dict),
             out_dir=out_dir,
             out_format=out_format,
             n_workers=n_workers,
             chunk_size=chunk_size,
-            target_ids_by_bin=target_map,
+            target_ids_by_bin=target_map_dict,
             records_by_bin=records_map,
             return_rows=True,
             peak_kwargs={"sigma_threshold": metrics_dip_threshold},
@@ -446,6 +568,9 @@ def build_reproduction_report(
                 lc_dir = rec.get("lc_dir")
                 dat_path = rec.get("dat_path")
                 has_path = bool(dat_path) and Path(str(dat_path)).exists()
+
+                if verbose and not has_path:
+                    print(f"[DEBUG] {asn}: dat_path missing: {dat_path}")
 
                 try:
                     dfg, dfv = (
@@ -730,7 +855,21 @@ __all__ = [
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the targeted reproduction search and summarize results.")
+    parser = argparse.ArgumentParser(
+        description="Run targeted reproduction search on events.py candidates and summarize results.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Run on events.py output CSV (uses 'path' column directly)
+  python -m malca.reproduction --input output/strong_candidates_12_12.5.csv --method bayes
+
+  # With manifest for legacy data
+  python -m malca.reproduction --candidates candidates.csv --manifest manifest.csv --method bayes
+
+  # With SkyPatrol CSV files
+  python -m malca.reproduction --candidates candidates.csv --skypatrol-dir input/skypatrol2 --method bayes
+"""
+    )
     parser.add_argument("--out-dir", default="./results_test", help="Directory for peak_results output")
     parser.add_argument("--out-format", choices=("csv", "parquet"), default="csv")
     parser.add_argument(
@@ -780,6 +919,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skypatrol-dir", default=None, help="Directory with SkyPatrol CSV files (<source_id>-light-curves.csv)")
     parser.add_argument("--manifest", default=None, help="Path to lc_manifest CSV/Parquet for targeted reproduction")
     parser.add_argument(
+        "--path-prefix",
+        default=None,
+        help="Path prefix to rewrite for candidates with a 'path' column (e.g. /data/poohbah/1/assassin/rowan.90/lcsv2).",
+    )
+    parser.add_argument(
+        "--path-root",
+        default=None,
+        help="Local root that replaces --path-prefix for candidates with a 'path' column.",
+    )
+    parser.add_argument(
         "--baseline-func",
         default=None,
         help="Naive-method baseline function import path (e.g. module:func). This does not affect Bayesian baseline.",
@@ -787,7 +936,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--candidates",
         default=None,
-        help="Candidate spec (built-in list name or path to CSV/Parquet file).",
+        help="Candidate spec (built-in list name or path to CSV/Parquet file from events.py).",
+    )
+    parser.add_argument(
+        "--input",
+        default=None,
+        help="Alias for --candidates (path to events.py output CSV/Parquet)."
     )
     parser.add_argument(
         "--method",
@@ -811,7 +965,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         mod = __import__(mod_name, fromlist=[func_name])
         kwargs["metrics_baseline_func"] = getattr(mod, func_name)
 
-    candidate_data = resolve_candidates(args.candidates)
+    candidates_spec = args.input or args.candidates
+    candidate_data = resolve_candidates(candidates_spec)
 
     # posterior-prob threshold (only if requested)
     bayes_significance_threshold = args.bayes_significance_threshold
@@ -845,6 +1000,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         bayes_logbf_threshold_dip=args.bayes_logbf_threshold_dip,
         bayes_logbf_threshold_jump=args.bayes_logbf_threshold_jump,
         skypatrol_dir=args.skypatrol_dir,
+        path_prefix=args.path_prefix,
+        path_root=args.path_root,
         manifest_path=args.manifest,
         method=args.method,
         verbose=args.verbose,
