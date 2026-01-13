@@ -129,7 +129,7 @@ def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=12):
 
 def uniform_p_grid(p_min=0.9, p_max=1.0 - 1e-6, n=36):
     """
-    Uniform grid in p for approximating ∫ dp with a uniform prior P(p)=const.
+    Uniform grid in p for approximating int(dp) with a uniform prior P(p)=const.
     """
     p_min = float(np.clip(p_min, 1e-12, 1.0 - 1e-12))
     p_max = float(np.clip(p_max, 1e-12, 1.0 - 1e-12))

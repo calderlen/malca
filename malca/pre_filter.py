@@ -118,19 +118,23 @@ def _compute_stats_parallel(
     # Merge checkpoint data if available
     already_computed = set()
     if checkpoint_df is not None and id_col in checkpoint_df.columns:
-        # Create a mapping from id to stats
-        for _, row in checkpoint_df.iterrows():
-            row_id = str(row[id_col])
-            already_computed.add(row_id)
+        # Use vectorized merge instead of row-by-row iteration
+        checkpoint_df[id_col] = checkpoint_df[id_col].astype(str)
+        already_computed = set(checkpoint_df[id_col].unique())
 
-            # Find matching rows in df_with_stats
-            mask = df_with_stats[id_col].astype(str) == row_id
-            if mask.any():
-                if compute_time and "time_span_days" in checkpoint_df.columns:
-                    df_with_stats.loc[mask, "time_span_days"] = row["time_span_days"]
-                    df_with_stats.loc[mask, "points_per_day"] = row["points_per_day"]
-                if compute_cameras and "n_cameras" in checkpoint_df.columns:
-                    df_with_stats.loc[mask, "n_cameras"] = row["n_cameras"]
+        # Determine which columns to update
+        update_cols = []
+        if compute_time and "time_span_days" in checkpoint_df.columns:
+            update_cols.extend(["time_span_days", "points_per_day"])
+        if compute_cameras and "n_cameras" in checkpoint_df.columns:
+            update_cols.append("n_cameras")
+
+        if update_cols:
+            # Merge checkpoint values into df_with_stats
+            df_with_stats[id_col] = df_with_stats[id_col].astype(str)
+            checkpoint_subset = checkpoint_df[[id_col] + update_cols].drop_duplicates(subset=[id_col])
+            df_with_stats = df_with_stats.drop(columns=update_cols, errors='ignore')
+            df_with_stats = df_with_stats.merge(checkpoint_subset, on=id_col, how='left')
 
     # Prepare tasks for rows not yet computed
     tasks = []
