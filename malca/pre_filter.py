@@ -328,7 +328,7 @@ def filter_vsx_match(
     *,
     max_sep_arcsec: float = 3.0,
     exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path | None = None,
+    vsx_crossmatch_csv: str | Path = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -438,7 +438,7 @@ def apply_pre_filters(
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path | None = None,
+    vsx_crossmatch_csv: str | Path = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,
