@@ -899,7 +899,7 @@ def plot_efficiency_marginalized(
         title = "Detection Efficiency (averaged over duration)"
         xlog = False
     elif axis == "depth":
-        eff_2d = np.nanmean(cube["efficiency"], axis=0)
+        eff_2d = np.nanmean(cube["efficiency"], axis=0).T  # Transpose: (dur, mag) -> (mag, dur)
         x_centers = cube["duration_centers"]
         y_centers = cube["mag_centers"]
         xlabel = "Duration (days)"
