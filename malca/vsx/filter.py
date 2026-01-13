@@ -80,24 +80,10 @@ vsx_columns = ["id_vsx",
 
 
                             
+
 tqdm.pandas(desc="Filtering VSX by class")
 
-df_vsx = pd.read_fwf(
-    vsx_file,
-    colspecs=colspecs,
-    names=vsx_columns,
-    dtype=str
-)
 
-           
-for c in ["ra","dec","mag_max","mag_min","epoch","period"]:
-    df_vsx[c] = pd.to_numeric(df_vsx[c], errors="coerce")
-
-for c in ["id_vsx","var_flag","l_max","u_max","f_min", "l_min","u_min","u_epoch","l_period","u_period"]:
-        df_vsx[c] = pd.to_numeric(df_vsx[c], errors="coerce").astype("Int64")
-
-
-                         
 EXCLUDE = set([
                                                    
     "E","EA","EB","E-DO","EP","EW","EC","ED","ESD",                     
