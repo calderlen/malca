@@ -617,6 +617,7 @@ def bayesian_event_significance(
     p_max: float | None = None,
     p_points: int = 12,
     mag_grid: np.ndarray | None = None,
+    mag_points: int = 12,
 
     trigger_mode: str = "posterior_prob", # posterior probability or logbf
     logbf_threshold: float = 5.0,
@@ -776,7 +777,7 @@ def bayesian_event_significance(
     p_grid = logit_spaced_grid(p_min=p_min, p_max=p_max, n=p_points)
 
     if mag_grid is None:
-        mag_grid = default_mag_grid(baseline_mag, mags, kind, n=12)
+        mag_grid = default_mag_grid(baseline_mag, mags, kind, n=mag_points)
     else:
         mag_grid = np.asarray(mag_grid, float)
 
@@ -1029,6 +1030,7 @@ def run_bayesian_significance(
     p_max_jump: float | None = None,
     mag_grid_dip: np.ndarray | None = None,
     mag_grid_jump: np.ndarray | None = None,
+    mag_points: int = 12,
 
     trigger_mode: str = "posterior_prob", # posterior probability or logbf
     logbf_threshold_dip: float = 5.0,
@@ -1069,6 +1071,7 @@ def run_bayesian_significance(
         p_max=p_max_dip,
         p_points=p_points,
         mag_grid=mag_grid_dip,
+        mag_points=mag_points,
         trigger_mode=trigger_mode,
         logbf_threshold=logbf_threshold_dip,
         significance_threshold=significance_threshold,
@@ -1093,6 +1096,7 @@ def run_bayesian_significance(
         p_max=p_max_jump,
         p_points=p_points,
         mag_grid=mag_grid_jump,
+        mag_points=mag_points,
         trigger_mode=trigger_mode,
         logbf_threshold=logbf_threshold_jump,
         significance_threshold=significance_threshold,
@@ -1121,6 +1125,7 @@ def process_one(
     p_max_dip: float | None,
     p_min_jump: float | None,
     p_max_jump: float | None,
+    mag_points: int,
 
     run_min_points: int,
     run_allow_gap_points: int,
@@ -1221,6 +1226,7 @@ def process_one(
         p_max_dip=p_max_dip,
         p_min_jump=p_min_jump,
         p_max_jump=p_max_jump,
+        mag_points=mag_points,
 
         run_min_points=run_min_points,
         run_allow_gap_points=run_allow_gap_points,
@@ -1375,6 +1381,7 @@ def main():
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger")
     parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Only used if --trigger-mode posterior_prob")
     parser.add_argument("--p-points", type=int, default=12, help="Number of points in the logit-spaced p grid")
+    parser.add_argument("--mag-points", type=int, default=12, help="Number of points in the magnitude grid")
     parser.add_argument("--run-min-points", type=int, default=2, help="Min triggered points in a run")
     parser.add_argument("--run-allow-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
@@ -1739,7 +1746,7 @@ def main():
                 process_one, path, trigger_mode=args.trigger_mode, logbf_threshold_dip=args.logbf_threshold_dip,
                 logbf_threshold_jump=args.logbf_threshold_jump, significance_threshold=args.significance_threshold,
                 p_points=args.p_points, p_min_dip=args.p_min_dip, p_max_dip=args.p_max_dip,
-                p_min_jump=args.p_min_jump, p_max_jump=args.p_max_jump,
+                p_min_jump=args.p_min_jump, p_max_jump=args.p_max_jump, mag_points=args.mag_points,
                 run_min_points=args.run_min_points, run_allow_gap_points=args.run_allow_gap_points,
                 run_max_gap_days=args.run_max_gap_days, run_min_duration_days=args.run_min_duration_days,
                 run_sum_threshold=args.run_sum_threshold, run_sum_multiplier=args.run_sum_multiplier,
