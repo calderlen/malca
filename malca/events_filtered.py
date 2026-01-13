@@ -18,7 +18,6 @@ import subprocess
 import sys
 from pathlib import Path
 import pandas as pd
-from tqdm import tqdm
 import tempfile
 
 from malca.manifest import build_manifest_dataframe
@@ -107,19 +106,83 @@ def main():
     parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX known variable filter")
     parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
     parser.add_argument("--vsx-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="Path to pre-crossmatched VSX CSV (with asas_sn_id, sep_arcsec, class)")
-    parser.add_argument("--workers", type=int, default=10, help="Workers for pre-filter stats.")
-    parser.add_argument("--stats-chunk-size", type=int, default=5000, help="Rows per checkpoint save during stats computation (default 5000)")
-    parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call to limit arg size and allow resume")
+    parser.add_argument("--workers", type=int, default=10, help="Workers for parallel processing")
+    parser.add_argument("--stats-chunk-size", type=int, default=5000, help="Rows per checkpoint save during stats computation")
+    parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call")
+
+    # events.py args
+    parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"], help="Triggering mode")
+    parser.add_argument("--logbf-threshold-dip", type=float, default=5.0, help="Per-point dip trigger threshold")
+    parser.add_argument("--logbf-threshold-jump", type=float, default=5.0, help="Per-point jump trigger threshold")
+    parser.add_argument("--significance-threshold", type=float, default=99.99997, help="Posterior probability threshold (if trigger-mode=posterior_prob)")
+    parser.add_argument("--p-points", type=int, default=12, help="Number of points in the logit-spaced p grid")
+    parser.add_argument("--mag-points", type=int, default=12, help="Number of points in the magnitude grid")
+    parser.add_argument("--run-min-points", type=int, default=2, help="Min triggered points in a run")
+    parser.add_argument("--run-allow-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
+    parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
+    parser.add_argument("--run-min-duration-days", type=float, default=None, help="Require run duration >= this")
+    parser.add_argument("--run-sum-threshold", type=float, default=None, help="Require run sum-score >= this")
+    parser.add_argument("--run-sum-multiplier", type=float, default=2.5, help="sum_thr = multiplier * per_point_thr")
+    parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
+    parser.add_argument("--p-min-dip", type=float, default=None, help="Minimum dip fraction for p-grid")
+    parser.add_argument("--p-max-dip", type=float, default=None, help="Maximum dip fraction for p-grid")
+    parser.add_argument("--p-min-jump", type=float, default=None, help="Minimum jump fraction for p-grid")
+    parser.add_argument("--p-max-jump", type=float, default=None, help="Maximum jump fraction for p-grid")
+    parser.add_argument("--baseline-func", type=str, default="gp", choices=["gp", "gp_masked", "trend"], help="Baseline function")
+    parser.add_argument("--no-sigma-eff", action="store_true", help="Do not replace errors with sigma_eff")
+    parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff")
+    parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Require |event_mag - baseline_mag| > threshold")
+    parser.add_argument("--output", type=str, default=None, help="Output path for results")
+    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format")
+    parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows")
+
     parser.add_argument("-o", "--overwrite", action="store_true",
                         help="Overwrite checkpoint log and existing output if present (start fresh).")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable verbose output (default: quiet).")
 
-    # Parse known args, rest go to events.py
-    args, events_args = parser.parse_known_args()
-    events_args = [arg for arg in events_args if arg.strip() != "--"]
-    if args.verbose and "--verbose" not in events_args and "-v" not in events_args:
-        events_args = ["--verbose", *events_args]
+    args = parser.parse_args()
+
+    # Build events.py args from parsed arguments
+    events_args = []
+    if args.verbose:
+        events_args.append("--verbose")
+    events_args.extend(["--workers", str(args.workers)])
+    events_args.extend(["--trigger-mode", args.trigger_mode])
+    events_args.extend(["--logbf-threshold-dip", str(args.logbf_threshold_dip)])
+    events_args.extend(["--logbf-threshold-jump", str(args.logbf_threshold_jump)])
+    events_args.extend(["--significance-threshold", str(args.significance_threshold)])
+    events_args.extend(["--p-points", str(args.p_points)])
+    events_args.extend(["--mag-points", str(args.mag_points)])
+    events_args.extend(["--run-min-points", str(args.run_min_points)])
+    events_args.extend(["--run-allow-gap-points", str(args.run_allow_gap_points)])
+    if args.run_max_gap_days is not None:
+        events_args.extend(["--run-max-gap-days", str(args.run_max_gap_days)])
+    if args.run_min_duration_days is not None:
+        events_args.extend(["--run-min-duration-days", str(args.run_min_duration_days)])
+    if args.run_sum_threshold is not None:
+        events_args.extend(["--run-sum-threshold", str(args.run_sum_threshold)])
+    events_args.extend(["--run-sum-multiplier", str(args.run_sum_multiplier)])
+    if args.no_event_prob:
+        events_args.append("--no-event-prob")
+    if args.p_min_dip is not None:
+        events_args.extend(["--p-min-dip", str(args.p_min_dip)])
+    if args.p_max_dip is not None:
+        events_args.extend(["--p-max-dip", str(args.p_max_dip)])
+    if args.p_min_jump is not None:
+        events_args.extend(["--p-min-jump", str(args.p_min_jump)])
+    if args.p_max_jump is not None:
+        events_args.extend(["--p-max-jump", str(args.p_max_jump)])
+    events_args.extend(["--baseline-func", args.baseline_func])
+    if args.no_sigma_eff:
+        events_args.append("--no-sigma-eff")
+    if args.allow_missing_sigma_eff:
+        events_args.append("--allow-missing-sigma-eff")
+    events_args.extend(["--min-mag-offset", str(args.min_mag_offset)])
+    if args.output is not None:
+        events_args.extend(["--output", args.output])
+    events_args.extend(["--output-format", args.output_format])
+    events_args.extend(["--chunk-size", str(args.chunk_size)])
 
     def log(message: str) -> None:
         if args.verbose:
