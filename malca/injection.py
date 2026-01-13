@@ -317,6 +317,21 @@ def _simulate_trial(
         t_center = rng.uniform(t_min + duration, t_max - duration)
         skewness = rng.uniform(skew_min, skew_max)
         median_mag = float(np.nanmedian(df["mag"].values))
+        
+        # Only inject into stars with median magnitude between 12 and 15
+        if median_mag < 12.0 or median_mag > 15.0:
+            return dict(
+                trial_index=trial_index,
+                amp_index=amp_idx,
+                dur_index=dur_idx,
+                inj_index=inj_idx,
+                amplitude=amplitude,
+                duration=duration,
+                median_mag=median_mag,
+                asas_sn_id=asas_sn_id,
+                detected=False,
+                error="magnitude_out_of_range",
+            )
 
         df_injected = inject_dip(df, t_center, duration, amplitude, skewness, mag_err_poly)
         detection_result = _default_detection_func(df_injected, detection_kwargs)
@@ -466,9 +481,9 @@ def run_injection_recovery(
     rng = np.random.default_rng(seed)
 
     if amplitude_grid is None:
-        amplitude_grid = np.linspace(0.1, 2.0, 100)
+        amplitude_grid = np.linspace(0.05, 2.0, 100)
     if duration_grid is None:
-        duration_grid = np.logspace(0.5, 2.5, 100)
+        duration_grid = np.logspace(0.0, 2.5, 100)
 
     amp_grid = np.asarray(amplitude_grid, float)
     dur_grid = np.asarray(duration_grid, float)
@@ -781,6 +796,7 @@ def plot_detection_efficiency(
     xlog: bool = True,
     cmap: str = "viridis",
     show: bool = True,
+    grid_info: str | None = None,
 ) -> plt.Figure:
     """
     Plot 2D detection efficiency heatmap.
@@ -799,7 +815,10 @@ def plot_detection_efficiency(
         ax.set_xscale("log")
     ax.set_xlabel(xlabel, fontsize=14)
     ax.set_ylabel(ylabel, fontsize=14)
-    ax.set_title(title, fontsize=16)
+    title_with_grid = title
+    if grid_info:
+        title_with_grid = f"{title}\n{grid_info}"
+    ax.set_title(title_with_grid, fontsize=16)
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("Detection Efficiency", fontsize=14)
     plt.tight_layout()
@@ -837,6 +856,10 @@ def plot_efficiency_mag_slices(
         output_dir.mkdir(parents=True, exist_ok=True)
 
     figs = []
+    n_depth = len(cube["depth_centers"])
+    n_dur = len(cube["duration_centers"])
+    grid_info = f"Grid: {n_depth}×{n_dur}"
+    
     for k, mag in enumerate(cube["mag_centers"]):
         eff_slice = cube["efficiency"][:, :, k]
         title = f"Detection Efficiency (mag = {mag:.2f})"
@@ -854,6 +877,7 @@ def plot_efficiency_mag_slices(
             cmap=cmap,
             output_path=out_path,
             show=show and not output_dir,
+            grid_info=grid_info,
         )
         figs.append(fig)
         if output_dir:
@@ -890,6 +914,7 @@ def plot_efficiency_marginalized(
         ylabel = "Fractional Depth"
         title = "Detection Efficiency (averaged over magnitude)"
         xlog = True
+        grid_info = f"Grid: {len(y_centers)}×{len(x_centers)}"
     elif axis == "duration":
         eff_2d = np.nanmean(cube["efficiency"], axis=1)
         x_centers = cube["mag_centers"]
@@ -898,6 +923,7 @@ def plot_efficiency_marginalized(
         ylabel = "Fractional Depth"
         title = "Detection Efficiency (averaged over duration)"
         xlog = False
+        grid_info = f"Grid: {len(y_centers)}×{len(x_centers)}"
     elif axis == "depth":
         eff_2d = np.nanmean(cube["efficiency"], axis=0).T  # Transpose: (dur, mag) -> (mag, dur)
         x_centers = cube["duration_centers"]
@@ -906,6 +932,7 @@ def plot_efficiency_marginalized(
         ylabel = "Median Magnitude"
         title = "Detection Efficiency (averaged over depth)"
         xlog = True
+        grid_info = f"Grid: {len(y_centers)}×{len(x_centers)}"
     else:
         raise ValueError(f"Unknown axis: {axis}. Use 'mag', 'duration', or 'depth'.")
 
@@ -922,6 +949,7 @@ def plot_efficiency_marginalized(
         cmap=cmap,
         output_path=output_path,
         show=show,
+        grid_info=grid_info,
     )
 
 
@@ -1016,12 +1044,34 @@ def plot_efficiency_3d(
     mag = cube["mag_centers"]
 
     D, Du, M = np.meshgrid(depth, duration, mag, indexing="ij")
+    
+    # Filter out NaN values for plotly
+    efficiency_flat = cube["efficiency"].flatten()
+    D_flat = D.flatten()
+    Du_flat = Du.flatten()
+    M_flat = M.flatten()
+    
+    valid_mask = np.isfinite(efficiency_flat)
+    if not valid_mask.any():
+        print("Warning: No valid efficiency data to plot (all NaN)")
+        return
+    
+    n_valid = valid_mask.sum()
+    n_total = len(efficiency_flat)
+    print(f"Plotting {n_valid}/{n_total} valid data points ({100*n_valid/n_total:.1f}%)")
+    
+    D_valid = D_flat[valid_mask]
+    Du_valid = Du_flat[valid_mask]
+    M_valid = M_flat[valid_mask]
+    eff_valid = efficiency_flat[valid_mask]
 
+    grid_info = f"Grid: {len(depth)}×{len(duration)}×{len(mag)}"
+    
     fig = go.Figure(data=go.Volume(
-        x=D.flatten(),
-        y=np.log10(Du.flatten()),
-        z=M.flatten(),
-        value=cube["efficiency"].flatten(),
+        x=D_valid,
+        y=np.log10(Du_valid),
+        z=M_valid,
+        value=eff_valid,
         opacity=opacity,
         surface_count=surface_count,
         colorscale="Viridis",
@@ -1034,7 +1084,7 @@ def plot_efficiency_3d(
             yaxis_title="log₁₀(Duration/days)",
             zaxis_title="Median Magnitude",
         ),
-        title="3D Detection Efficiency Cube",
+        title=f"3D Detection Efficiency Cube<br>{grid_info}",
     )
 
     if output_path:
@@ -1074,12 +1124,34 @@ def plot_efficiency_isosurface(
     mag = cube["mag_centers"]
 
     D, Du, M = np.meshgrid(depth, duration, mag, indexing="ij")
+    
+    # Filter out NaN values for plotly
+    efficiency_flat = cube["efficiency"].flatten()
+    D_flat = D.flatten()
+    Du_flat = Du.flatten()
+    M_flat = M.flatten()
+    
+    valid_mask = np.isfinite(efficiency_flat)
+    if not valid_mask.any():
+        print("Warning: No valid efficiency data to plot (all NaN)")
+        return
+    
+    n_valid = valid_mask.sum()
+    n_total = len(efficiency_flat)
+    print(f"Plotting {n_valid}/{n_total} valid data points ({100*n_valid/n_total:.1f}%)")
+    
+    D_valid = D_flat[valid_mask]
+    Du_valid = Du_flat[valid_mask]
+    M_valid = M_flat[valid_mask]
+    eff_valid = efficiency_flat[valid_mask]
+    
+    grid_info = f"Grid: {len(depth)}×{len(duration)}×{len(mag)}"
 
     fig = go.Figure(data=go.Isosurface(
-        x=D.flatten(),
-        y=np.log10(Du.flatten()),
-        z=M.flatten(),
-        value=cube["efficiency"].flatten(),
+        x=D_valid,
+        y=np.log10(Du_valid),
+        z=M_valid,
+        value=eff_valid,
         isomin=isovalue - 0.01,
         isomax=isovalue + 0.01,
         surface_count=1,
@@ -1095,7 +1167,7 @@ def plot_efficiency_isosurface(
             yaxis_title="log₁₀(Duration/days)",
             zaxis_title="Median Magnitude",
         ),
-        title=f"Detection Efficiency = {isovalue*100:.0f}% Isosurface",
+        title=f"Detection Efficiency = {isovalue*100:.0f}% Isosurface<br>{grid_info}",
     )
 
     if output_path:
@@ -1245,10 +1317,10 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--min-points", type=int, default=50, help="Minimum points in control sample if available.")
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--amp-min", type=float, default=0.1)
+    parser.add_argument("--amp-min", type=float, default=0.05)
     parser.add_argument("--amp-max", type=float, default=2.0)
     parser.add_argument("--amp-steps", type=int, default=100)
-    parser.add_argument("--dur-min", type=float, default=10.0)
+    parser.add_argument("--dur-min", type=float, default=1.0)
     parser.add_argument("--dur-max", type=float, default=300.0)
     parser.add_argument("--dur-steps", type=int, default=100)
     parser.add_argument("--n-injections-per-grid", type=int, default=100)
@@ -1265,7 +1337,8 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint.")
 
-    parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"])
+    parser.add_argument("--trigger-mode", type=str, default="logbf", choices=["logbf", "posterior_prob"],
+                        help="Trigger mode for injection testing (default: logbf for speed)")
     parser.add_argument("--logbf-threshold-dip", type=float, default=5.0)
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0)
     parser.add_argument("--significance-threshold", type=float, default=99.99997)
@@ -1280,8 +1353,12 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--run-min-duration-days", type=float, default=None)
     parser.add_argument("--run-sum-threshold", type=float, default=None)
     parser.add_argument("--run-sum-multiplier", type=float, default=2.5)
-    parser.add_argument("--baseline-func", type=str, default="gp", choices=["gp", "gp_masked", "trend"])
-    parser.add_argument("--no-event-prob", action="store_true")
+    parser.add_argument("--baseline-func", type=str, default="trend", choices=["gp", "gp_masked", "trend"],
+                        help="Baseline function (default: trend for speed)")
+    parser.add_argument("--no-event-prob", action="store_true", default=True,
+                        help="Disable event probability computation (default: disabled for speed)")
+    parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
+                        help="Enable event probability computation (slower)")
     parser.add_argument("--no-sigma-eff", action="store_true")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true")
 
