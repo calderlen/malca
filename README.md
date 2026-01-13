@@ -251,36 +251,50 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
   plot_3d_surface(df, x_col="p_points", y_col="mag_points", z_col="dip_bd", color_col="elapsed_s")
   ```
 - Injection-recovery testing (validate pipeline completeness/contamination):
-  `python -m malca.injection --manifest /home/lenhart.106/code/malca/output/lc_manifest_13_13.5.parquet --out /home/lenhart.106/code/malca/output/injection_recovery_13_13.5.csv --workers 10`
+  ```bash
+  # Full run: injection trials + 3D efficiency cube + all plots
+  python -m malca.injection --manifest /path/to/lc_manifest.parquet --workers 10
+
+  # Quick test with limited trials
+  python -m malca.injection --manifest /path/to/lc_manifest.parquet --max-trials 1000 --workers 10
+
+  # Custom output directory
+  python -m malca.injection --manifest /path/to/lc_manifest.parquet --out-dir /custom/output/injection
+  ```
+  Output structure (default `output/injection/`):
+  ```
+  output/injection/
+    results/
+      injection_results.csv           # Trial-by-trial results
+      injection_results_PROCESSED.txt # Checkpoint for resume
+    cubes/
+      efficiency_cube.npz             # 3D efficiency cube
+    plots/
+      mag_slices/                     # Per-magnitude 2D heatmaps
+      efficiency_marginalized_*.png   # Averaged over one axis
+      depth_at_*pct_efficiency.png    # Threshold contour maps
+      efficiency_3d_volume.html       # Interactive 3D (if plotly installed)
+  ```
+  Python API:
   ```python
   from malca.injection import (
-      select_control_sample,
-      run_injection_recovery,
-      compute_detection_efficiency,
-      plot_detection_efficiency,
-  )
-  import pandas as pd
-  import numpy as np
-
-  manifest = pd.read_parquet("/home/lenhart.106/code/malca/output/lc_manifest_13_13.5.parquet")
-  control_sample = select_control_sample(manifest, n_sample=10000)
-
-  results = run_injection_recovery(
-      control_sample,
-      detection_kwargs={},  # uses events.py defaults
-      amplitude_grid=np.linspace(0.1, 2.0, 100),
-      duration_grid=np.logspace(0.5, 2.5, 100),
-      n_injections_per_grid=100,
-      workers=10,
+      load_efficiency_cube,
+      plot_efficiency_all,
+      plot_efficiency_mag_slices,
+      plot_efficiency_marginalized,
+      plot_efficiency_threshold_contour,
+      plot_efficiency_3d,
   )
 
-  # Compute and plot detection efficiency
-  amp_centers, dur_centers, efficiency_grid = compute_detection_efficiency(results)
-  plot_detection_efficiency(amp_centers, dur_centers, efficiency_grid)
+  # Load and visualize existing cube
+  cube = load_efficiency_cube("output/injection/cubes/efficiency_cube.npz")
+  plot_efficiency_marginalized(cube, axis="mag", output_path="avg_over_mag.png")
+  plot_efficiency_threshold_contour(cube, threshold=0.5, output_path="depth_at_50pct.png")
   ```
-  - Injects synthetic dips with skew-normal profiles and realistic noise
-  - Measures completeness as function of dip amplitude and duration
-  - Generates heatmap like ZTF dipper paper Figure 5
+  - Injects synthetic dips with skew-normal profiles onto real observed light curves
+  - Preserves real cadence, systematics, and noise characteristics
+  - Measures completeness as function of dip depth, duration, and stellar magnitude
+  - 3D efficiency cube for completeness corrections in occurrence rate calculations
 - Seasonal trend summary (LTVar-style):
   `python -m malca.ltv --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
 - Quick stats for a single LC file:
@@ -295,7 +309,7 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 - `malca.post_filter`: `python -m malca.post_filter --input /home/lenhart.106/code/malca/output/results.csv --output /home/lenhart.106/code/malca/output/results_filtered.csv`
 - `malca.plot`: `python -m malca.plot --input /path/to/lc123.dat2 --out-dir /home/lenhart.106/code/malca/output/plots --format png`
 - `malca.score`: `python -m malca.score --events /home/lenhart.106/code/malca/output/results.csv --output /home/lenhart.106/code/malca/output/dipper_scores.csv --event-type dip`
-- `malca.injection`: `python -m malca.injection --manifest /home/lenhart.106/code/malca/output/lc_manifest_13_13.5.parquet --out /home/lenhart.106/code/malca/output/injection_recovery_13_13.5.csv --workers 10`
+- `malca.injection`: `python -m malca.injection --manifest /path/to/lc_manifest.parquet --workers 10` (outputs to `output/injection/`)
 - `malca.ltv`: `python -m malca.ltv --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
 - `malca.stats`: `python -m malca.stats /path/to/lc123.dat2`
 - `malca.fp_analysis`: `python -m malca.fp_analysis --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
