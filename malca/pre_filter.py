@@ -346,7 +346,9 @@ def filter_vsx_match(
     # If crossmatch CSV provided, merge it in
     if vsx_crossmatch_csv is not None:
         xmatch = pd.read_csv(vsx_crossmatch_csv, usecols=["asas_sn_id", "sep_arcsec", "class"])
+        xmatch["asas_sn_id"] = xmatch["asas_sn_id"].astype(str)
         id_col = get_id_col(df)
+        df[id_col] = df[id_col].astype(str)
         df = df.merge(xmatch, left_on=id_col, right_on="asas_sn_id", how="left", suffixes=("", "_vsx"))
         if id_col != "asas_sn_id" and "asas_sn_id_vsx" in df.columns:
             df = df.drop(columns=["asas_sn_id_vsx"], errors="ignore")
