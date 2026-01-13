@@ -1227,7 +1227,8 @@ Output structure (default --out-dir output/injection):
       efficiency_3d_volume.html  # Interactive 3D (if plotly)
 """,
     )
-    parser.add_argument("--manifest", type=Path, required=True, help="Manifest parquet path.")
+    parser.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
+                        help="Manifest parquet path (default: output/lc_manifest_all.parquet)")
     parser.add_argument("--out-dir", type=Path, default=Path("output/injection"),
                         help="Base output directory (default: output/injection)")
     parser.add_argument("--out", type=Path, default=None,

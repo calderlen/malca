@@ -252,14 +252,14 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
   ```
 - Injection-recovery testing (validate pipeline completeness/contamination):
   ```bash
-  # Full run: injection trials + 3D efficiency cube + all plots
-  python -m malca.injection --manifest /path/to/lc_manifest.parquet --workers 10
+  # Full run: uses default manifest (output/lc_manifest_all.parquet)
+  python -m malca.injection --workers 10
 
   # Quick test with limited trials
-  python -m malca.injection --manifest /path/to/lc_manifest.parquet --max-trials 1000 --workers 10
+  python -m malca.injection --max-trials 1000 --workers 10
 
-  # Custom output directory
-  python -m malca.injection --manifest /path/to/lc_manifest.parquet --out-dir /custom/output/injection
+  # Custom manifest and output directory
+  python -m malca.injection --manifest /path/to/manifest.parquet --out-dir /custom/output/injection
   ```
   Output structure (default `output/injection/`):
   ```
@@ -309,7 +309,7 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 - `malca.post_filter`: `python -m malca.post_filter --input /home/lenhart.106/code/malca/output/results.csv --output /home/lenhart.106/code/malca/output/results_filtered.csv`
 - `malca.plot`: `python -m malca.plot --input /path/to/lc123.dat2 --out-dir /home/lenhart.106/code/malca/output/plots --format png`
 - `malca.score`: `python -m malca.score --events /home/lenhart.106/code/malca/output/results.csv --output /home/lenhart.106/code/malca/output/dipper_scores.csv --event-type dip`
-- `malca.injection`: `python -m malca.injection --manifest /path/to/lc_manifest.parquet --workers 10` (outputs to `output/injection/`)
+- `malca.injection`: `python -m malca.injection --workers 10` (uses `output/lc_manifest_all.parquet`, outputs to `output/injection/`)
 - `malca.ltv`: `python -m malca.ltv --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
 - `malca.stats`: `python -m malca.stats /path/to/lc123.dat2`
 - `malca.fp_analysis`: `python -m malca.fp_analysis --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
