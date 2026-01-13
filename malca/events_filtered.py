@@ -181,7 +181,7 @@ def main():
             min_points_per_day=args.min_points_per_day,
             apply_vsx=not args.skip_vsx,
             vsx_max_sep_arcsec=args.vsx_max_sep,
-            vsx_catalog_csv=args.vsx_catalog,
+            vsx_catalog=args.vsx_catalog,
             apply_multi_camera=not args.skip_multi_camera,
             min_cameras=args.min_cameras,
             n_workers=args.workers,

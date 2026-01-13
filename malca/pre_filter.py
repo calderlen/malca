@@ -39,6 +39,7 @@ from malca.utils import (
     compute_n_cameras,
 )
 from malca.vsx.crossmatch import propagate_asassn_coords, vsx_coords
+from malca.vsx.filter import load_vsx_catalog
 
 
 def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, compute_cameras: bool) -> dict:
@@ -330,7 +331,7 @@ def filter_vsx_match(
     *,
     max_sep_arcsec: float = 3.0,
     exclude_classes: list[str] | None = None,
-    vsx_catalog_csv: str | Path = "input/vsx/vsxcat.090525.csv",
+    vsx_catalog: str | Path = "input/vsx/vsxcat.090525.csv",
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -339,7 +340,7 @@ def filter_vsx_match(
     Remove candidates that match known variables with specified classes.
 
     If vsx_match_sep_arcsec and vsx_class columns exist, use them.
-    Otherwise, perform crossmatch using VSX catalog from input/vsx/vsxcat.090525.csv
+    Otherwise, perform crossmatch using VSX catalog (fixed-width format).
 
     Required columns for crossmatch: ra_deg, dec_deg, pm_ra, pm_dec
     Raises ValueError if required columns or catalog file are missing.
@@ -350,9 +351,8 @@ def filter_vsx_match(
     need_compute = ("vsx_match_sep_arcsec" not in df.columns) or ("vsx_class" not in df.columns)
 
     if need_compute:
-        # Load VSX catalog
-        vsx_path = Path(vsx_catalog_csv)
-        vsx_df = pd.read_csv(vsx_path, on_bad_lines='warn')
+        # Load VSX catalog using proper fixed-width reader
+        vsx_df = load_vsx_catalog(vsx_catalog)
         vsx_df = vsx_df.dropna(subset=["ra", "dec"]).reset_index(drop=True)
 
         # Verify input has required columns
@@ -463,7 +463,7 @@ def apply_pre_filters(
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
-    vsx_catalog_csv: str | Path = "input/vsx/vsxcat.090525.csv",
+    vsx_catalog: str | Path = "input/vsx/vsxcat.090525.csv",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,
@@ -563,7 +563,7 @@ def apply_pre_filters(
         filters.append(("vsx_match", filter_vsx_match, {
             "max_sep_arcsec": vsx_max_sep_arcsec,
             "exclude_classes": vsx_exclude_classes,
-            "vsx_catalog_csv": vsx_catalog_csv,
+            "vsx_catalog": vsx_catalog,
             "show_tqdm": show_tqdm,
             "rejected_log_csv": rejected_log_csv,
         }))
