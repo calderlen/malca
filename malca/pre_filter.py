@@ -70,53 +70,153 @@ def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, c
     return result
 
 
-def _compute_stats_parallel(df: pd.DataFrame, id_col: str, path_col: str, compute_time: bool = False,
-                            compute_cameras: bool = False,
-                            n_workers: int = 4, show_tqdm: bool = False) -> pd.DataFrame:
+def _compute_stats_parallel(
+    df: pd.DataFrame,
+    id_col: str,
+    path_col: str,
+    compute_time: bool = False,
+    compute_cameras: bool = False,
+    n_workers: int = 4,
+    show_tqdm: bool = False,
+    checkpoint_path: str | Path | None = None,
+    chunk_size: int = 5000,
+) -> pd.DataFrame:
     """
     Compute stats for all rows in parallel using ProcessPoolExecutor.
     Returns a copy of df with new columns added.
+
+    Parameters
+    ----------
+    checkpoint_path : str | Path | None
+        Path to parquet file for saving/resuming progress. If provided and file exists,
+        already-computed stats will be loaded and only missing rows will be processed.
+    chunk_size : int
+        Number of rows to process before saving a checkpoint (default 5000).
     """
     df_with_stats = df.copy()
 
     # Initialize columns
     if compute_time:
-        df_with_stats["time_span_days"] = 0.0
-        df_with_stats["points_per_day"] = 0.0
+        df_with_stats["time_span_days"] = np.nan
+        df_with_stats["points_per_day"] = np.nan
     if compute_cameras:
-        df_with_stats["n_cameras"] = 0
+        df_with_stats["n_cameras"] = np.nan
 
-    # Prepare tasks
+    # Load checkpoint if exists
+    checkpoint_df = None
+    if checkpoint_path is not None:
+        checkpoint_path = Path(checkpoint_path)
+        if checkpoint_path.exists():
+            try:
+                checkpoint_df = pd.read_parquet(checkpoint_path)
+                if show_tqdm:
+                    tqdm.write(f"[stats] Loaded checkpoint with {len(checkpoint_df)} rows from {checkpoint_path}")
+            except Exception as e:
+                if show_tqdm:
+                    tqdm.write(f"[stats] Warning: Could not load checkpoint: {e}")
+
+    # Merge checkpoint data if available
+    already_computed = set()
+    if checkpoint_df is not None and id_col in checkpoint_df.columns:
+        # Create a mapping from id to stats
+        for _, row in checkpoint_df.iterrows():
+            row_id = str(row[id_col])
+            already_computed.add(row_id)
+
+            # Find matching rows in df_with_stats
+            mask = df_with_stats[id_col].astype(str) == row_id
+            if mask.any():
+                if compute_time and "time_span_days" in checkpoint_df.columns:
+                    df_with_stats.loc[mask, "time_span_days"] = row["time_span_days"]
+                    df_with_stats.loc[mask, "points_per_day"] = row["points_per_day"]
+                if compute_cameras and "n_cameras" in checkpoint_df.columns:
+                    df_with_stats.loc[mask, "n_cameras"] = row["n_cameras"]
+
+    # Prepare tasks for rows not yet computed
     tasks = []
     for idx, row in df.iterrows():
         asas_sn_id = str(row[id_col])
+        if asas_sn_id in already_computed:
+            continue
         dir_path = str(row[path_col])
         tasks.append((idx, asas_sn_id, dir_path))
 
-    # Process in parallel
+    if not tasks:
+        if show_tqdm:
+            tqdm.write(f"[stats] All {len(df)} rows already computed from checkpoint")
+        return df_with_stats
+
+    if show_tqdm:
+        tqdm.write(f"[stats] {len(already_computed)} rows from checkpoint, {len(tasks)} remaining to compute")
+
+    # Process in chunks with checkpoint saves
     pbar = tqdm(total=len(tasks), desc="Computing stats (parallel)", leave=False, disable=not show_tqdm)
 
+    results_buffer = []  # Buffer results for checkpoint saves
+
+    def save_checkpoint():
+        """Save current progress to checkpoint file."""
+        if checkpoint_path is None:
+            return
+
+        # Build checkpoint dataframe from df_with_stats (rows with non-NaN stats)
+        if compute_time:
+            mask = df_with_stats["time_span_days"].notna()
+        elif compute_cameras:
+            mask = df_with_stats["n_cameras"].notna()
+        else:
+            return
+
+        checkpoint_cols = [id_col]
+        if compute_time:
+            checkpoint_cols.extend(["time_span_days", "points_per_day"])
+        if compute_cameras:
+            checkpoint_cols.append("n_cameras")
+
+        df_checkpoint = df_with_stats.loc[mask, checkpoint_cols].drop_duplicates(subset=[id_col])
+
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        df_checkpoint.to_parquet(checkpoint_path, index=False)
+
+    processed_since_save = 0
+
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = {
-            executor.submit(_compute_stats_for_row, asas_sn_id, dir_path, compute_time, compute_cameras): idx
-            for idx, asas_sn_id, dir_path in tasks
-        }
+        # Submit tasks in chunks to avoid memory issues with millions of futures
+        for chunk_start in range(0, len(tasks), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(tasks))
+            chunk_tasks = tasks[chunk_start:chunk_end]
 
-        for future in as_completed(futures):
-            idx = futures[future]
-            result = future.result()
+            futures = {
+                executor.submit(_compute_stats_for_row, asas_sn_id, dir_path, compute_time, compute_cameras): idx
+                for idx, asas_sn_id, dir_path in chunk_tasks
+            }
 
-            if compute_time:
-                df_with_stats.loc[idx, "time_span_days"] = result["time_span_days"]
-                df_with_stats.loc[idx, "points_per_day"] = result["points_per_day"]
-            if compute_cameras:
-                df_with_stats.loc[idx, "n_cameras"] = result["n_cameras"]
+            for future in as_completed(futures):
+                idx = futures[future]
+                result = future.result()
 
-            if pbar:
+                if compute_time:
+                    df_with_stats.loc[idx, "time_span_days"] = result["time_span_days"]
+                    df_with_stats.loc[idx, "points_per_day"] = result["points_per_day"]
+                if compute_cameras:
+                    df_with_stats.loc[idx, "n_cameras"] = result["n_cameras"]
+
                 pbar.update(1)
+                processed_since_save += 1
 
-    if pbar:
-        pbar.close()
+            # Save checkpoint after each chunk
+            if checkpoint_path is not None:
+                save_checkpoint()
+                if show_tqdm:
+                    tqdm.write(f"[stats] Checkpoint saved: {chunk_end}/{len(tasks)} rows processed")
+
+    pbar.close()
+
+    # Final checkpoint save
+    if checkpoint_path is not None:
+        save_checkpoint()
+        if show_tqdm:
+            tqdm.write(f"[stats] Final checkpoint saved to {checkpoint_path}")
 
     return df_with_stats
 
@@ -371,6 +471,9 @@ def apply_pre_filters(
     n_workers: int = 1,
     show_tqdm: bool = True,
     rejected_log_csv: str | Path | None = "rejected_pre_filter.csv",
+    # Checkpoint for stats computation
+    stats_checkpoint: str | Path | None = None,
+    stats_chunk_size: int = 5000,
 ) -> pd.DataFrame:
     """
     Apply pre-filters before running events.py.
@@ -391,6 +494,11 @@ def apply_pre_filters(
         Show progress bars
     rejected_log_csv : str | Path | None
         Path to log rejected candidates
+    stats_checkpoint : str | Path | None
+        Path to parquet file for checkpointing stats computation. If provided,
+        progress can be resumed if interrupted.
+    stats_chunk_size : int
+        Number of rows to process before saving checkpoint (default 5000).
 
     Returns
     -------
@@ -418,7 +526,9 @@ def apply_pre_filters(
                 compute_time=compute_time,
                 compute_cameras=compute_cameras,
                 n_workers=n_workers,
-                show_tqdm=show_tqdm
+                show_tqdm=show_tqdm,
+                checkpoint_path=stats_checkpoint,
+                chunk_size=stats_chunk_size,
             )
             precomputed_time = compute_time
             precomputed_cameras = compute_cameras

@@ -108,6 +108,7 @@ def main():
     parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
     parser.add_argument("--vsx-catalog", type=Path, default=Path("input/vsx/vsxcat.090525.csv"), help="Path to VSX catalog CSV")
     parser.add_argument("--workers", type=int, default=10, help="Workers for pre-filter stats.")
+    parser.add_argument("--stats-chunk-size", type=int, default=5000, help="Rows per checkpoint save during stats computation (default 5000)")
     parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call to limit arg size and allow resume")
     parser.add_argument("-o", "--overwrite", action="store_true",
                         help="Overwrite checkpoint log and existing output if present (start fresh).")
@@ -165,6 +166,8 @@ def main():
         log(f"Loaded {len(df_manifest)} sources")
 
     # Step 2: Apply pre-filters
+    stats_checkpoint_file = out_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
+
     if args.force_filter or not filtered_file.exists():
         log(f"\nApplying pre-filters with {args.workers} workers...")
 
@@ -183,7 +186,9 @@ def main():
             min_cameras=args.min_cameras,
             n_workers=args.workers,
             show_tqdm=args.verbose,
-            rejected_log_csv=str(out_dir / f"rejected_pre_filter_{mag_bin_tag}.csv")
+            rejected_log_csv=str(out_dir / f"rejected_pre_filter_{mag_bin_tag}.csv"),
+            stats_checkpoint=str(stats_checkpoint_file),
+            stats_chunk_size=args.stats_chunk_size,
         )
 
         log(f"\nKept {len(df_filtered)}/{len(df_manifest)} sources after pre-filtering")
