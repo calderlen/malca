@@ -106,7 +106,7 @@ def main():
     parser.add_argument("--skip-multi-camera", action="store_true", help="Skip multi-camera filter")
     parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX known variable filter")
     parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
-    parser.add_argument("--vsx-catalog", type=Path, default=Path("input/vsx/vsxcat.090525.csv"), help="Path to VSX catalog CSV")
+    parser.add_argument("--vsx-crossmatch", type=Path, default=None, help="Path to pre-crossmatched VSX CSV (with asas_sn_id, sep_arcsec, class)")
     parser.add_argument("--workers", type=int, default=10, help="Workers for pre-filter stats.")
     parser.add_argument("--stats-chunk-size", type=int, default=5000, help="Rows per checkpoint save during stats computation (default 5000)")
     parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call to limit arg size and allow resume")
@@ -181,7 +181,7 @@ def main():
             min_points_per_day=args.min_points_per_day,
             apply_vsx=not args.skip_vsx,
             vsx_max_sep_arcsec=args.vsx_max_sep,
-            vsx_catalog=args.vsx_catalog,
+            vsx_crossmatch_csv=args.vsx_crossmatch,
             apply_multi_camera=not args.skip_multi_camera,
             min_cameras=args.min_cameras,
             n_workers=args.workers,

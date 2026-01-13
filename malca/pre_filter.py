@@ -29,7 +29,6 @@ from time import perf_counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
-from astropy import units as u
 from tqdm.auto import tqdm
 
 from malca.utils import (
@@ -38,8 +37,6 @@ from malca.utils import (
     compute_time_stats,
     compute_n_cameras,
 )
-from malca.vsx.crossmatch import propagate_asassn_coords, vsx_coords
-from malca.vsx.filter import load_vsx_catalog
 
 
 def _compute_stats_for_row(asas_sn_id: str, dir_path: str, compute_time: bool, compute_cameras: bool) -> dict:
@@ -331,62 +328,40 @@ def filter_vsx_match(
     *,
     max_sep_arcsec: float = 3.0,
     exclude_classes: list[str] | None = None,
-    vsx_catalog: str | Path = "input/vsx/vsxcat.090525.csv",
+    vsx_crossmatch_csv: str | Path | None = None,
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
-    Filter candidates based on VSX crossmatch results.
-    Remove candidates that match known variables with specified classes.
+    Filter candidates based on pre-crossmatched VSX results.
 
-    If vsx_match_sep_arcsec and vsx_class columns exist, use them.
-    Otherwise, perform crossmatch using VSX catalog (fixed-width format).
+    Either:
+    - Provide vsx_crossmatch_csv: merges on asas_sn_id to get sep_arcsec/class
+    - Or have sep_arcsec/class columns already in df
 
-    Required columns for crossmatch: ra_deg, dec_deg, pm_ra, pm_dec
-    Raises ValueError if required columns or catalog file are missing.
+    Removes candidates within max_sep_arcsec of a VSX source.
     """
     n0 = len(df)
 
-    # Check if we need to compute crossmatch
-    need_compute = ("vsx_match_sep_arcsec" not in df.columns) or ("vsx_class" not in df.columns)
+    # If crossmatch CSV provided, merge it in
+    if vsx_crossmatch_csv is not None:
+        xmatch = pd.read_csv(vsx_crossmatch_csv, usecols=["asas_sn_id", "sep_arcsec", "class"])
+        id_col = get_id_col(df)
+        df = df.merge(xmatch, left_on=id_col, right_on="asas_sn_id", how="left", suffixes=("", "_vsx"))
+        if id_col != "asas_sn_id" and "asas_sn_id_vsx" in df.columns:
+            df = df.drop(columns=["asas_sn_id_vsx"], errors="ignore")
 
-    if need_compute:
-        # Load VSX catalog using proper fixed-width reader
-        vsx_df = load_vsx_catalog(vsx_catalog)
-        vsx_df = vsx_df.dropna(subset=["ra", "dec"]).reset_index(drop=True)
-
-        # Verify input has required columns
-        required_cols = ["ra_deg", "dec_deg", "pm_ra", "pm_dec"]
-        missing_cols = [c for c in required_cols if c not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns for VSX crossmatch: {missing_cols}")
-
-        # Perform crossmatch
-        df_with_vsx = df.copy()
-        coords_asassn = propagate_asassn_coords(df)
-        coords_vsx = vsx_coords(vsx_df)
-
-        idx_vsx, sep2d, _ = coords_asassn.match_to_catalog_sky(coords_vsx)
-
-        df_with_vsx["vsx_match_sep_arcsec"] = sep2d.arcsec
-        df_with_vsx["vsx_class"] = pd.Series(index=df_with_vsx.index, dtype=object)
-
-        mask_matched = sep2d < (max_sep_arcsec * u.arcsec)
-        if "class" in vsx_df.columns:
-            df_with_vsx.loc[mask_matched, "vsx_class"] = vsx_df.loc[idx_vsx[mask_matched], "class"].values
-
-        df = df_with_vsx
+    # Check required columns exist
+    if "sep_arcsec" not in df.columns or "class" not in df.columns:
+        raise ValueError(f"Missing required columns for VSX filter: need 'sep_arcsec' and 'class'. Got: {list(df.columns)}")
 
     # Apply filter
-    has_match = df["vsx_match_sep_arcsec"].fillna(999) <= max_sep_arcsec
+    has_match = df["sep_arcsec"].fillna(999) <= max_sep_arcsec
 
     if exclude_classes is not None:
-        # Reject only specific classes
-        is_excluded_type = df["vsx_class"].fillna("").isin(exclude_classes)
+        is_excluded_type = df["class"].fillna("").isin(exclude_classes)
         mask = ~(has_match & is_excluded_type)
     else:
-        # Default: reject ALL VSX matches (assumes VSX catalog is pre-filtered to safe types only)
-        # This means if it matches ANY VSX entry, it's a known variable we should exclude
         mask = ~has_match
 
     out = df.loc[mask].reset_index(drop=True)
@@ -463,7 +438,7 @@ def apply_pre_filters(
     apply_vsx: bool = False,
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
-    vsx_catalog: str | Path = "input/vsx/vsxcat.090525.csv",
+    vsx_crossmatch_csv: str | Path | None = None,
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,
@@ -558,12 +533,12 @@ def apply_pre_filters(
             "rejected_log_csv": rejected_log_csv,
         }))
 
-    # Filter 3: VSX crossmatch - moderate cost, catalog-only
+    # Filter 3: VSX crossmatch
     if apply_vsx:
         filters.append(("vsx_match", filter_vsx_match, {
             "max_sep_arcsec": vsx_max_sep_arcsec,
             "exclude_classes": vsx_exclude_classes,
-            "vsx_catalog": vsx_catalog,
+            "vsx_crossmatch_csv": vsx_crossmatch_csv,
             "show_tqdm": show_tqdm,
             "rejected_log_csv": rejected_log_csv,
         }))
