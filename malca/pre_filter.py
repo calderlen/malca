@@ -348,7 +348,7 @@ def filter_vsx_match(
     if need_compute:
         # Load VSX catalog
         vsx_path = Path(vsx_catalog_csv)
-        vsx_df = pd.read_csv(vsx_path)
+        vsx_df = pd.read_csv(vsx_path, on_bad_lines='warn')
         vsx_df = vsx_df.dropna(subset=["ra", "dec"]).reset_index(drop=True)
 
         # Verify input has required columns
