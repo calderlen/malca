@@ -608,6 +608,36 @@ def plot_bayes_results(
                             alpha=0.8,
                             label="Jump (Paczynski)" if run_summary == jump["run_summaries"][0] else "",
                         )
+                
+                elif morph == "fred" and params:
+                    t0 = params.get("t0", (jd_start + jd_end) / 2)
+                    if t0 is not None and np.isfinite(t0):
+                        t0_plot = t0 - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.axvline(t0_plot, color="green", linestyle="--", alpha=0.7, linewidth=1.0)
+                    if plot_fits:
+                        tau = params.get("tau", 0.05)
+                        amp = params.get("amp", -0.1)
+                        baseline = params.get("baseline", band_df["mag"].median())
+                        # Plot range: start to +10*tau to catch decay
+                        t_fit = np.linspace(jd_start - 3 * tau, jd_end + 3 * tau, 100)
+                        # Need fred function imported or defined here. 
+                        # Ideally imported: `from malca.events import fred`
+                        # But failing that, we can use the analytic form:
+                        # baseline + amp * np.where(t_fit >= t0, np.exp(-(t_fit - t0)/tau), 0.0)
+                        dt = t_fit - t0
+                        decay = np.where(dt >= 0, np.exp(-dt / tau), 0.0)
+                        mag_fit = baseline + amp * decay
+                        
+                        t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
+                        ax_main.plot(
+                            t_fit_plot,
+                            mag_fit,
+                            color="magenta",
+                            linestyle="-",
+                            linewidth=2,
+                            alpha=0.8,
+                            label="Jump (FRED)" if run_summary == jump["run_summaries"][0] else "",
+                        )
         
         ax_main.set_ylabel(f"{band_labels[band]} [mag]", fontsize=12)
         ax_main.grid(True, alpha=0.3)

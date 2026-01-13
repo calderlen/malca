@@ -331,7 +331,11 @@ def plot_light_curve_with_dips(
     res_v: dict,
     source_id: str,
     plot_path: Path,
+    accepted_morphologies: set[str] | None = None,
 ):
+    # Default: accept gaussian and paczynski, reject noise/none
+    if accepted_morphologies is None:
+        accepted_morphologies = {"gaussian", "paczynski"}
     # Use 1x2 layout (side-by-side) with separate x-axes for each band
     # V-band and g-band have different JD ranges and should not share x-axis
     fig, axes = pl.subplots(1, 2, figsize=(16, 6))
@@ -420,9 +424,9 @@ def plot_light_curve_with_dips(
         
         if run_summaries:
             for summary in run_summaries:
-                # Filter: skip if morphology is 'noise' or 'none'
-                morph = summary.get("morphology", "none")
-                if morph not in ("noise", "none"):
+                # Filter by accepted morphologies
+                morph = summary.get("morphology", "none").lower()
+                if morph in accepted_morphologies:
                     confirmed_count += 1
                     
                     # Try to get t0 from params, otherwise use range center
@@ -488,6 +492,13 @@ def build_reproduction_report(
     bayes_trigger_mode: str = "logbf",          # "logbf" or "posterior_prob"
     bayes_logbf_threshold_dip: float = 5.0,     # trigger if max log BF >= this
     bayes_logbf_threshold_jump: float = 5.0,
+    # Run confirmation filters
+    run_min_points: int = 2,
+    run_allow_gap_points: int = 1,
+    run_max_gap_days: float | None = None,
+    run_min_duration_days: float | None = None,
+    run_sum_threshold: float | None = None,
+    run_sum_multiplier: float = 2.5,
     skypatrol_dir: Path | str | None = None,
     path_prefix: Path | str | None = None,
     path_root: Path | str | None = None,
@@ -505,8 +516,13 @@ def build_reproduction_report(
     vsx_max_sep: float = 3.0,
     min_mag_offset: float = 0.1,
     skip_post_filters: bool = False,
+    # Morphology filtering
+    accepted_morphologies: set[str] | None = None,
     **baseline_kwargs,
 ) -> pd.DataFrame:
+    # Default morphologies: gaussian and paczynski (reject noise/none)
+    if accepted_morphologies is None:
+        accepted_morphologies = {"gaussian", "paczynski", "fred"}
     manifest_df = load_manifest_df(manifest_path) if manifest_path is not None else None
 
     baseline_candidates = candidates if candidates is not None else brayden_candidates
@@ -527,9 +543,14 @@ def build_reproduction_report(
                 df_targets = df_targets.drop(columns=["mag_bin_x", "mag_bin_y"])
 
     target_map_dict = target_map(df_targets)
-    records_map = records_from_manifest(manifest_subset) if manifest_subset is not None else None
 
-    if (records_map is None or not records_map) and skypatrol_dir is not None:
+    # Priority order for light curve sources:
+    # 1. SkyPatrol directory (if provided) - preferred for SkyPatrol CSVs
+    # 2. Candidates 'path' column (if present) - for events.py output
+    # 3. Manifest (if provided) - fallback to .dat2 files
+    records_map = None
+
+    if skypatrol_dir is not None:
         records_map = records_from_skypatrol_dir(df_targets, Path(skypatrol_dir))
         if verbose:
             n_found = sum(len(v) for v in records_map.values())
@@ -544,6 +565,12 @@ def build_reproduction_report(
         if verbose:
             n_found = sum(len(v) for v in records_map.values())
             print(f"[DEBUG] Built records_map from candidates 'path' column: {n_found} light curves found")
+
+    if (records_map is None or not records_map) and manifest_subset is not None:
+        records_map = records_from_manifest(manifest_subset)
+        if verbose:
+            n_found = sum(len(v) for v in records_map.values())
+            print(f"[DEBUG] Built records_map from manifest: {n_found} light curves found")
 
     # Apply pre-filters if manifest is provided and not skipped
     if manifest_subset is not None and not skip_pre_filters and records_map:
@@ -723,6 +750,16 @@ def build_reproduction_report(
                             dfc,
                             significance_threshold=float(bayes_significance_threshold) if bayes_significance_threshold is not None else 99.99997,
                             p_points=int(bayes_p_points),
+                            trigger_mode=bayes_trigger_mode,
+                            logbf_threshold_dip=bayes_logbf_threshold_dip,
+                            logbf_threshold_jump=bayes_logbf_threshold_jump,
+                            # Run confirmation filters
+                            run_min_points=run_min_points,
+                            run_allow_gap_points=run_allow_gap_points,
+                            run_max_gap_days=run_max_gap_days,
+                            run_min_duration_days=run_min_duration_days,
+                            run_sum_threshold=run_sum_threshold,
+                            run_sum_multiplier=run_sum_multiplier,
                         )
                         result = apply_triggering(result, band_name)
                         return result
@@ -737,6 +774,29 @@ def build_reproduction_report(
                 res_g = bayes(dfg, "g")
                 res_v = bayes(dfv, "V")
 
+                # Apply morphology filtering to results
+                def count_accepted_runs(res: dict, kind: str) -> int:
+                    """Count runs that pass morphology filter."""
+                    run_summaries = res.get(kind, {}).get("run_summaries", [])
+                    return sum(1 for s in run_summaries
+                               if s.get("morphology", "none").lower() in accepted_morphologies)
+
+                # Update significant flags based on morphology filter
+                res_g["dip"]["n_accepted"] = count_accepted_runs(res_g, "dip")
+                res_g["jump"]["n_accepted"] = count_accepted_runs(res_g, "jump")
+                res_v["dip"]["n_accepted"] = count_accepted_runs(res_v, "dip")
+                res_v["jump"]["n_accepted"] = count_accepted_runs(res_v, "jump")
+
+                # Override significant flag if no runs pass morphology filter
+                if res_g["dip"]["n_accepted"] == 0:
+                    res_g["dip"]["significant"] = False
+                if res_g["jump"]["n_accepted"] == 0:
+                    res_g["jump"]["significant"] = False
+                if res_v["dip"]["n_accepted"] == 0:
+                    res_v["dip"]["significant"] = False
+                if res_v["jump"]["n_accepted"] == 0:
+                    res_v["jump"]["significant"] = False
+
                 if out_dir:
                     plot_path = Path(out_dir) / f"{asn}_dips.png"
                     plot_light_curve_with_dips(
@@ -746,6 +806,7 @@ def build_reproduction_report(
                         res_v,
                         str(asn),
                         plot_path,
+                        accepted_morphologies=accepted_morphologies,
                     )
 
                 rows.append(
@@ -945,35 +1006,53 @@ Examples:
 
   # With SkyPatrol CSV files
   python -m malca.reproduction --candidates candidates.csv --skypatrol-dir input/skypatrol2 --method bayes
-"""
+""",
     )
-    parser.add_argument("--out-dir", default="./results_test", help="Directory for peak_results output")
-    parser.add_argument("--out-format", choices=("csv", "parquet"), default="csv")
+
+    # Output options
+    parser.add_argument(
+        "--out-dir",
+        default="./results_test",
+        help="Directory for peak_results output",
+    )
+    parser.add_argument(
+        "--out-format",
+        choices=("csv", "parquet"),
+        default="csv",
+        help="Output format (default: csv)",
+    )
     parser.add_argument(
         "--workers",
         type=int,
         default=10,
         help="ProcessPool worker count for dip_finder_naive.",
     )
-    parser.add_argument("--chunk-size", type=int, default=250000, help="Rows per chunk flush for CSV output")
-    parser.add_argument("--metrics-dip-threshold", type=float, default=0.3, help="Dip threshold for run_metrics")
-
-    # posterior-prob thresholding (legacy)
     parser.add_argument(
-        "--bayes-significance-threshold",
-        type=float,
-        default=None,
-        help="Per-point posterior threshold (percentage, e.g. 99.99997). Only used if --bayes-trigger-mode=posterior_prob.",
+        "--chunk-size",
+        type=int,
+        default=250000,
+        help="Rows per chunk flush for CSV output",
     )
     parser.add_argument(
-        "--bayes-sigma",
+        "--metrics-dip-threshold",
         type=float,
-        default=None,
-        help="Sigma threshold converted to a one-tailed Gaussian CDF (%). Only used if --bayes-trigger-mode=posterior_prob.",
+        default=0.3,
+        help="Dip threshold for run_metrics",
     )
-    parser.add_argument("--bayes-p-points", type=int, default=80, help="Number of logit-spaced probability grid points")
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Print debug info",
+    )
 
-    # NEW: log BF triggering
+    # Bayesian detection settings
+    parser.add_argument(
+        "--method",
+        choices=("bayes",),
+        default="bayes",
+        help="Detection method. Only 'bayes' (Bayesian) is currently supported.",
+    )
     parser.add_argument(
         "--bayes-trigger-mode",
         choices=("logbf", "posterior_prob"),
@@ -992,9 +1071,151 @@ Examples:
         default=5.0,
         help="Jump triggers when max per-point log BF >= this (only if --bayes-trigger-mode=logbf).",
     )
+    parser.add_argument(
+        "--bayes-p-points",
+        type=int,
+        default=80,
+        help="Number of logit-spaced probability grid points",
+    )
 
-    parser.add_argument("--skypatrol-dir", default=None, help="Directory with SkyPatrol CSV files (<source_id>-light-curves.csv)")
-    parser.add_argument("--manifest", default=None, help="Path to lc_manifest CSV/Parquet for targeted reproduction")
+    # Bayesian legacy settings (posterior_prob)
+    parser.add_argument(
+        "--bayes-significance-threshold",
+        type=float,
+        default=None,
+        help="Per-point posterior threshold (percentage, e.g. 99.99997). Only used if --bayes-trigger-mode=posterior_prob.",
+    )
+    parser.add_argument(
+        "--bayes-sigma",
+        type=float,
+        default=None,
+        help="Sigma threshold converted to a one-tailed Gaussian CDF (%). Only used if --bayes-trigger-mode=posterior_prob.",
+    )
+
+    # Run confirmation filters
+    parser.add_argument(
+        "--run-min-points",
+        type=int,
+        default=2,
+        help="Minimum triggered points required to confirm a run (default: 2).",
+    )
+    parser.add_argument(
+        "--run-allow-gap-points",
+        type=int,
+        default=1,
+        help="Allow this many non-triggered points between triggered points in a run (default: 1).",
+    )
+    parser.add_argument(
+        "--run-max-gap-days",
+        type=float,
+        default=None,
+        help="Maximum gap in days between points in a run (default: 5x cadence).",
+    )
+    parser.add_argument(
+        "--run-min-duration-days",
+        type=float,
+        default=None,
+        help="Minimum duration in days for a confirmed run (default: 2x cadence).",
+    )
+    parser.add_argument(
+        "--run-sum-threshold",
+        type=float,
+        default=None,
+        help="Minimum sum of scores in a run (default: run_sum_multiplier * trigger_threshold).",
+    )
+    parser.add_argument(
+        "--run-sum-multiplier",
+        type=float,
+        default=2.5,
+        help="Multiplier for automatic run_sum_threshold (default: 2.5).",
+    )
+
+    # Pre-filter options
+    parser.add_argument(
+        "--skip-pre-filters",
+        action="store_true",
+        help="Skip pre-filtering step (sparse LC, multi-camera, VSX)",
+    )
+    parser.add_argument(
+        "--min-time-span",
+        type=float,
+        default=100.0,
+        help="Min time span in days for sparse LC filter (default: 100)",
+    )
+    parser.add_argument(
+        "--min-points-per-day",
+        type=float,
+        default=0.05,
+        help="Min cadence for sparse LC filter (default: 0.05)",
+    )
+    parser.add_argument(
+        "--min-cameras",
+        type=int,
+        default=2,
+        help="Min cameras required for multi-camera filter (default: 2)",
+    )
+    parser.add_argument(
+        "--skip-vsx",
+        action="store_true",
+        help="Skip VSX known variable filter",
+    )
+    parser.add_argument(
+        "--vsx-catalog",
+        type=Path,
+        default=Path("input/vsx/vsxcat.090525.csv"),
+        help="Path to VSX catalog CSV",
+    )
+    parser.add_argument(
+        "--vsx-max-sep",
+        type=float,
+        default=3.0,
+        help="Max separation for VSX match in arcsec (default: 3.0)",
+    )
+
+    # Signal amplitude filter
+    parser.add_argument(
+        "--min-mag-offset",
+        type=float,
+        default=0.1,
+        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.1)",
+    )
+
+    # Post-filter options
+    parser.add_argument(
+        "--skip-post-filters",
+        action="store_true",
+        help="Skip post-filtering step (currently no post-filters implemented)",
+    )
+
+    # Morphology filter options
+    parser.add_argument(
+        "--accepted-morphologies",
+        type=str,
+        default="gaussian,paczynski,fred",
+        help="Comma-separated list of accepted morphologies (default: gaussian,paczynski). Use 'all' to accept all morphologies including noise.",
+    )
+
+    # Input Data Sources
+    parser.add_argument(
+        "--skypatrol-dir",
+        default=None,
+        help="Directory with SkyPatrol CSV files (<source_id>-light-curves.csv)",
+    )
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help="Path to lc_manifest CSV/Parquet for targeted reproduction",
+    )
+    parser.add_argument(
+        "--candidates",
+        default=None,
+        help="Candidate spec (built-in list name or path to CSV/Parquet file from events.py).",
+    )
+    parser.add_argument(
+        "--input",
+        default=None,
+        help="Alias for --candidates (path to events.py output CSV/Parquet).",
+    )
     parser.add_argument(
         "--path-prefix",
         default=None,
@@ -1010,49 +1231,7 @@ Examples:
         default=None,
         help="Naive-method baseline function import path (e.g. module:func). This does not affect Bayesian baseline.",
     )
-    parser.add_argument(
-        "--candidates",
-        default=None,
-        help="Candidate spec (built-in list name or path to CSV/Parquet file from events.py).",
-    )
-    parser.add_argument(
-        "--input",
-        default=None,
-        help="Alias for --candidates (path to events.py output CSV/Parquet)."
-    )
-    parser.add_argument(
-        "--method",
-        choices=("bayes",),
-        default="bayes",
-        help="Detection method. Only 'bayes' (Bayesian) is currently supported. "
-             "Legacy methods 'naive' and 'biweight' have been deprecated.",
-    )
-    
-    # Pre-filter options
-    parser.add_argument("--skip-pre-filters", action="store_true", 
-                        help="Skip pre-filtering step (sparse LC, multi-camera, VSX)")
-    parser.add_argument("--min-time-span", type=float, default=100.0,
-                        help="Min time span in days for sparse LC filter (default: 100)")
-    parser.add_argument("--min-points-per-day", type=float, default=0.05,
-                        help="Min cadence for sparse LC filter (default: 0.05)")
-    parser.add_argument("--min-cameras", type=int, default=2,
-                        help="Min cameras required for multi-camera filter (default: 2)")
-    parser.add_argument("--skip-vsx", action="store_true",
-                        help="Skip VSX known variable filter")
-    parser.add_argument("--vsx-catalog", type=Path, default=Path("input/vsx/vsxcat.090525.csv"),
-                        help="Path to VSX catalog CSV")
-    parser.add_argument("--vsx-max-sep", type=float, default=3.0,
-                        help="Max separation for VSX match in arcsec (default: 3.0)")
-    
-    # Signal amplitude filter
-    parser.add_argument("--min-mag-offset", type=float, default=0.1,
-                        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.1)")
-    
-    # Post-filter options (placeholder for future)
-    parser.add_argument("--skip-post-filters", action="store_true",
-                        help="Skip post-filtering step (currently no post-filters implemented)")
-    
-    parser.add_argument("--verbose", "-v", action="store_true", help="Print debug info")
+
     return parser
 
 
@@ -1090,6 +1269,14 @@ def main(argv: Iterable[str] | None = None) -> None:
         if args.verbose:
             print(f"[DEBUG] Using logBF triggering: dip_thr={args.bayes_logbf_threshold_dip}, jump_thr={args.bayes_logbf_threshold_jump}")
 
+    # Parse accepted morphologies
+    if args.accepted_morphologies.lower() == "all":
+        accepted_morphologies = {"gaussian", "paczynski", "noise", "none"}
+    else:
+        accepted_morphologies = {m.strip().lower() for m in args.accepted_morphologies.split(",")}
+    if args.verbose:
+        print(f"[DEBUG] Accepted morphologies: {accepted_morphologies}")
+
     report = build_reproduction_report(
         candidates=candidate_data,
         out_dir=args.out_dir,
@@ -1102,6 +1289,13 @@ def main(argv: Iterable[str] | None = None) -> None:
         bayes_trigger_mode=args.bayes_trigger_mode,
         bayes_logbf_threshold_dip=args.bayes_logbf_threshold_dip,
         bayes_logbf_threshold_jump=args.bayes_logbf_threshold_jump,
+        # Run confirmation filters
+        run_min_points=args.run_min_points,
+        run_allow_gap_points=args.run_allow_gap_points,
+        run_max_gap_days=args.run_max_gap_days,
+        run_min_duration_days=args.run_min_duration_days,
+        run_sum_threshold=args.run_sum_threshold,
+        run_sum_multiplier=args.run_sum_multiplier,
         skypatrol_dir=args.skypatrol_dir,
         path_prefix=args.path_prefix,
         path_root=args.path_root,
@@ -1118,6 +1312,8 @@ def main(argv: Iterable[str] | None = None) -> None:
         vsx_max_sep=args.vsx_max_sep,
         min_mag_offset=args.min_mag_offset,
         skip_post_filters=args.skip_post_filters,
+        # Morphology filter
+        accepted_morphologies=accepted_morphologies,
         **kwargs,
     )
 
@@ -1131,6 +1327,14 @@ def main(argv: Iterable[str] | None = None) -> None:
         print(f"  - Multi-camera:       min_cameras={args.min_cameras}")
         print(f"  - VSX filter:         {'APPLIED' if not args.skip_vsx else 'SKIPPED'}")
     print(f"Signal amplitude:     {'APPLIED (min_mag_offset=' + str(args.min_mag_offset) + ')' if args.min_mag_offset > 0 else 'DISABLED'}")
+    print(f"Run confirmation:     min_points={args.run_min_points}, allow_gap={args.run_allow_gap_points}, sum_mult={args.run_sum_multiplier}")
+    if args.run_max_gap_days is not None:
+        print(f"                      max_gap_days={args.run_max_gap_days}")
+    if args.run_min_duration_days is not None:
+        print(f"                      min_duration_days={args.run_min_duration_days}")
+    if args.run_sum_threshold is not None:
+        print(f"                      sum_threshold={args.run_sum_threshold}")
+    print(f"Morphology filter:    accepted={{{', '.join(sorted(accepted_morphologies))}}}")
     print(f"Post-filters:         {'APPLIED' if not args.skip_post_filters else 'SKIPPED (none implemented)'}")
     print("=" * 60 + "\n")
 

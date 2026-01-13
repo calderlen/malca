@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.special import logsumexp
+from scipy.special import logsumexp, erf
 from scipy.optimize import curve_fit
 from tqdm import tqdm
 import warnings
@@ -57,6 +57,50 @@ def paczynski(t, amp, t0, tE, baseline):
     """
     tE = np.maximum(np.abs(tE), 1e-5)
     return baseline + amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
+
+
+def fred(t, amp, t0, tau, baseline):
+    """
+    Fast Rise Exponential Decay (FRED) kernel + baseline term.
+    """
+    tau = np.maximum(np.abs(tau), 1e-5)
+    dt = t - t0
+    # Mask out values before t0
+    decay = np.where(dt >= 0, np.exp(-dt / tau), 0.0)
+    return baseline + amp * decay
+
+
+def skew_gaussian(t, amp, t0, sigma, baseline, alpha):
+    """
+    Skew-normal distribution kernel + baseline term.
+
+    Parameters
+    ----------
+    t : array-like
+        Time values
+    amp : float
+        Amplitude of the dip (positive for dimming)
+    t0 : float
+        Center time of the event
+    sigma : float
+        Width parameter (like standard deviation)
+    baseline : float
+        Baseline magnitude
+    alpha : float
+        Skewness parameter. alpha=0 is symmetric Gaussian.
+        alpha>0 skews right (slower egress), alpha<0 skews left (slower ingress).
+
+    Returns
+    -------
+    array-like
+        Model magnitudes
+    """
+    sigma = np.maximum(np.abs(sigma), 1e-5)
+    z = (t - t0) / sigma
+    # Skew-normal: gaussian * (1 + erf(alpha * z / sqrt(2)))
+    # Normalized so peak amplitude matches 'amp' approximately
+    skew_factor = 1 + erf(alpha * z / np.sqrt(2))
+    return baseline + amp * np.exp(-0.5 * z**2) * skew_factor
 
 
 def log_gaussian(x, mu, sigma):
@@ -191,10 +235,40 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     except Exception:
         pass
 
+    # Try skew_gaussian for dips (asymmetric profiles)
+    if kind == "dip":
+        try:
+            # Start with no skew (alpha=0), let optimizer find it
+            popt_sg, _ = curve_fit(
+                skew_gaussian, t_seg, y_seg,
+                p0=[amp_guess, t0_guess, sigma_guess, baseline_guess, 0.0],
+                sigma=e_seg, maxfev=3000,
+                bounds=(
+                    [-np.inf, t_seg[0], 1e-5, -np.inf, -10],  # lower bounds
+                    [np.inf, t_seg[-1], np.inf, np.inf, 10]   # upper bounds
+                )
+            )
+            resid_sg = y_seg - skew_gaussian(t_seg, *popt_sg)
+            bic_sg = bic(resid_sg, e_seg, 5)  # 5 parameters
+
+            is_valid_sg = (popt_sg[0] > 0)  # positive amp for dips
+
+            # Only accept if BIC is significantly better (delta > 10)
+            if is_valid_sg and bic_sg < (best_bic - 10):
+                best_bic = bic_sg
+                best_model = "skew_gaussian"
+                best_params = {
+                    "amp": popt_sg[0], "t0": popt_sg[1],
+                    "sigma": popt_sg[2], "baseline": popt_sg[3],
+                    "alpha": popt_sg[4]
+                }
+        except Exception:
+            pass
+
     if kind == "jump":
         try:
-            amp_p_guess = -abs(amp_guess) 
-            
+            amp_p_guess = -abs(amp_guess)
+
             popt_p, _ = curve_fit(
                 paczynski, t_seg, y_seg,
                 p0=[amp_p_guess, t0_guess, sigma_guess, baseline_guess],
@@ -205,13 +279,40 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
 
             is_valid_p = (popt_p[0] < 0)
 
-            if is_valid_p and bic_p < (best_bic - 10): 
+            if is_valid_p and bic_p < (best_bic - 10):
                 best_bic = bic_p
                 best_model = "paczynski"
                 best_params = {
-                    "amp": popt_p[0], "t0": popt_p[1], 
+                    "amp": popt_p[0], "t0": popt_p[1],
                     "tE": popt_p[2], "baseline": popt_p[3]
                 }
+        except Exception:
+            pass
+
+        # Try FRED for jumps (flares)
+        try:
+            # guess tau as small
+            tau_guess = 0.05 
+            
+            popt_f, _ = curve_fit(
+                fred, t_seg, y_seg,
+                p0=[amp_guess, t0_guess, tau_guess, baseline_guess],
+                sigma=e_seg, maxfev=2000
+            )
+            # For flares (jumps), amp should be negative (brightening in magnitudes)
+            is_valid_f = (popt_f[0] < 0) 
+            
+            if is_valid_f:
+                resid_f = y_seg - fred(t_seg, *popt_f)
+                bic_f = bic(resid_f, e_seg, 4) # 4 params: amp, t0, tau, baseline
+                
+                if bic_f < (best_bic - 10):
+                    best_bic = bic_f
+                    best_model = "fred"
+                    best_params = {
+                        "amp": popt_f[0], "t0": popt_f[1],
+                        "tau": popt_f[2], "baseline": popt_f[3]
+                    }
         except Exception:
             pass
 
