@@ -5,7 +5,8 @@
   - Index CSVs: `index*.csv` with columns like `asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec, ...`
 - Light curves: `lc<num>_cal/` folders containing `<asas_sn_id>.dat2`
 - Optional catalogs:
-  - VSX: `input/vsx/vsxcat.090525.csv`
+  - VSX crossmatch: `input/vsx/asassn_x_vsx_matches_20250919_2252.csv` (pre-crossmatched with columns: asas_sn_id, sep_arcsec, class)
+  - Raw VSX: `input/vsx/vsxcat.090525.csv` (used by `vsx/filter.py` to generate crossmatch)
   - Note: Bright nearby star (BNS) filtering is handled upstream by ASAS-SN during LC generation
 
 #### Dependencies
@@ -48,12 +49,20 @@ python -m malca detect --help
    ```
 2) Pre-filter and run events in batches with resume support:
    ```bash
-   python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-catalog input/vsx/vsxcat.090525.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --workers 10
+   python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 \
+       --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 \
+       --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv \
+       --batch-size 2000 \
+       --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
+       --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 \
+       --output /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv \
+       --trigger-mode posterior_prob --baseline-func gp --min-mag-offset 0.1
    ```
    - The wrapper builds/loads the manifest, runs pre-filters from `malca/pre_filter.py`, then calls `malca/events.py` in batches.
    - Pre-filters: sparse LC removal, multi-camera requirement, VSX known variable rejection
    - Resume: if interrupted, it skips already processed paths using the `*_PROCESSED.txt` checkpoint next to the output.
    - To disable VSX filter: add `--skip-vsx`
+   - All events.py arguments (trigger-mode, baseline-func, thresholds, etc.) are passed directly to events_filtered.py
 
 3) Post-filter events (strict quality cuts on candidates only):
    ```bash
@@ -281,7 +290,7 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 
 ### CLI modules
 - `malca.manifest`: `python -m malca.manifest --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --mag-bin 13_13.5 --out /home/lenhart.106/code/malca/output/lc_manifest_13_13.5.parquet --workers 10`
-- `malca.events_filtered`: `python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-catalog input/vsx/vsxcat.090525.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 -- --output /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --workers 10`
+- `malca.events_filtered`: `python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 --output /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --trigger-mode posterior_prob --baseline-func gp`
 - `malca.events`: `python -m malca.events --input /path/to/lc*_cal/*.dat2 --output /home/lenhart.106/code/malca/output/results.csv --workers 10`
 - `malca.post_filter`: `python -m malca.post_filter --input /home/lenhart.106/code/malca/output/results.csv --output /home/lenhart.106/code/malca/output/results_filtered.csv`
 - `malca.plot`: `python -m malca.plot --input /path/to/lc123.dat2 --out-dir /home/lenhart.106/code/malca/output/plots --format png`
@@ -309,9 +318,10 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 
 ### Notes
 - Always generate the manifest first; everything else depends on knowing where each `<asas_sn_id>.dat2` lives.
-- VSX filter is enabled by default in `events_filtered.py` - requires `input/vsx/vsxcat.090525.csv` catalog
+- VSX filter is enabled by default in `events_filtered.py` - uses pre-crossmatched file `input/vsx/asassn_x_vsx_matches_20250919_2252.csv`
   - To disable: add `--skip-vsx` flag
-  - The catalog is pre-filtered to exclude known periodic/eclipsing/transient variables
+  - To use a different crossmatch file: `--vsx-crossmatch /path/to/crossmatch.csv`
+  - Crossmatch file must have columns: `asas_sn_id`, `sep_arcsec`, `class`
 - Bright nearby star (BNS) filtering is NOT needed - ASAS-SN already filtered this during LC generation
 - Pre-filters (run on all sources before event detection):
   - Sparse LC removal: reject LCs with insufficient time span or cadence
