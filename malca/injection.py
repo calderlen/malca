@@ -116,26 +116,34 @@ def inject_dip(
 ) -> pd.DataFrame:
     """
     Inject synthetic dip into light curve.
+
+    Adds dip to original observed magnitudes, preserving real cadence,
+    systematics, and noise. Adds per-point noise based on measurement errors.
     """
     df_out = df_lc.copy()
     if df_out.empty:
         return df_out
 
-    mag_baseline = df_out[mag_col].median()
-    sigma_mag = df_out[mag_col].std()
-
-    if mag_err_poly is not None:
-        sigma_sigma_mag = df_out[err_col].std()
-    else:
-        sigma_sigma_mag = 0.0
-
     t = df_out[time_col].values
+    mag_old = df_out[mag_col].values
     dip_profile = skewnormal_dip(t, t_center, duration, amplitude, skewness)
 
-    noise_intrinsic = np.random.normal(0, sigma_mag, size=len(t))
-    noise_error = np.random.normal(0, sigma_sigma_mag, size=len(t))
+    # Per-point measurement noise based on errors
+    if mag_err_poly is not None:
+        sigma_i = np.asarray(mag_err_poly(mag_old), dtype=float)
+    else:
+        sigma_i = df_out[err_col].values.astype(float)
 
-    df_out[mag_col] = mag_baseline + dip_profile + noise_intrinsic + noise_error
+    # Handle invalid error values
+    valid_mask = np.isfinite(sigma_i) & (sigma_i > 0)
+    if valid_mask.any():
+        fallback = np.nanmedian(sigma_i[valid_mask])
+    else:
+        fallback = 0.01
+    sigma_i = np.where(valid_mask, sigma_i, fallback)
+
+    noise = np.random.normal(0.0, sigma_i, size=len(t))
+    df_out[mag_col] = mag_old + dip_profile + noise
     return df_out
 
 
@@ -310,9 +318,13 @@ def _simulate_trial(
 
         t_center = rng.uniform(t_min + duration, t_max - duration)
         skewness = rng.uniform(skew_min, skew_max)
+        median_mag = float(np.nanmedian(df["mag"].values))
 
         df_injected = inject_dip(df, t_center, duration, amplitude, skewness, mag_err_poly)
         detection_result = _default_detection_func(df_injected, detection_kwargs)
+
+        # Convert amplitude (mag) to fractional transit depth
+        fractional_depth = 1.0 - 10 ** (-0.4 * amplitude)
 
         return dict(
             trial_index=trial_index,
@@ -320,9 +332,11 @@ def _simulate_trial(
             dur_index=dur_idx,
             inj_index=inj_idx,
             amplitude=amplitude,
+            fractional_depth=fractional_depth,
             duration=duration,
             skewness=float(skewness),
             t_center=float(t_center),
+            median_mag=median_mag,
             asas_sn_id=asas_sn_id,
             **detection_result,
         )
@@ -645,6 +659,115 @@ def compute_detection_efficiency(
             efficiency_grid[i, j] = results_df.loc[mask, detected_col].mean() if mask.sum() else np.nan
 
     return amp_centers, dur_centers, efficiency_grid
+
+
+def compute_detection_efficiency_3d(
+    results_df: pd.DataFrame,
+    depth_bins: int = 20,
+    duration_bins: int = 20,
+    mag_bins: int = 10,
+    detected_col: str = "detected",
+) -> dict:
+    """
+    Compute 3D detection efficiency cube.
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Results from injection-recovery trials with columns:
+        fractional_depth, duration, median_mag, detected
+    depth_bins : int
+        Number of bins for fractional transit depth
+    duration_bins : int
+        Number of bins for duration (log-spaced)
+    mag_bins : int
+        Number of bins for median magnitude
+    detected_col : str
+        Column name for detection boolean
+
+    Returns
+    -------
+    dict with keys:
+        efficiency : np.ndarray, shape (depth_bins, duration_bins, mag_bins)
+        depth_centers : np.ndarray
+        duration_centers : np.ndarray
+        mag_centers : np.ndarray
+        depth_edges : np.ndarray
+        duration_edges : np.ndarray
+        mag_edges : np.ndarray
+    """
+    depth_edges = np.linspace(
+        results_df["fractional_depth"].min(),
+        results_df["fractional_depth"].max(),
+        depth_bins + 1,
+    )
+    dur_edges = np.logspace(
+        np.log10(results_df["duration"].min()),
+        np.log10(results_df["duration"].max()),
+        duration_bins + 1,
+    )
+    mag_edges = np.linspace(
+        results_df["median_mag"].min(),
+        results_df["median_mag"].max(),
+        mag_bins + 1,
+    )
+
+    depth_centers = (depth_edges[:-1] + depth_edges[1:]) / 2
+    dur_centers = np.sqrt(dur_edges[:-1] * dur_edges[1:])
+    mag_centers = (mag_edges[:-1] + mag_edges[1:]) / 2
+
+    efficiency = np.full((depth_bins, duration_bins, mag_bins), np.nan)
+
+    for i in range(depth_bins):
+        for j in range(duration_bins):
+            for k in range(mag_bins):
+                mask = (
+                    (results_df["fractional_depth"] >= depth_edges[i])
+                    & (results_df["fractional_depth"] < depth_edges[i + 1])
+                    & (results_df["duration"] >= dur_edges[j])
+                    & (results_df["duration"] < dur_edges[j + 1])
+                    & (results_df["median_mag"] >= mag_edges[k])
+                    & (results_df["median_mag"] < mag_edges[k + 1])
+                )
+                if mask.sum() > 0:
+                    efficiency[i, j, k] = results_df.loc[mask, detected_col].mean()
+
+    return dict(
+        efficiency=efficiency,
+        depth_centers=depth_centers,
+        duration_centers=dur_centers,
+        mag_centers=mag_centers,
+        depth_edges=depth_edges,
+        duration_edges=dur_edges,
+        mag_edges=mag_edges,
+    )
+
+
+def save_efficiency_cube(
+    cube_dict: dict,
+    output_path: Path | str,
+) -> None:
+    """
+    Save 3D efficiency cube to .npz file.
+    """
+    np.savez(
+        output_path,
+        efficiency=cube_dict["efficiency"],
+        depth_centers=cube_dict["depth_centers"],
+        duration_centers=cube_dict["duration_centers"],
+        mag_centers=cube_dict["mag_centers"],
+        depth_edges=cube_dict["depth_edges"],
+        duration_edges=cube_dict["duration_edges"],
+        mag_edges=cube_dict["mag_edges"],
+    )
+
+
+def load_efficiency_cube(input_path: Path | str) -> dict:
+    """
+    Load 3D efficiency cube from .npz file.
+    """
+    data = np.load(input_path)
+    return {k: data[k] for k in data.files}
 
 
 def plot_detection_efficiency(

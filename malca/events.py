@@ -127,6 +127,18 @@ def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=12):
     return 1.0 / (1.0 + np.exp(-q))
 
 
+def uniform_p_grid(p_min=0.9, p_max=1.0 - 1e-6, n=36):
+    """
+    Uniform grid in p for approximating ∫ dp with a uniform prior P(p)=const.
+    """
+    p_min = float(np.clip(p_min, 1e-12, 1.0 - 1e-12))
+    p_max = float(np.clip(p_max, 1e-12, 1.0 - 1e-12))
+    if not (p_min < p_max):
+        raise ValueError(f"Require p_min < p_max, got {p_min=} {p_max=}")
+    return np.linspace(p_min, p_max, int(n), dtype=float)
+
+
+
 def default_mag_grid(baseline_mag: float, mags: np.ndarray, kind: str, n=12):
     """
     
@@ -774,7 +786,7 @@ def bayesian_event_significance(
         else:
             raise ValueError("kind must be 'dip' or 'jump'")
 
-    p_grid = logit_spaced_grid(p_min=p_min, p_max=p_max, n=p_points)
+    p_grid = uniform_p_grid(p_min=p_min, p_max=p_max, n=p_points)
 
     if mag_grid is None:
         mag_grid = default_mag_grid(baseline_mag, mags, kind, n=mag_points)

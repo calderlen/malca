@@ -50,6 +50,13 @@ function logit_spaced_grid(; p_min=1e-4, p_max=1 - 1e-4, n=80)
     1.0 ./ (1 .+ exp.(-q))
 end
 
+function uniform_p_grid(; p_min=1e-4, p_max=1.0 - 1e-6, n=36)
+    p_min = clamp(float(p_min), 1e-12, 1.0 - 1e-12)
+    p_max = clamp(float(p_max), 1e-12, 1.0 - 1e-12)
+    p_min < p_max || throw(ArgumentError("Require p_min < p_max, got p_min=$p_min p_max=$p_max"))
+    collect(range(p_min, p_max; length=n))
+end
+
 function default_mag_grid(baseline_mag::Float64, mags::AbstractVector, kind::String; n=60)
     mags_finite = filter(isfinite, mags)
     isempty(mags_finite) && throw(ArgumentError("No finite magnitude values for grid construction"))
@@ -419,7 +426,7 @@ function bayesian_event_significance(
         end
     end
 
-    p_grid = logit_spaced_grid(p_min=p_min, p_max=p_max, n=p_points)
+    p_grid = uniform_p_grid(p_min=p_min, p_max=p_max, n=p_points)
     mag_grid = mag_grid === nothing ? default_mag_grid(baseline_mag, mags, kind; n=60) : Float64.(mag_grid)
 
     M = length(mag_grid)
