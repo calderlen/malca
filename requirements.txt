@@ -1,0 +1,27 @@
+# Core dependencies
+numpy
+pandas
+scipy
+numba
+tqdm
+matplotlib
+astropy
+celerite2
+pyarrow
+
+# Optional: visualization
+plotly
+
+# Optional: database
+duckdb
+
+# Optional: multiwavelength analysis
+astroquery>=0.4.6
+dustmaps3d
+
+# Optional: notebooks
+jupyterlab
+ipykernel
+seaborn
+scikit-learn
+joblib

@@ -29,8 +29,8 @@ notebooks = ["jupyterlab", "ipykernel", "seaborn", "scikit-learn", "joblib"]
 all = ["plotly", "duckdb", "astroquery", "jupyterlab", "ipykernel", "seaborn", "scikit-learn", "joblib"]
 
 [tool.setuptools.packages.find]
-where = ["malca"]
-include = ["*"]
+where = ["."]
+include = ["malca*"]
 
 [tool.setuptools]
 package-dir = {"" = "malca"}
