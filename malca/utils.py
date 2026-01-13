@@ -122,7 +122,7 @@ def read_lc_dat2(asassn_id, path):
             file,
             header=None,
             names=columns,
-            delim_whitespace=True,
+            sep=r'\s+',
         )
     
                                                
