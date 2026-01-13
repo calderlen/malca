@@ -15,6 +15,8 @@ import matplotlib.pyplot as pl
 from malca.events import run_bayesian_significance
 from malca.utils import read_lc_dat2
 from malca.baseline import per_camera_gp_baseline
+from malca.pre_filter import apply_pre_filters
+from malca.filter import filter_signal_amplitude
 
 
 
@@ -488,6 +490,16 @@ def build_reproduction_report(
     manifest_path: Path | str | None = None,
     method: str = "naive",
     verbose: bool = False,
+    # Filter options
+    skip_pre_filters: bool = False,
+    min_time_span: float = 100.0,
+    min_points_per_day: float = 0.05,
+    min_cameras: int = 2,
+    skip_vsx: bool = False,
+    vsx_catalog: Path | str = Path("input/vsx/vsxcat.090525.csv"),
+    vsx_max_sep: float = 3.0,
+    min_mag_offset: float = 0.1,
+    skip_post_filters: bool = False,
     **baseline_kwargs,
 ) -> pd.DataFrame:
     manifest_df = load_manifest_df(manifest_path) if manifest_path is not None else None
@@ -527,6 +539,51 @@ def build_reproduction_report(
         if verbose:
             n_found = sum(len(v) for v in records_map.values())
             print(f"[DEBUG] Built records_map from candidates 'path' column: {n_found} light curves found")
+
+    # Apply pre-filters if manifest is provided and not skipped
+    if manifest_subset is not None and not skip_pre_filters and records_map:
+        if verbose:
+            total_before = sum(len(v) for v in records_map.values())
+            print(f"\n[PRE-FILTER] Applying pre-filters to {total_before} candidates...")
+        
+        # Prepare dataframe for pre_filter (needs 'path' column pointing to lc_dir)
+        df_pre = manifest_subset.rename(columns={"lc_dir": "path"}).copy()
+        
+        try:
+            df_filtered = apply_pre_filters(
+                df_pre,
+                apply_sparse=True,
+                min_time_span=min_time_span,
+                min_points_per_day=min_points_per_day,
+                apply_vsx=not skip_vsx,
+                vsx_max_sep_arcsec=vsx_max_sep,
+                vsx_catalog_csv=vsx_catalog,
+                apply_multi_camera=True,
+                min_cameras=min_cameras,
+                n_workers=n_workers or 10,
+                show_tqdm=verbose,
+            )
+            
+            # Update records_map to only include filtered sources
+            filtered_ids = set(df_filtered["source_id"].astype(str))
+            for mag_bin in list(records_map.keys()):
+                records_map[mag_bin] = [
+                    rec for rec in records_map[mag_bin]
+                    if str(rec.get("asas_sn_id")) in filtered_ids
+                ]
+                # Remove empty mag_bins
+                if not records_map[mag_bin]:
+                    del records_map[mag_bin]
+            
+            total_after = sum(len(v) for v in records_map.values())
+            if verbose:
+                print(f"[PRE-FILTER] Kept {total_after}/{total_before} candidates after pre-filtering")
+                print(f"[PRE-FILTER] Rejected {total_before - total_after} candidates")
+        
+        except Exception as e:
+            if verbose:
+                print(f"[PRE-FILTER] Warning: pre-filter failed: {e}")
+                print(f"[PRE-FILTER] Continuing without pre-filtering...")
 
     if method == "naive":
         raise DeprecationWarning(
@@ -721,6 +778,29 @@ def build_reproduction_report(
     else:
         rows_df = pd.DataFrame(columns=["source_id", "mag_bin"])
 
+    # Apply signal amplitude filter if enabled
+    if not rows_df.empty and min_mag_offset > 0:
+        if verbose:
+            print(f"\n[SIGNAL-FILTER] Applying signal amplitude filter (min_mag_offset={min_mag_offset})...")
+            n_before = len(rows_df)
+        
+        try:
+            rows_df = filter_signal_amplitude(
+                rows_df,
+                min_mag_offset=min_mag_offset,
+                show_tqdm=verbose,
+            )
+            
+            if verbose:
+                n_after = len(rows_df)
+                print(f"[SIGNAL-FILTER] Kept {n_after}/{n_before} detections after signal amplitude filter")
+                print(f"[SIGNAL-FILTER] Rejected {n_before - n_after} low-amplitude detections")
+        
+        except Exception as e:
+            if verbose:
+                print(f"[SIGNAL-FILTER] Warning: signal amplitude filter failed: {e}")
+                print(f"[SIGNAL-FILTER] Continuing without signal amplitude filtering...")
+
     if "source_id" not in rows_df.columns:
         if "asas_sn_id" in rows_df.columns:
             rows_df["source_id"] = rows_df["asas_sn_id"].astype(str)
@@ -782,8 +862,6 @@ def build_reproduction_report(
         return "; ".join(parts)
 
     merged["detection_details"] = merged.apply(format_detection, axis=1)
-    if "expected_detected" in merged.columns:
-        merged["matches_expected"] = merged["detected"] == merged["expected_detected"].astype(bool)
 
     if extra_columns:
         cols = [c for c in extra_columns if c in merged.columns]
@@ -799,8 +877,6 @@ def build_reproduction_report(
         "detection_details",
     ]
     for col in [
-        "expected_detected",
-        "matches_expected",
         "g_n_peaks",
         "v_n_peaks",
         "g_bayes_dip_significant",
@@ -936,6 +1012,31 @@ Examples:
         help="Detection method. Only 'bayes' (Bayesian) is currently supported. "
              "Legacy methods 'naive' and 'biweight' have been deprecated.",
     )
+    
+    # Pre-filter options
+    parser.add_argument("--skip-pre-filters", action="store_true", 
+                        help="Skip pre-filtering step (sparse LC, multi-camera, VSX)")
+    parser.add_argument("--min-time-span", type=float, default=100.0,
+                        help="Min time span in days for sparse LC filter (default: 100)")
+    parser.add_argument("--min-points-per-day", type=float, default=0.05,
+                        help="Min cadence for sparse LC filter (default: 0.05)")
+    parser.add_argument("--min-cameras", type=int, default=2,
+                        help="Min cameras required for multi-camera filter (default: 2)")
+    parser.add_argument("--skip-vsx", action="store_true",
+                        help="Skip VSX known variable filter")
+    parser.add_argument("--vsx-catalog", type=Path, default=Path("input/vsx/vsxcat.090525.csv"),
+                        help="Path to VSX catalog CSV")
+    parser.add_argument("--vsx-max-sep", type=float, default=3.0,
+                        help="Max separation for VSX match in arcsec (default: 3.0)")
+    
+    # Signal amplitude filter
+    parser.add_argument("--min-mag-offset", type=float, default=0.1,
+                        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.1)")
+    
+    # Post-filter options (placeholder for future)
+    parser.add_argument("--skip-post-filters", action="store_true",
+                        help="Skip post-filtering step (currently no post-filters implemented)")
+    
     parser.add_argument("--verbose", "-v", action="store_true", help="Print debug info")
     return parser
 
@@ -992,8 +1093,31 @@ def main(argv: Iterable[str] | None = None) -> None:
         manifest_path=args.manifest,
         method=args.method,
         verbose=args.verbose,
+        # Filter parameters
+        skip_pre_filters=args.skip_pre_filters,
+        min_time_span=args.min_time_span,
+        min_points_per_day=args.min_points_per_day,
+        min_cameras=args.min_cameras,
+        skip_vsx=args.skip_vsx,
+        vsx_catalog=args.vsx_catalog,
+        vsx_max_sep=args.vsx_max_sep,
+        min_mag_offset=args.min_mag_offset,
+        skip_post_filters=args.skip_post_filters,
         **kwargs,
     )
+
+    # Print filtering summary
+    print("\n" + "=" * 60)
+    print("FILTERING SUMMARY")
+    print("=" * 60)
+    print(f"Pre-filters:          {'APPLIED' if not args.skip_pre_filters else 'SKIPPED'}")
+    if not args.skip_pre_filters:
+        print(f"  - Sparse LC filter:   min_time_span={args.min_time_span}d, min_cadence={args.min_points_per_day}/d")
+        print(f"  - Multi-camera:       min_cameras={args.min_cameras}")
+        print(f"  - VSX filter:         {'APPLIED' if not args.skip_vsx else 'SKIPPED'}")
+    print(f"Signal amplitude:     {'APPLIED (min_mag_offset=' + str(args.min_mag_offset) + ')' if args.min_mag_offset > 0 else 'DISABLED'}")
+    print(f"Post-filters:         {'APPLIED' if not args.skip_post_filters else 'SKIPPED (none implemented)'}")
+    print("=" * 60 + "\n")
 
     columns = [
         "source",
@@ -1013,7 +1137,6 @@ def main(argv: Iterable[str] | None = None) -> None:
         "v_bayes_dip_max_logbf",
         "g_bayes_dip_bayes_factor",
         "v_bayes_dip_bayes_factor",
-        "matches_expected",
     ]
     existing = [c for c in columns if c in report.columns]
     print(report[existing].to_string(index=False))
