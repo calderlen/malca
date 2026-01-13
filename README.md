@@ -24,9 +24,8 @@ python -m malca detect --mag-bin 13_13.5 --workers 10 \
     --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
     -- --output output/results.csv --workers 10 --min-mag-offset 0.1
 
-# Validate on known objects
-python -m malca validate --method bayes --manifest output/manifest.parquet \
-    --candidates targets.csv --out-dir output/validation
+# Validate results against known candidates (no raw data needed)
+python -m malca validation --results output/results.csv
 
 # Plot light curves
 python -m malca plot --input /path/to/lc123.dat2 --out-dir output/plots
@@ -198,14 +197,20 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
   `python -m malca.post_filter --input /home/lenhart.106/code/malca/output/results.parquet --output /home/lenhart.106/code/malca/output/results_filtered.parquet`
 - Targeted reproduction of specific candidates (Bayesian only):
   ```bash
-  python -m malca validate --method bayes --manifest output/lc_manifest.parquet \
-      --candidates my_targets.csv --out-dir output/results_repro
-  
-  # Or using the module directly
-  python -m malca.reproduction --method bayes --manifest output/lc_manifest.parquet \
-      --candidates my_targets.csv --out-dir output/results_repro --out-format csv --workers 10
+  # Re-run detection on raw data (requires manifest and .dat2 files)
+  python -m tests.reproduction --method bayes --manifest output/lc_manifest.parquet \
+      --candidates my_targets.csv --out-dir output/results_repro --workers 10
   ```
   **Note**: Only `--method bayes` is supported. Legacy methods `naive` and `biweight` have been deprecated.
+  
+- Validate results without raw data:
+  ```bash
+  # Compare detection results to known candidates (fast, no raw data needed)
+  python -m malca validation --results output/results.csv
+  
+  # Or with custom candidates
+  python -m malca validation --results output/results.csv --candidates my_targets.csv -v
+  ```
 - Plot light curves with baseline/residuals:
   ```bash
   # Single file
@@ -285,7 +290,9 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 - `malca.ltv`: `python -m malca.ltv --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
 - `malca.stats`: `python -m malca.stats /path/to/lc123.dat2`
 - `malca.fp_analysis`: `python -m malca.fp_analysis --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
-- `malca.reproduction`: `python -m malca.reproduction --method bayes --manifest output/lc_manifest.parquet --candidates targets.csv --out-dir output/results_repro`
+- **Testing modules** (in `tests/` directory):
+  - `tests.reproduction`: `python -m tests.reproduction --method bayes --manifest output/lc_manifest.parquet --candidates targets.csv --out-dir output/results_repro`
+  - `tests.validation`: `python -m tests.validation --results output/results.csv` (or via CLI: `python -m malca validation`)
 - **VSX tools** (now in `malca.vsx` subpackage):
   - `malca.vsx.filter`: `python -m malca.vsx.filter`
   - `malca.vsx.crossmatch`: `python -m malca.vsx.crossmatch`
