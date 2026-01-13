@@ -48,8 +48,10 @@ def clean_lc(df, max_error_absolute=1.0, max_error_sigma=5.0):
         )
         clipped_mask = np.asarray(clipped.mask)
         if clipped_mask.shape == errors.shape:
-            base_idx = np.flatnonzero(base_mask)
-            mask[base_idx] &= ~clipped_mask
+            # Create a full-length mask for clipped errors
+            clipped_full = np.zeros(len(df), dtype=bool)
+            clipped_full[base_mask] = clipped_mask
+            mask &= ~clipped_full
 
     df = df.loc[mask]
     df = df.sort_values("JD").reset_index(drop=True)

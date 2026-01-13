@@ -91,6 +91,19 @@ graph TB
           FP --> FP_OUT[(FP Report)]
       end
 
+      subgraph "Multi-Wavelength Characterization"
+          CHAR[characterize.py<br/>Gaia + Dust + YSO]
+          GAIA_CAT[Gaia DR3<br/>via astroquery]
+          DUST_MAP[dustmaps3d<br/>Wang+ 2025]
+          STARHORSE[StarHorse<br/>Local catalog]
+
+          CAND --> CHAR
+          GAIA_CAT --> CHAR
+          DUST_MAP -.-> CHAR
+          STARHORSE -.-> CHAR
+          CHAR --> CHAR_OUT[(Characterized<br/>Candidates)]
+      end
+
       subgraph "CLI Entry Point"
           CLI[__main__.py<br/>Unified CLI]
           CLI -.manifest.-> MAN
@@ -175,6 +188,12 @@ graph TB
 - **`score.py`**: Event scoring (dip/microlensing quality metrics)
 - **`ltv.py`**: Long-term variability (seasonal trend analysis)
 - **`fp_analysis.py`**: False-positive reduction analysis (pre vs post filter)
+- **`characterize.py`**: Multi-wavelength characterization (Gaia DR3, dustmaps3d, StarHorse, YSO classification)
+  - Queries Gaia DR3 for astrometry, astrophysics, 2MASS/AllWISE photometry
+  - Applies 3D dust extinction correction using `dustmaps3d` (Wang et al. 2025)
+  - Classifies YSOs using IR color-color diagrams (Koenig & Leisawitz 2014)
+  - Tags galactic populations (thin/thick disk) using metallicity or stellar ages
+  - Joins with local StarHorse catalog for age/mass estimates (optional)
 
 #### **CLI Entry Point**
 - **`__main__.py`**: Unified command-line interface

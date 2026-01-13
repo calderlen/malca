@@ -12,6 +12,8 @@
 #### Dependencies
 - Core pipeline: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm
 - Optional outputs: pyarrow (parquet), duckdb
+- Optional visualization: plotly (3D injection plots)
+- Multi-wavelength characterization: astroquery (Gaia queries), dustmaps3d (3D dust extinction)
 - Notebooks/EDA: jupyterlab, ipykernel, seaborn, scikit-learn, joblib
 
 ## Quick Start
@@ -36,6 +38,9 @@ python -m malca score --events output/results.csv --output output/scores.csv
 
 # Apply quality filters
 python -m malca filter --input output/results.csv --output output/filtered.csv
+
+# Multi-wavelength characterization (post-detection)
+python -m malca.characterize --input output/filtered.csv --output output/characterized.csv --dust --starhorse input/starhorse/starhorse.parquet
 
 # Get help for any command
 python -m malca --help
@@ -293,6 +298,49 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
   ```
   - Injects synthetic dips with skew-normal profiles onto real observed light curves
   - Preserves real cadence, systematics, and noise characteristics
+  - Produces comprehensive efficiency metrics and visualizations
+  - Supports resume for long-running parameter sweeps
+
+### Multi-Wavelength Characterization
+
+After detecting dipper candidates, characterize them using multi-wavelength data:
+
+```bash
+# Full characterization with Gaia, dust extinction, and YSO classification
+python -m malca.characterize \
+  --input output/filtered.csv \
+  --output output/characterized.csv \
+  --dust \
+  --starhorse input/starhorse/starhorse2021.parquet
+```
+
+**Features:**
+- **Gaia DR3 Queries**: Astrometry, astrophysics (Teff, logg, metallicity, distance), 2MASS/AllWISE photometry
+- **3D Dust Extinction**: All-sky coverage via `dustmaps3d` (Wang et al. 2025, ~350MB)
+- **YSO Classification**: Koenig & Leisawitz (2014) IR color-color diagram with dust correction
+- **Galactic Population**: Thin/thick disk classification using metallicity or StarHorse ages
+- **StarHorse** (optional): Stellar ages,  masses, distances from local catalog join
+- **Caching**: Gaia results cached locally to speed up repeated analyses
+
+**Setup:**
+```bash
+# Install multiwavelength dependencies
+pip install -e ".[multiwavelength]"
+
+# Dust maps auto-download on first use (~350MB)
+# For StarHorse, download catalog manually:
+# https://cdsarc.cds.unistra.fr/viz-bin/cat/I/354
+```
+
+**Output columns:**
+- `source_id`, `ra`, `dec`, `parallax`, `distance_gspphot`
+- `tmass_j`, `tmass_h`, `tmass_k`, `unwise_w1`, `unwise_w2`
+- `A_v_3d`, `ebv_3d` (3D dust extinction)
+- `H_K`, `W1_W2`, `yso_class` (Class I/II/Transition Disk/Main Sequence)
+- `population` (thin_disk/thick_disk from metallicity or age)
+- `age50`, `mass50` (if StarHorse provided)
+
+
   - Measures completeness as function of dip depth, duration, and stellar magnitude
   - 3D efficiency cube for completeness corrections in occurrence rate calculations
 - Seasonal trend summary (LTVar-style):
@@ -348,7 +396,8 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 
 
 ### Dependencies
-- numpy, pandas, scipy, numba, astropy, tqdm, matplotlib
-- celerite2
-- pyarrow (Parquet support)
-- duckdb (optional, only if using `--output-format duckdb`)
+- **Required**: numpy, pandas, scipy, numba, astropy, tqdm, matplotlib, celerite2, pyarrow
+- **Optional**:
+  - `plotly` - Interactive 3D efficiency plots in injection testing
+  - `duckdb` - Alternative output format (use `--output-format duckdb`)
+  - `joblib`, `seaborn`, `scikit-learn` - Notebook analysis and profiling
