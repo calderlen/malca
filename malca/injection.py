@@ -14,9 +14,7 @@ and characterizes sensitivity to different dip morphologies.
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -778,33 +776,409 @@ def plot_detection_efficiency(
     title: str = "Detection Efficiency",
     vmin: float = 0.0,
     vmax: float = 1.0,
-) -> None:
+    xlabel: str = "Duration (days)",
+    ylabel: str = "Amplitude (mag)",
+    xlog: bool = True,
+    cmap: str = "viridis",
+    show: bool = True,
+) -> plt.Figure:
     """
-    Plot detection efficiency heatmap.
+    Plot 2D detection efficiency heatmap.
     """
     fig, ax = plt.subplots(figsize=(10, 8))
     im = ax.pcolormesh(
         dur_centers,
         amp_centers,
         efficiency_grid,
-        cmap="viridis",
+        cmap=cmap,
         vmin=vmin,
         vmax=vmax,
         shading="auto",
     )
-    ax.set_xscale("log")
-    ax.set_xlabel("Duration (days)", fontsize=14)
-    ax.set_ylabel("Amplitude (mag)", fontsize=14)
+    if xlog:
+        ax.set_xscale("log")
+    ax.set_xlabel(xlabel, fontsize=14)
+    ax.set_ylabel(ylabel, fontsize=14)
     ax.set_title(title, fontsize=16)
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label("Detection Efficiency", fontsize=14)
     plt.tight_layout()
 
     if output_path:
-        plt.savefig(output_path, dpi=150)
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
         print(f"Saved to {output_path}")
-    else:
+    elif show:
         plt.show()
+
+    return fig
+
+
+def plot_efficiency_mag_slices(
+    cube: dict,
+    *,
+    output_dir: Path | str | None = None,
+    vmin: float = 0.0,
+    vmax: float = 1.0,
+    cmap: str = "viridis",
+    show: bool = False,
+) -> list[plt.Figure]:
+    """
+    Plot 2D efficiency heatmaps for each magnitude bin.
+
+    Parameters
+    ----------
+    cube : dict
+        Efficiency cube from compute_detection_efficiency_3d() or load_efficiency_cube()
+    output_dir : Path, optional
+        Directory to save plots (one per mag bin)
+    """
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    figs = []
+    for k, mag in enumerate(cube["mag_centers"]):
+        eff_slice = cube["efficiency"][:, :, k]
+        title = f"Detection Efficiency (mag = {mag:.2f})"
+        out_path = output_dir / f"efficiency_mag_{mag:.2f}.png" if output_dir else None
+
+        fig = plot_detection_efficiency(
+            cube["depth_centers"],
+            cube["duration_centers"],
+            eff_slice,
+            xlabel="Duration (days)",
+            ylabel="Fractional Depth",
+            title=title,
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap,
+            output_path=out_path,
+            show=show and not output_dir,
+        )
+        figs.append(fig)
+        if output_dir:
+            plt.close(fig)
+
+    return figs
+
+
+def plot_efficiency_marginalized(
+    cube: dict,
+    *,
+    axis: str = "mag",
+    output_path: Path | str | None = None,
+    vmin: float = 0.0,
+    vmax: float = 1.0,
+    cmap: str = "viridis",
+    show: bool = True,
+) -> plt.Figure:
+    """
+    Plot 2D efficiency marginalized (averaged) over one axis.
+
+    Parameters
+    ----------
+    cube : dict
+        Efficiency cube from compute_detection_efficiency_3d() or load_efficiency_cube()
+    axis : str
+        Axis to marginalize over: "mag", "duration", or "depth"
+    """
+    if axis == "mag":
+        eff_2d = np.nanmean(cube["efficiency"], axis=2)
+        x_centers = cube["duration_centers"]
+        y_centers = cube["depth_centers"]
+        xlabel = "Duration (days)"
+        ylabel = "Fractional Depth"
+        title = "Detection Efficiency (averaged over magnitude)"
+        xlog = True
+    elif axis == "duration":
+        eff_2d = np.nanmean(cube["efficiency"], axis=1)
+        x_centers = cube["mag_centers"]
+        y_centers = cube["depth_centers"]
+        xlabel = "Median Magnitude"
+        ylabel = "Fractional Depth"
+        title = "Detection Efficiency (averaged over duration)"
+        xlog = False
+    elif axis == "depth":
+        eff_2d = np.nanmean(cube["efficiency"], axis=0)
+        x_centers = cube["duration_centers"]
+        y_centers = cube["mag_centers"]
+        xlabel = "Duration (days)"
+        ylabel = "Median Magnitude"
+        title = "Detection Efficiency (averaged over depth)"
+        xlog = True
+    else:
+        raise ValueError(f"Unknown axis: {axis}. Use 'mag', 'duration', or 'depth'.")
+
+    return plot_detection_efficiency(
+        y_centers,
+        x_centers,
+        eff_2d,
+        xlabel=xlabel,
+        ylabel=ylabel,
+        title=title,
+        xlog=xlog,
+        vmin=vmin,
+        vmax=vmax,
+        cmap=cmap,
+        output_path=output_path,
+        show=show,
+    )
+
+
+def plot_efficiency_threshold_contour(
+    cube: dict,
+    *,
+    threshold: float = 0.5,
+    output_path: Path | str | None = None,
+    cmap: str = "plasma",
+    show: bool = True,
+) -> plt.Figure:
+    """
+    Plot the depth at which efficiency reaches a threshold, for each (duration, mag).
+
+    This answers: "At what depth can we detect N% of dips?"
+
+    Parameters
+    ----------
+    cube : dict
+        Efficiency cube from compute_detection_efficiency_3d() or load_efficiency_cube()
+    threshold : float
+        Efficiency threshold (0-1), default 0.5 (50%)
+    """
+    n_dur = len(cube["duration_centers"])
+    n_mag = len(cube["mag_centers"])
+    depth_at_threshold = np.full((n_dur, n_mag), np.nan)
+
+    for j in range(n_dur):
+        for k in range(n_mag):
+            eff = cube["efficiency"][:, j, k]
+            valid = np.isfinite(eff)
+            if not valid.any():
+                continue
+            above = eff >= threshold
+            if above.any():
+                idx = np.where(above)[0][0]
+                depth_at_threshold[j, k] = cube["depth_centers"][idx]
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.pcolormesh(
+        cube["mag_centers"],
+        cube["duration_centers"],
+        depth_at_threshold,
+        cmap=cmap,
+        shading="auto",
+    )
+    ax.set_yscale("log")
+    ax.set_xlabel("Median Magnitude", fontsize=12)
+    ax.set_ylabel("Duration (days)", fontsize=12)
+    ax.set_title(f"Fractional Depth at {threshold*100:.0f}% Detection Efficiency", fontsize=14)
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label("Fractional Depth", fontsize=12)
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"Saved: {output_path}")
+    elif show:
+        plt.show()
+
+    return fig
+
+
+def plot_efficiency_3d(
+    cube: dict,
+    *,
+    opacity: float = 0.3,
+    surface_count: int = 10,
+    output_path: Path | str | None = None,
+) -> None:
+    """
+    Create interactive 3D volume rendering using plotly.
+
+    Parameters
+    ----------
+    cube : dict
+        Efficiency cube from compute_detection_efficiency_3d() or load_efficiency_cube()
+    opacity : float
+        Volume opacity (0-1)
+    surface_count : int
+        Number of isosurfaces to render
+    output_path : Path, optional
+        Path to save as HTML file
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        raise ImportError("plotly required for 3D visualization. Install: pip install plotly")
+
+    depth = cube["depth_centers"]
+    duration = cube["duration_centers"]
+    mag = cube["mag_centers"]
+
+    D, Du, M = np.meshgrid(depth, duration, mag, indexing="ij")
+
+    fig = go.Figure(data=go.Volume(
+        x=D.flatten(),
+        y=np.log10(Du.flatten()),
+        z=M.flatten(),
+        value=cube["efficiency"].flatten(),
+        opacity=opacity,
+        surface_count=surface_count,
+        colorscale="Viridis",
+        colorbar=dict(title="Efficiency"),
+    ))
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="Fractional Depth",
+            yaxis_title="log₁₀(Duration/days)",
+            zaxis_title="Median Magnitude",
+        ),
+        title="3D Detection Efficiency Cube",
+    )
+
+    if output_path:
+        output_path = Path(output_path)
+        if output_path.suffix == ".html":
+            fig.write_html(str(output_path))
+        else:
+            fig.write_image(str(output_path))
+        print(f"Saved: {output_path}")
+    else:
+        fig.show()
+
+
+def plot_efficiency_isosurface(
+    cube: dict,
+    *,
+    isovalue: float = 0.5,
+    output_path: Path | str | None = None,
+) -> None:
+    """
+    Plot 3D isosurface at a given efficiency level using plotly.
+
+    Parameters
+    ----------
+    cube : dict
+        Efficiency cube from compute_detection_efficiency_3d() or load_efficiency_cube()
+    isovalue : float
+        Efficiency value for isosurface (0-1)
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        raise ImportError("plotly required for 3D visualization. Install: pip install plotly")
+
+    depth = cube["depth_centers"]
+    duration = cube["duration_centers"]
+    mag = cube["mag_centers"]
+
+    D, Du, M = np.meshgrid(depth, duration, mag, indexing="ij")
+
+    fig = go.Figure(data=go.Isosurface(
+        x=D.flatten(),
+        y=np.log10(Du.flatten()),
+        z=M.flatten(),
+        value=cube["efficiency"].flatten(),
+        isomin=isovalue - 0.01,
+        isomax=isovalue + 0.01,
+        surface_count=1,
+        colorscale=[[0, "blue"], [1, "blue"]],
+        showscale=False,
+        opacity=0.6,
+        caps=dict(x_show=False, y_show=False, z_show=False),
+    ))
+
+    fig.update_layout(
+        scene=dict(
+            xaxis_title="Fractional Depth",
+            yaxis_title="log₁₀(Duration/days)",
+            zaxis_title="Median Magnitude",
+        ),
+        title=f"Detection Efficiency = {isovalue*100:.0f}% Isosurface",
+    )
+
+    if output_path:
+        output_path = Path(output_path)
+        if output_path.suffix == ".html":
+            fig.write_html(str(output_path))
+        else:
+            fig.write_image(str(output_path))
+        print(f"Saved: {output_path}")
+    else:
+        fig.show()
+
+
+def plot_efficiency_all(
+    cube_or_path: dict | Path | str,
+    output_dir: Path | str,
+    *,
+    thresholds: list[float] | None = None,
+    show: bool = False,
+) -> None:
+    """
+    Generate all standard plots for an efficiency cube.
+
+    Parameters
+    ----------
+    cube_or_path : dict or Path
+        Efficiency cube dict or path to .npz file
+    output_dir : Path
+        Directory to save all plots
+    thresholds : list of float, optional
+        Efficiency thresholds for contour plots (default: [0.5, 0.9])
+    """
+    if thresholds is None:
+        thresholds = [0.5, 0.9]
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(cube_or_path, (str, Path)):
+        print(f"Loading cube from {cube_or_path}...")
+        cube = load_efficiency_cube(cube_or_path)
+    else:
+        cube = cube_or_path
+
+    print("Generating magnitude slice plots...")
+    slices_dir = output_dir / "mag_slices"
+    plot_efficiency_mag_slices(cube, output_dir=slices_dir, show=False)
+
+    print("Generating marginalized plots...")
+    for axis in ["mag", "duration", "depth"]:
+        plot_efficiency_marginalized(
+            cube,
+            axis=axis,
+            output_path=output_dir / f"efficiency_marginalized_{axis}.png",
+            show=show,
+        )
+        plt.close()
+
+    print("Generating threshold contour plots...")
+    for thresh in thresholds:
+        plot_efficiency_threshold_contour(
+            cube,
+            threshold=thresh,
+            output_path=output_dir / f"depth_at_{int(thresh*100)}pct_efficiency.png",
+            show=show,
+        )
+        plt.close()
+
+    print("Generating interactive 3D plots...")
+    try:
+        plot_efficiency_3d(
+            cube,
+            output_path=output_dir / "efficiency_3d_volume.html",
+        )
+        plot_efficiency_isosurface(
+            cube,
+            isovalue=0.5,
+            output_path=output_dir / "efficiency_50pct_isosurface.html",
+        )
+    except ImportError:
+        print("  Skipping 3D plots (plotly not installed)")
+
+    print(f"All plots saved to {output_dir}")
 
 
 def compute_auxiliary_statistics(df_lc: pd.DataFrame, mag_col: str = "mag") -> dict:
@@ -835,9 +1209,29 @@ def _build_grid_log(min_val: float, max_val: float, steps: int) -> np.ndarray:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run injection-recovery tests for dip detection.")
+    parser = argparse.ArgumentParser(
+        description="Run injection-recovery tests for dip detection.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Output structure (default --out-dir output/injection):
+  output/injection/
+    results/
+      injection_results.csv      # Trial-by-trial results
+      injection_results_PROCESSED.txt  # Checkpoint
+    cubes/
+      efficiency_cube.npz        # 3D efficiency cube
+    plots/
+      mag_slices/                # Per-magnitude heatmaps
+      efficiency_marginalized_*.png
+      depth_at_*pct_efficiency.png
+      efficiency_3d_volume.html  # Interactive 3D (if plotly)
+""",
+    )
     parser.add_argument("--manifest", type=Path, required=True, help="Manifest parquet path.")
-    parser.add_argument("--out", type=Path, required=True, help="Output CSV path.")
+    parser.add_argument("--out-dir", type=Path, default=Path("output/injection"),
+                        help="Base output directory (default: output/injection)")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="Override CSV output path (default: <out-dir>/results/injection_results.csv)")
     parser.add_argument(
         "--control-sample-size",
         "--control-sample",
@@ -890,7 +1284,30 @@ def main() -> None:
     parser.add_argument("--no-sigma-eff", action="store_true")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true")
 
+    # Post-processing options
+    parser.add_argument("--skip-cube", action="store_true", help="Skip computing efficiency cube.")
+    parser.add_argument("--skip-plots", action="store_true", help="Skip generating plots.")
+    parser.add_argument("--cube-out", type=Path, default=None,
+                        help="Override cube output path (default: <out-dir>/cubes/efficiency_cube.npz)")
+    parser.add_argument("--plot-dir", type=Path, default=None,
+                        help="Override plot directory (default: <out-dir>/plots)")
+    parser.add_argument("--depth-bins", type=int, default=20, help="Number of depth bins for cube.")
+    parser.add_argument("--duration-bins", type=int, default=20, help="Number of duration bins for cube.")
+    parser.add_argument("--mag-bins", type=int, default=10, help="Number of magnitude bins for cube.")
+
     args = parser.parse_args()
+
+    # Set up output paths with defaults
+    out_dir = Path(args.out_dir)
+    results_dir = out_dir / "results"
+    cubes_dir = out_dir / "cubes"
+    plots_dir = out_dir / "plots"
+
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_out = args.out if args.out else (results_dir / "injection_results.csv")
+    cube_out = args.cube_out if args.cube_out else (cubes_dir / "efficiency_cube.npz")
+    plot_dir = args.plot_dir if args.plot_dir else plots_dir
 
     manifest = pd.read_parquet(args.manifest)
     control_sample = select_control_sample(
@@ -904,6 +1321,13 @@ def main() -> None:
     dur_grid = _build_grid_log(args.dur_min, args.dur_max, args.dur_steps)
 
     detection_kwargs = _build_detection_kwargs(args)
+
+    print(f"Output directory: {out_dir}")
+    print(f"  Results CSV: {csv_out}")
+    if not args.skip_cube:
+        print(f"  Efficiency cube: {cube_out}")
+    if not args.skip_plots:
+        print(f"  Plots directory: {plot_dir}")
 
     run_injection_recovery(
         control_sample,
@@ -919,13 +1343,40 @@ def main() -> None:
         task_size=max(1, args.task_size),
         checkpoint_interval=max(1, args.checkpoint_interval),
         chunk_size=max(1, args.chunk_size),
-        output_path=args.out,
+        output_path=csv_out,
         checkpoint_path=None,
         resume=not args.no_resume,
         overwrite=args.overwrite,
         max_trials=args.max_trials,
         show_progress=True,
     )
+
+    # Post-processing: compute cube and generate plots (unless skipped)
+    if not args.skip_cube or not args.skip_plots:
+        print(f"\nLoading results from {csv_out}...")
+        results_df = pd.read_csv(csv_out)
+
+        if "fractional_depth" not in results_df.columns or "median_mag" not in results_df.columns:
+            print("Warning: Results missing fractional_depth or median_mag columns, skipping 3D cube.")
+        else:
+            print("Computing 3D efficiency cube...")
+            cube = compute_detection_efficiency_3d(
+                results_df,
+                depth_bins=args.depth_bins,
+                duration_bins=args.duration_bins,
+                mag_bins=args.mag_bins,
+            )
+
+            if not args.skip_cube:
+                cubes_dir.mkdir(parents=True, exist_ok=True)
+                save_efficiency_cube(cube, cube_out)
+                print(f"Saved efficiency cube to {cube_out}")
+
+            if not args.skip_plots:
+                print(f"Generating plots in {plot_dir}...")
+                plot_efficiency_all(cube, plot_dir)
+
+    print("\nDone.")
 
 
 if __name__ == "__main__":
