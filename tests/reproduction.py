@@ -621,14 +621,24 @@ def build_reproduction_report(
                     print(f"[DEBUG] {asn}: dat_path missing: {dat_path}")
 
                 try:
-                    dfg, dfv = (
-                        read_lc_dat2(asn, lc_dir)
-                        if asn and lc_dir and has_path
-                        else (pd.DataFrame(), pd.DataFrame())
-                    )
+                    if str(dat_path).endswith('.csv') and has_path:
+                        from malca.plot import read_skypatrol_csv
+                        df_all = read_skypatrol_csv(str(dat_path))
+                        # read_skypatrol_csv standardizes v_g_band to 0=g, 1=V
+                        if not df_all.empty and "v_g_band" in df_all.columns:
+                            dfg = df_all[df_all["v_g_band"] == 0].reset_index(drop=True)
+                            dfv = df_all[df_all["v_g_band"] == 1].reset_index(drop=True)
+                        else:
+                            dfg, dfv = pd.DataFrame(), pd.DataFrame()
+                    else:
+                        dfg, dfv = (
+                            read_lc_dat2(asn, lc_dir)
+                            if asn and lc_dir and has_path
+                            else (pd.DataFrame(), pd.DataFrame())
+                        )
                 except Exception as e:
                     if verbose:
-                        print(f"[DEBUG] {asn}: read_lc_dat2 failed: {e}")
+                        print(f"[DEBUG] {asn}: data load failed: {e}")
                     dfg, dfv = pd.DataFrame(), pd.DataFrame()
 
                 if verbose:

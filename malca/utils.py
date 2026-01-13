@@ -105,20 +105,24 @@ def read_lc_dat2(asassn_id, path):
     if os.path.exists(dat2_path):
         file = dat2_path
                       
-        columns = ["JD", 
-                   "mag", 
-                   "error", 
-                   "good_bad", 
-                   "camera#", 
-                   "v_g_band", 
-                   "saturated", 
+        columns = ["JD",
+                   "mag",
+                   "error",
+                   "good_bad",
+                   "camera#",
+                   "v_g_band",
+                   "saturated",
                    "cam_field"]
 
-                  
-        df = pd.read_fwf(
+        # Use whitespace delimiter instead of fixed-width to handle
+        # variable-width JD values (4-digit vs 5-digit integer parts).
+        # read_fwf infers column widths from early rows, which fails when
+        # JD transitions from 9999 to 10000+ (leading digit gets truncated).
+        df = pd.read_csv(
             file,
             header=None,
-            names=columns
+            names=columns,
+            delim_whitespace=True,
         )
     
                                                
