@@ -653,7 +653,10 @@ def bayesian_event_significance(
       - run diagnostics
       - global bayes_factor
     """
-    df = clean_lc(df)
+    # Only clean if df_base was not pre-computed; if df_base is provided,
+    # the caller already cleaned df and df_base must match it.
+    if df_base is None:
+        df = clean_lc(df)
     cam_vec = df["camera#"].to_numpy() if "camera#" in df.columns else None
     jd = np.asarray(df["JD"], float)
     mags = np.asarray(df[mag_col], float)
