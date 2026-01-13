@@ -119,58 +119,118 @@ def query_gaia_by_ids(source_ids: list[str | int], chunk_size: int = 1000, cache
 # STARHORSE LOCAL CATALOG
 # =============================================================================
 
-def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Path | None = None) -> pd.DataFrame:
+def query_starhorse_by_ids(source_ids: list[str | int], starhorse_file: str | Path | None = None, use_tap: bool = True) -> pd.DataFrame:
     """
-    Join with local StarHorse 2022 catalog (Anders et al.) for stellar ages, masses, distances.
+    Retrieve StarHorse 2021 stellar parameters (Anders et al.).
     
-    Download from: https://cdsarc.cds.unistra.fr/viz-bin/cat/I/354
+    **Recommended**: TAP queries (default, use_tap=True)
+    - Queries gaia.aip.de TAP service remotely
+    - No large download required
+    - Returns age, mass, distance, extinction
+    
+    **Alternative**: Local catalog join (use_tap=False)
+    - Requires downloading ~100GB catalog from https://cdsarc.cds.unistra.fr/viz-bin/cat/I/354
+    - Faster for repeated queries on same dataset
     """
-    if starhorse_file is None:
-        starhorse_file = os.environ.get('STARHORSE_PATH', 'input/starhorse/starhorse2021.parquet')
+    if use_tap:
+        # TAP query via pyvo
+        try:
+            import pyvo
+        except ImportError:
+            print("Error: 'pyvo' package required for TAP queries. Install with: pip install pyvo")
+            return pd.DataFrame()
         
-    starhorse_path = Path(starhorse_file)
-    
-    if not starhorse_path.exists():
-        print(f"Warning: StarHorse catalog not found at {starhorse_path}")
-        return pd.DataFrame()
+        # Convert IDs to strings
+        valid_ids = [str(x) for x in source_ids if str(x).isdigit()]
+        if not valid_ids:
+            return pd.DataFrame()
+            
+        print(f"Querying StarHorse via TAP for {len(valid_ids)} sources...")
         
-    print(f"Loading StarHorse catalog from {starhorse_path}...")
-    
-    try:
-        if str(starhorse_path).endswith('.parquet'):
-            sh_df = pd.read_parquet(starhorse_path)
-        elif str(starhorse_path).endswith('.fits') or str(starhorse_path).endswith('.fits.gz'):
-            from astropy.table import Table
-            sh_df = Table.read(starhorse_path).to_pandas()
-        else:
-            sh_df = pd.read_csv(starhorse_path)
-    except Exception as e:
-        print(f"Error loading StarHorse: {e}")
-        return pd.DataFrame()
+        # Query in chunks (TAP has query length limits)
+        chunk_size = 1000
+        results = []
         
-    # Standardize column name
-    if 'Source' in sh_df.columns:
-        sh_df = sh_df.rename(columns={'Source': 'source_id'})
-    elif 'EDR3Name' in sh_df.columns:
-        sh_df = sh_df.rename(columns={'EDR3Name': 'source_id'})
+        for i in tqdm(range(0, len(valid_ids), chunk_size), desc="StarHorse TAP"):
+            chunk_ids = valid_ids[i:i+chunk_size]
+            ids_str = ",".join(chunk_ids)
+            
+            query = f"""
+            SELECT 
+                source_id,
+                teff50, logg50, met50,
+                dist50, dist16, dist84,
+                av50, av16, av84,
+                mass50, mass16, mass84,
+                age50, age16, age84
+            FROM gaiaedr3_contrib.starhorse
+            WHERE source_id IN ({ids_str})
+            """
+            
+            try:
+                tap_service = pyvo.dal.TAPService("https://gaia.aip.de/tap")
+                result = tap_service.search(query)
+                chunk_df = result.to_table().to_pandas()
+                results.append(chunk_df)
+            except Exception as e:
+                print(f"TAP query error for chunk {i}: {e}")
+                continue
         
-    if 'source_id' not in sh_df.columns:
-        print("Warning: Could not find source_id column in StarHorse catalog.")
-        return pd.DataFrame()
+        if not results:
+            print("Warning: No StarHorse results from TAP queries.")
+            return pd.DataFrame()
+            
+        sh_df = pd.concat(results, ignore_index=True)
+        sh_df['source_id'] = sh_df['source_id'].astype(str)
         
-    sh_df['source_id'] = sh_df['source_id'].astype(str)
-    
-    # Filter to requested IDs
-    valid_ids = set(str(x) for x in source_ids if str(x).isdigit())
-    sh_filtered = sh_df[sh_df['source_id'].isin(valid_ids)]
-    
-    print(f"Found {len(sh_filtered)}/{len(valid_ids)} sources in StarHorse catalog.")
-    
-    # Select key columns if they exist
-    key_cols = ['source_id', 'age16', 'age50', 'age84', 'mass50', 'dist50', 'AV50', 'met50', 'logg50', 'teff50']
-    available_cols = ['source_id'] + [c for c in key_cols[1:] if c in sh_filtered.columns]
-    
-    return sh_filtered[available_cols].copy()
+        print(f"Retrieved {len(sh_df)} StarHorse entries via TAP.")
+        return sh_df
+        
+    else:
+        # Local catalog join (original implementation)
+        if starhorse_file is None:
+            starhorse_file = os.environ.get('STARHORSE_PATH', 'input/starhorse/starhorse2021.parquet')
+            
+        starhorse_path = Path(starhorse_file)
+        
+        if not starhorse_path.exists():
+            print(f"Warning: StarHorse catalog not found at {starhorse_path}")
+            print("Tip: Use use_tap=True to query remotely instead of downloading 100GB catalog.")
+            return pd.DataFrame()
+            
+        print(f"Loading StarHorse catalog from {starhorse_path}...")
+        
+        try:
+            if str(starhorse_path).endswith('.parquet'):
+                sh_df = pd.read_parquet(starhorse_path)
+            elif str(starhorse_path).endswith('.fits') or str(starhorse_path).endswith('.fits.gz'):
+                from astropy.table import Table
+                sh_df = Table.read(starhorse_path).to_pandas()
+            else:
+                sh_df = pd.read_csv(starhorse_path)
+        except Exception as e:
+            print(f"Error loading StarHorse: {e}")
+            return pd.DataFrame()
+            
+        # Standardize column name
+        if 'Source' in sh_df.columns:
+            sh_df = sh_df.rename(columns={'Source': 'source_id'})
+        elif 'EDR3Name' in sh_df.columns:
+            sh_df = sh_df.rename(columns={'EDR3Name': 'source_id'})
+            
+        if 'source_id' not in sh_df.columns:
+            print("Warning: Could not find source_id column in StarHorse catalog.")
+            return pd.DataFrame()
+            
+        sh_df['source_id'] = sh_df['source_id'].astype(str)
+        
+        # Filter to requested IDs
+        valid_ids = set(str(x) for x in source_ids if str(x).isdigit())
+        sh_filtered = sh_df[sh_df['source_id'].isin(valid_ids)]
+        
+        print(f"Found {len(sh_filtered)}/{len(valid_ids)} sources in StarHorse catalog.")
+        
+        return sh_filtered
 
 
 # =============================================================================
@@ -358,7 +418,7 @@ def main():
     parser.add_argument("--chunk-size", type=int, default=1000, help="Gaia query chunk size")
     parser.add_argument("--cache", type=Path, default=Path("output/gaia_cache.parquet"), help="Cache file for Gaia queries")
     parser.add_argument("--dust", action="store_true", help="Enable dustmaps3d 3D extinction query")
-    parser.add_argument("--starhorse", type=Path, default=None, help="Path to local StarHorse catalog (parquet/fits) for stellar ages")
+    parser.add_argument("--starhorse", type=str, default=None, help="StarHorse stellar ages/masses: 'tap' for remote TAP query (recommended), or path to local catalog file")
     
     args = parser.parse_args()
     
@@ -440,10 +500,12 @@ def main():
                 print("Classifying Galactic populations...")
                 df_char = classify_galactic_population(df_char)
                 
-                # StarHorse join
+                # StarHorse join (TAP queries by default)
                 if args.starhorse:
                     print("Loading StarHorse catalog for ages...")
-                    sh_df = query_starhorse_by_ids(gaia_ids, starhorse_file=args.starhorse)
+                    # If user provides a file path, use local catalog; otherwise use TAP
+                    use_tap_query = not Path(args.starhorse).exists() if args.starhorse != "tap" else True
+                    sh_df = query_starhorse_by_ids(gaia_ids, starhorse_file=args.starhorse if not use_tap_query else None, use_tap=use_tap_query)
                     if not sh_df.empty:
                         df_char = df_char.merge(sh_df, on='source_id', how='left', suffixes=('', '_sh'))
                         if 'age50' in df_char.columns:
