@@ -332,7 +332,9 @@ def plot_light_curve_with_dips(
     source_id: str,
     plot_path: Path,
 ):
-    fig, axes = pl.subplots(2, 1, figsize=(12, 8), sharex=True)
+    # Use 1x2 layout (side-by-side) with separate x-axes for each band
+    # V-band and g-band have different JD ranges and should not share x-axis
+    fig, axes = pl.subplots(1, 2, figsize=(16, 6))
 
     # Baseline parameters (match the SHO-ish defaults; note baseline function takes q not Q)
     baseline_kwargs = {
@@ -457,8 +459,11 @@ def plot_light_curve_with_dips(
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8, loc="best", ncol=2)
 
-    plot_band(axes[0], dfg, res_g, "g")
-    plot_band(axes[1], dfv, res_v, "V")
+    # V-band on left (earlier JD, typically ends around JD 2458500)
+    # g-band on right (later JD, typically starts around JD 2458500)
+    plot_band(axes[0], dfv, res_v, "V")
+    plot_band(axes[1], dfg, res_g, "g")
+    axes[0].set_xlabel("JD", fontsize=12)
     axes[1].set_xlabel("JD", fontsize=12)
 
     pl.tight_layout()
