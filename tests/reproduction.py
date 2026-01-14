@@ -512,7 +512,7 @@ def build_reproduction_report(
     min_points_per_day: float = 0.05,
     min_cameras: int = 2,
     skip_vsx: bool = False,
-    vsx_catalog: Path | str = Path("input/vsx/vsxcat.090525.csv"),
+    vsx_catalog: Path | str = Path("/home/lenhart.106/code/malca/input/vsx/vsxcat.090525.csv"),
     vsx_max_sep: float = 3.0,
     min_mag_offset: float = 0.1,
     skip_post_filters: bool = False,
