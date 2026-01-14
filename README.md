@@ -14,6 +14,7 @@
 - Optional outputs: pyarrow (parquet), duckdb
 - Optional visualization: plotly (3D injection plots)
 - Multi-wavelength characterization: astroquery (Gaia queries), dustmaps3d (3D dust extinction)
+- Optional characterization: banyan-sigma (young associations), requests (unWISE queries)
 - Notebooks/EDA: jupyterlab, ipykernel, seaborn, scikit-learn, joblib
 
 ## Quick Start
@@ -319,7 +320,14 @@ python -m malca.characterize \
 - **3D Dust Extinction**: All-sky coverage via `dustmaps3d` (Wang et al. 2025, ~350MB)
 - **YSO Classification**: Koenig & Leisawitz (2014) IR color-color diagram with dust correction
 - **Galactic Population**: Thin/thick disk classification using metallicity or StarHorse ages
-- **StarHorse** (optional): Stellar ages,  masses, distances from local catalog join
+- **StarHorse** (optional): Stellar ages, masses, distances from local catalog join
+- **Auxiliary Catalog Crossmatches** (Tzanidakis+2025):
+  - BANYAN Σ: Young stellar association membership probabilities
+  - IPHAS DR2: Hα emission detection for Galactic plane sources
+  - Star-forming regions: Proximity check to known SFRs (Prisinzano+2022)
+  - Open clusters: Cantat-Gaudin+2020 membership crossmatch
+  - unWISE/unTimely: Mid-IR variability z-scores
+- **Color Evolution Analysis**: (g-r) color differences and CMD slope fitting
 - **Caching**: Gaia results cached locally to speed up repeated analyses
 
 **Setup:**
@@ -339,6 +347,15 @@ pip install -e ".[multiwavelength]"
 - `H_K`, `W1_W2`, `yso_class` (Class I/II/Transition Disk/Main Sequence)
 - `population` (thin_disk/thick_disk from metallicity or age)
 - `age50`, `mass50` (if StarHorse provided)
+- Auxiliary crossmatches (Tzanidakis+2025):
+  - `banyan_field_prob`, `banyan_best_assoc` (BANYAN Σ membership)
+  - `iphas_r_ha`, `iphas_ha_excess` (IPHAS Hα)
+  - `near_sfr`, `sfr_name` (star-forming region proximity)
+  - `cluster_name`, `cluster_age_myr` (open cluster membership)
+  - `unwise_w1_zscore`, `unwise_w1_var` (IR variability)
+- Color evolution (if multi-band available):
+  - `color_baseline`, `color_dip`, `color_diff`, `is_redder`
+  - `cmd_slope`, `cmd_slope_angle`, `cmd_ism_consistent`
 
 
   - Measures completeness as function of dip depth, duration, and stellar magnitude

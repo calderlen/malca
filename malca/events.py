@@ -194,6 +194,83 @@ def bic(resid, err, n_params):
     return chi2 + n_params * np.log(n_points)
 
 
+def compute_symmetry_score(
+    jd: np.ndarray,
+    flux: np.ndarray,
+    center_idx: int,
+    start_idx: int,
+    end_idx: int,
+    baseline_flux: float | None = None,
+) -> float:
+    """
+    Compute light-curve symmetry score (Tzanidakis+2025 Eq. 5).
+    
+    Compares integral areas from start-to-center vs center-to-end.
+    Uses normalized flux (baseline = 1).
+    
+    Parameters
+    ----------
+    jd : np.ndarray
+        Julian dates
+    flux : np.ndarray
+        Normalized flux values (baseline ~1, dip < 1)
+    center_idx : int
+        Index of dip center (minimum flux)
+    start_idx : int
+        Index of dip start (ingress begins)
+    end_idx : int
+        Index of dip end (egress completes)
+    baseline_flux : float, optional
+        Baseline flux level. If None, uses biweight mean of flux.
+    
+    Returns
+    -------
+    float
+        Symmetry score:
+        - Near 0: symmetric dip
+        - Positive: longer ingress (slower rise to center)
+        - Negative: longer egress (slower recovery from center)
+    """
+    jd = np.asarray(jd, float)
+    flux = np.asarray(flux, float)
+    
+    # Validate indices
+    if not (0 <= start_idx < center_idx < end_idx < len(jd)):
+        return np.nan
+    
+    # Baseline estimation if not provided
+    if baseline_flux is None:
+        from astropy.stats import biweight_location
+        baseline_flux = biweight_location(flux, ignore_nan=True)
+    
+    # Extract segments
+    t_sc = jd[start_idx:center_idx + 1]
+    f_sc = flux[start_idx:center_idx + 1]
+    
+    t_ce = jd[center_idx:end_idx + 1]
+    f_ce = flux[center_idx:end_idx + 1]
+    
+    if len(t_sc) < 2 or len(t_ce) < 2:
+        return np.nan
+    
+    # Compute integrals: I = integral of (baseline - flux) dt
+    # Paper Eq. 4: I = sum over points of (baseline - flux_n) * dt
+    # We use trapezoidal integration for better accuracy
+    deviation_sc = baseline_flux - f_sc
+    deviation_ce = baseline_flux - f_ce
+    
+    I_sc = np.trapz(deviation_sc, t_sc)
+    I_ce = np.trapz(deviation_ce, t_ce)
+    
+    # Paper Eq. 5: symmetry_score = (I_sc + I_ce) / sqrt(I_sc^2 + I_ce^2)
+    denominator = np.sqrt(I_sc**2 + I_ce**2)
+    
+    if denominator < 1e-10:
+        return 0.0  # No significant dip
+    
+    return float((I_sc - I_ce) / denominator)
+
+
 def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
     """
     fits gaussian vs paczynski vs noise kernel to an individual run, returns a dict with kernel chosen and params
@@ -988,6 +1065,26 @@ def bayesian_event_significance(
             summary = initial_summaries[i]
             morph_res = classify_run_morphology(jd, mags, errs, r, kind=kind)
             summary.update(morph_res)
+            
+            # Compute symmetry score for dips (Tzanidakis+2025 Eq. 5)
+            if kind == "dip" and len(r) >= 3:
+                # Convert magnitudes to flux (f = 10^((baseline - m) / 2.5))
+                baseline_mag_run = morph_res.get("params", {}).get("baseline", baseline_mag)
+                flux = np.power(10.0, (baseline_mag_run - mags) / 2.5)
+                
+                # Find dip center (minimum flux = maximum magnitude)
+                center_local = np.argmax(mags[r])
+                center_idx = r[center_local]
+                start_idx = r[0]
+                end_idx = r[-1]
+                
+                sym_score = compute_symmetry_score(
+                    jd, flux, center_idx, start_idx, end_idx, baseline_flux=1.0
+                )
+                summary["symmetry_score"] = sym_score
+            else:
+                summary["symmetry_score"] = np.nan
+            
             final_summaries.append(summary)
         
         run_summaries = final_summaries
@@ -1273,14 +1370,15 @@ def process_one(
 
     def get_best_morph_info(run_list):
         """
-        
+        Extract morphology info and symmetry score from the best run.
         """
         if not run_list:
-            return "none", 0.0, 0.0
+            return "none", 0.0, 0.0, np.nan
         best = sorted(run_list, key=lambda x: x['run_sum'], reverse=True)[0]
         
         morph = best.get('morphology', 'none')
         delta_bic = best.get('delta_bic_null', 0.0)
+        symmetry = best.get('symmetry_score', np.nan)
         
         params = best.get('params', {})
         if morph == 'gaussian':
@@ -1290,10 +1388,10 @@ def process_one(
         else:
             main_param = np.nan
             
-        return morph, float(delta_bic), float(main_param)
+        return morph, float(delta_bic), float(main_param), float(symmetry)
 
-    dip_morph, dip_dbic, dip_param = get_best_morph_info(dip["run_summaries"])
-    jump_morph, jump_dbic, jump_param = get_best_morph_info(jump["run_summaries"])
+    dip_morph, dip_dbic, dip_param, dip_symmetry = get_best_morph_info(dip["run_summaries"])
+    jump_morph, jump_dbic, jump_param, _ = get_best_morph_info(jump["run_summaries"])
 
     cams = df["camera#"].dropna() if "camera#" in df.columns else pd.Series([], dtype=str)
 
@@ -1327,6 +1425,7 @@ def process_one(
         dip_best_morph=str(dip_morph),
         dip_best_delta_bic=float(dip_dbic),
         dip_best_width_param=float(dip_param),
+        dip_symmetry_score=float(dip_symmetry),
         
         jump_best_morph=str(jump_morph),
         jump_best_delta_bic=float(jump_dbic),

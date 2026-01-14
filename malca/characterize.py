@@ -405,6 +405,550 @@ def classify_galactic_population(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
+# BANYAN Σ MEMBERSHIP (Gagné+2018)
+# =============================================================================
+
+def query_banyan_sigma(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Query BANYAN Σ for young stellar association membership probability.
+    
+    Requires: ra, dec, pmra, pmdec, parallax columns.
+    Optional: radial_velocity for better constraints.
+    
+    Returns dataframe with banyan_field_prob and banyan_best_assoc columns.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    
+    # Check for required columns
+    required = ['ra', 'dec', 'pmra', 'pmdec', 'parallax']
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        print(f"Warning: BANYAN Σ requires columns: {missing}")
+        df['banyan_field_prob'] = np.nan
+        df['banyan_best_assoc'] = ''
+        return df
+    
+    try:
+        from banyan_sigma import banyan_sigma
+    except ImportError:
+        print("Warning: banyan_sigma package not installed. Skipping.")
+        print("Install with: pip install banyan-sigma")
+        df['banyan_field_prob'] = np.nan
+        df['banyan_best_assoc'] = ''
+        return df
+    
+    field_probs = []
+    best_assocs = []
+    
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="BANYAN Σ"):
+        try:
+            ra = float(row['ra'])
+            dec = float(row['dec'])
+            pmra = float(row['pmra'])
+            pmdec = float(row['pmdec'])
+            plx = float(row['parallax'])
+            
+            if not all(np.isfinite([ra, dec, pmra, pmdec, plx])):
+                field_probs.append(np.nan)
+                best_assocs.append('')
+                continue
+            
+            # Optional RV
+            rv = row.get('radial_velocity', np.nan)
+            rv = float(rv) if np.isfinite(rv) else None
+            
+            result = banyan_sigma(
+                ra=ra, dec=dec,
+                pmra=pmra, pmdec=pmdec,
+                plx=plx, rv=rv
+            )
+            
+            field_probs.append(float(result.get('field', np.nan)))
+            
+            # Best association (highest non-field probability)
+            assoc_probs = {k: v for k, v in result.items() if k != 'field'}
+            if assoc_probs:
+                best = max(assoc_probs, key=assoc_probs.get)
+                best_assocs.append(best if assoc_probs[best] > 0.1 else '')
+            else:
+                best_assocs.append('')
+                
+        except Exception as e:
+            field_probs.append(np.nan)
+            best_assocs.append('')
+    
+    df['banyan_field_prob'] = field_probs
+    df['banyan_best_assoc'] = best_assocs
+    
+    print(f"BANYAN Σ: {(np.array(field_probs) < 0.99).sum()} sources with < 99% field probability")
+    return df
+
+
+# =============================================================================
+# IPHAS Hα CROSSMATCH (Barentsen+2014)
+# =============================================================================
+
+def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFrame:
+    """
+    Crossmatch to IPHAS DR2 for Hα emission detection.
+    
+    Uses Vizier TAP query. Returns (r-Hα) and (r-i) colors.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    
+    if 'ra' not in df.columns or 'dec' not in df.columns:
+        print("Warning: IPHAS crossmatch requires ra, dec columns")
+        df['iphas_r_ha'] = np.nan
+        df['iphas_r_i'] = np.nan
+        df['iphas_ha_excess'] = False
+        return df
+    
+    try:
+        from astroquery.vizier import Vizier
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+    except ImportError:
+        print("Warning: astroquery required for IPHAS crossmatch")
+        df['iphas_r_ha'] = np.nan
+        df['iphas_r_i'] = np.nan
+        df['iphas_ha_excess'] = False
+        return df
+    
+    # Query IPHAS DR2 catalog
+    Vizier.ROW_LIMIT = -1
+    
+    r_ha = []
+    r_i = []
+    ha_excess = []
+    
+    # Process in chunks to avoid timeout
+    chunk_size = 100
+    for i in tqdm(range(0, len(df), chunk_size), desc="IPHAS crossmatch"):
+        chunk = df.iloc[i:i+chunk_size]
+        
+        for _, row in chunk.iterrows():
+            try:
+                coord = SkyCoord(ra=row['ra']*u.deg, dec=row['dec']*u.deg)
+                result = Vizier.query_region(
+                    coord, radius=max_sep_arcsec*u.arcsec,
+                    catalog='II/321/iphas2'  # IPHAS DR2
+                )
+                
+                if result and len(result[0]) > 0:
+                    iphas = result[0][0]
+                    r_mag = float(iphas['r'])
+                    ha_mag = float(iphas['Ha'])
+                    i_mag = float(iphas['i'])
+                    
+                    r_ha.append(r_mag - ha_mag)
+                    r_i.append(r_mag - i_mag)
+                    # Hα excess: (r-Hα) > 0.25 above main sequence locus
+                    ha_excess.append((r_mag - ha_mag) > 0.25)
+                else:
+                    r_ha.append(np.nan)
+                    r_i.append(np.nan)
+                    ha_excess.append(False)
+            except Exception:
+                r_ha.append(np.nan)
+                r_i.append(np.nan)
+                ha_excess.append(False)
+    
+    df['iphas_r_ha'] = r_ha
+    df['iphas_r_i'] = r_i
+    df['iphas_ha_excess'] = ha_excess
+    
+    print(f"IPHAS: {len(df) - np.isnan(r_ha).sum()}/{len(df)} matched, {sum(ha_excess)} with Hα excess")
+    return df
+
+
+# =============================================================================
+# STAR-FORMING REGION PROXIMITY (Prisinzano+2022)
+# =============================================================================
+
+def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = 1.5) -> pd.DataFrame:
+    """
+    Check proximity to known star-forming regions.
+    
+    Uses Prisinzano+2022 Table 1 coordinates and distances.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    
+    # Major star-forming regions from Prisinzano+2022 Table 1
+    SFR_CATALOG = [
+        {'name': 'Orion Nebula Cluster', 'ra': 83.82, 'dec': -5.39, 'dist_pc': 400, 'radius_deg': 1.0},
+        {'name': 'Cygnus X', 'ra': 307.0, 'dec': 40.5, 'dist_pc': 1400, 'radius_deg': 3.0},
+        {'name': 'Taurus', 'ra': 68.0, 'dec': 26.0, 'dist_pc': 140, 'radius_deg': 5.0},
+        {'name': 'Ophiuchus', 'ra': 246.8, 'dec': -24.5, 'dist_pc': 140, 'radius_deg': 3.0},
+        {'name': 'Scorpius-Centaurus', 'ra': 240.0, 'dec': -25.0, 'dist_pc': 145, 'radius_deg': 10.0},
+        {'name': 'Perseus', 'ra': 55.0, 'dec': 32.0, 'dist_pc': 300, 'radius_deg': 3.0},
+        {'name': 'Serpens', 'ra': 277.5, 'dec': 1.2, 'dist_pc': 415, 'radius_deg': 1.0},
+        {'name': 'Lupus', 'ra': 240.0, 'dec': -38.0, 'dist_pc': 160, 'radius_deg': 3.0},
+    ]
+    
+    if 'ra' not in df.columns or 'dec' not in df.columns:
+        print("Warning: SFR proximity check requires ra, dec columns")
+        df['near_sfr'] = False
+        df['sfr_name'] = ''
+        return df
+    
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+    
+    # Get distance column
+    if 'distance_gspphot' in df.columns:
+        dist_pc = df['distance_gspphot'].values
+    elif 'parallax' in df.columns:
+        plx = df['parallax'].values
+        dist_pc = np.where((plx > 0) & np.isfinite(plx), 1000.0 / plx, np.nan)
+    else:
+        dist_pc = np.full(len(df), np.nan)
+    
+    near_sfr = []
+    sfr_names = []
+    
+    for i, row in tqdm(df.iterrows(), total=len(df), desc="SFR proximity"):
+        coord = SkyCoord(ra=row['ra']*u.deg, dec=row['dec']*u.deg)
+        d = dist_pc[i] if i < len(dist_pc) else np.nan
+        
+        found = False
+        name = ''
+        
+        for sfr in SFR_CATALOG:
+            sfr_coord = SkyCoord(ra=sfr['ra']*u.deg, dec=sfr['dec']*u.deg)
+            sep = coord.separation(sfr_coord).deg
+            
+            # Check angular separation and distance consistency
+            if sep < sfr['radius_deg']:
+                if np.isfinite(d):
+                    # Distance within 50% of SFR distance
+                    if abs(d - sfr['dist_pc']) / sfr['dist_pc'] < 0.5:
+                        found = True
+                        name = sfr['name']
+                        break
+                else:
+                    # No distance info, flag based on position only
+                    found = True
+                    name = sfr['name'] + ' (pos only)'
+                    break
+        
+        near_sfr.append(found)
+        sfr_names.append(name)
+    
+    df['near_sfr'] = near_sfr
+    df['sfr_name'] = sfr_names
+    
+    print(f"SFR proximity: {sum(near_sfr)}/{len(df)} sources near star-forming regions")
+    return df
+
+
+# =============================================================================
+# OPEN CLUSTER MEMBERSHIP (Cantat-Gaudin+2020)
+# =============================================================================
+
+def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFrame:
+    """
+    Crossmatch to Cantat-Gaudin+2020 open cluster catalog.
+    
+    Catalog contains 1867 clusters with ages and distances.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    
+    if 'ra' not in df.columns or 'dec' not in df.columns:
+        print("Warning: Open cluster crossmatch requires ra, dec columns")
+        df['cluster_name'] = ''
+        df['cluster_age_myr'] = np.nan
+        df['cluster_dist_pc'] = np.nan
+        return df
+    
+    try:
+        from astroquery.vizier import Vizier
+        from astropy.coordinates import SkyCoord
+        import astropy.units as u
+    except ImportError:
+        print("Warning: astroquery required for cluster crossmatch")
+        df['cluster_name'] = ''
+        df['cluster_age_myr'] = np.nan
+        df['cluster_dist_pc'] = np.nan
+        return df
+    
+    Vizier.ROW_LIMIT = -1
+    
+    names = []
+    ages = []
+    dists = []
+    
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="Cluster crossmatch"):
+        try:
+            coord = SkyCoord(ra=row['ra']*u.deg, dec=row['dec']*u.deg)
+            result = Vizier.query_region(
+                coord, radius=max_sep_arcsec*u.arcsec,
+                catalog='J/A+A/640/A1/members'  # Cantat-Gaudin+2020 members
+            )
+            
+            if result and len(result[0]) > 0:
+                member = result[0][0]
+                names.append(str(member.get('Cluster', '')))
+                ages.append(float(member.get('Age', np.nan)))
+                dists.append(float(member.get('Dist', np.nan)))
+            else:
+                names.append('')
+                ages.append(np.nan)
+                dists.append(np.nan)
+        except Exception:
+            names.append('')
+            ages.append(np.nan)
+            dists.append(np.nan)
+    
+    df['cluster_name'] = names
+    df['cluster_age_myr'] = ages
+    df['cluster_dist_pc'] = dists
+    
+    matched = sum(1 for n in names if n)
+    print(f"Cluster crossmatch: {matched}/{len(df)} sources in open clusters")
+    return df
+
+
+# =============================================================================
+# unWISE/unTimely IR VARIABILITY
+# =============================================================================
+
+def query_unwise_variability(df: pd.DataFrame, max_sep_arcsec: float = 3.0) -> pd.DataFrame:
+    """
+    Query unWISE/unTimely for mid-IR variability (Meisner+2023).
+    
+    Computes W1 and W2 variability z-scores from time-domain photometry.
+    """
+    if df.empty:
+        return df
+    df = df.copy()
+    
+    if 'ra' not in df.columns or 'dec' not in df.columns:
+        print("Warning: unWISE query requires ra, dec columns")
+        df['unwise_w1_zscore'] = np.nan
+        df['unwise_w2_zscore'] = np.nan
+        df['unwise_w1_var'] = False
+        return df
+    
+    try:
+        import requests
+    except ImportError:
+        print("Warning: requests package required for unWISE query")
+        df['unwise_w1_zscore'] = np.nan
+        df['unwise_w2_zscore'] = np.nan
+        df['unwise_w1_var'] = False
+        return df
+    
+    w1_zscores = []
+    w2_zscores = []
+    w1_var = []
+    
+    # unTimely API endpoint
+    base_url = "https://irsa.ipac.caltech.edu/cgi-bin/Gator/nph-query"
+    
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="unWISE variability"):
+        try:
+            # Query unTimely catalog
+            params = {
+                'catalog': 'untimely',
+                'spatial': 'cone',
+                'radius': max_sep_arcsec,
+                'radunits': 'arcsec',
+                'objstr': f"{row['ra']} {row['dec']}",
+                'outfmt': '1',  # JSON
+            }
+            
+            resp = requests.get(base_url, params=params, timeout=30)
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                
+                if data and len(data) > 0:
+                    # Filter by quality (paper criteria)
+                    good = [d for d in data 
+                            if d.get('fracflux', 0) > 0.5 
+                            and d.get('qf', 0) > 0.9]
+                    
+                    if good:
+                        w1_mags = [d['w1mpro'] for d in good if 'w1mpro' in d]
+                        w2_mags = [d['w2mpro'] for d in good if 'w2mpro' in d]
+                        
+                        if len(w1_mags) >= 3:
+                            w1_std = np.std(w1_mags)
+                            w1_med = np.median(w1_mags)
+                            # Estimate expected scatter from magnitude
+                            expected_scatter = 0.02 + 0.01 * max(0, w1_med - 14)
+                            z = w1_std / expected_scatter
+                            w1_zscores.append(z)
+                            w1_var.append(z > 3.0)
+                        else:
+                            w1_zscores.append(np.nan)
+                            w1_var.append(False)
+                        
+                        if len(w2_mags) >= 3:
+                            w2_std = np.std(w2_mags)
+                            w2_med = np.median(w2_mags)
+                            expected_scatter = 0.02 + 0.01 * max(0, w2_med - 14)
+                            w2_zscores.append(w2_std / expected_scatter)
+                        else:
+                            w2_zscores.append(np.nan)
+                    else:
+                        w1_zscores.append(np.nan)
+                        w2_zscores.append(np.nan)
+                        w1_var.append(False)
+                else:
+                    w1_zscores.append(np.nan)
+                    w2_zscores.append(np.nan)
+                    w1_var.append(False)
+            else:
+                w1_zscores.append(np.nan)
+                w2_zscores.append(np.nan)
+                w1_var.append(False)
+                
+        except Exception:
+            w1_zscores.append(np.nan)
+            w2_zscores.append(np.nan)
+            w1_var.append(False)
+    
+    df['unwise_w1_zscore'] = w1_zscores
+    df['unwise_w2_zscore'] = w2_zscores
+    df['unwise_w1_var'] = w1_var
+    
+    n_var = sum(w1_var)
+    print(f"unWISE: {n_var}/{len(df)} sources with W1 variability z-score > 3")
+    return df
+
+
+# =============================================================================
+# COLOR EVOLUTION ANALYSIS (Tzanidakis+2025 Section 4.3)
+# =============================================================================
+
+def analyze_color_evolution(
+    jd: np.ndarray,
+    mag_g: np.ndarray,
+    mag_r: np.ndarray,
+    dip_start_jd: float,
+    dip_end_jd: float,
+) -> dict:
+    """
+    Analyze (g-r) color evolution during dimming events.
+    
+    Implements Tzanidakis+2025 Section 4.3 color analysis.
+    
+    Parameters
+    ----------
+    jd : np.ndarray
+        Julian dates for observations
+    mag_g : np.ndarray
+        g-band magnitudes
+    mag_r : np.ndarray
+        r-band magnitudes (or V-band for ASAS-SN)
+    dip_start_jd, dip_end_jd : float
+        Start/end JD of dipping event
+    
+    Returns
+    -------
+    dict
+        Color evolution metrics (color_baseline, color_dip, color_diff, is_redder)
+    """
+    jd = np.asarray(jd, float)
+    mag_g = np.asarray(mag_g, float)
+    mag_r = np.asarray(mag_r, float)
+    
+    if len(jd) != len(mag_g) or len(jd) != len(mag_r):
+        return {'color_baseline': np.nan, 'color_dip': np.nan, 
+                'color_diff': np.nan, 'is_redder': False}
+    
+    color = mag_g - mag_r
+    valid = np.isfinite(color)
+    in_dip = (jd >= dip_start_jd) & (jd <= dip_end_jd) & valid
+    quiescent = ~in_dip & valid
+    
+    color_baseline = float(np.nanmedian(color[quiescent])) if quiescent.sum() >= 3 else np.nan
+    color_dip = float(np.nanmedian(color[in_dip])) if in_dip.sum() >= 1 else np.nan
+    
+    if np.isfinite(color_baseline) and np.isfinite(color_dip):
+        color_diff = color_baseline - color_dip
+        is_redder = color_diff < 0
+    else:
+        color_diff, is_redder = np.nan, False
+    
+    return {'color_baseline': color_baseline, 'color_dip': color_dip,
+            'color_diff': color_diff, 'is_redder': is_redder}
+
+
+def fit_cmd_slope(
+    mag: np.ndarray,
+    color: np.ndarray,
+    mag_err: np.ndarray | None = None,
+    color_err: np.ndarray | None = None,
+) -> dict:
+    """
+    Fit CMD slope using orthogonal distance regression.
+    
+    Implements Tzanidakis+2025 method for deriving extinction properties.
+    
+    Returns
+    -------
+    dict
+        slope, slope_angle_deg, ism_consistent, implied_rv
+    
+    Notes
+    -----
+    ISM slopes: RV=3.1 -> 74.1°, RV=5.0 -> 79.2°
+    """
+    try:
+        from scipy.odr import ODR, Model, RealData
+    except ImportError:
+        return {'slope': np.nan, 'slope_angle_deg': np.nan, 
+                'ism_consistent': False, 'implied_rv': np.nan}
+    
+    mag = np.asarray(mag, float)
+    color = np.asarray(color, float)
+    valid = np.isfinite(mag) & np.isfinite(color)
+    mag, color = mag[valid], color[valid]
+    
+    if len(mag) < 5:
+        return {'slope': np.nan, 'slope_angle_deg': np.nan,
+                'ism_consistent': False, 'implied_rv': np.nan}
+    
+    # Errors
+    if mag_err is not None and color_err is not None:
+        mag_err = np.clip(np.asarray(mag_err, float)[valid], 0.01, np.inf)
+        color_err = np.clip(np.asarray(color_err, float)[valid], 0.01, np.inf)
+    else:
+        mag_err = np.full(len(mag), np.std(mag) * 0.1)
+        color_err = np.full(len(color), np.std(color) * 0.1)
+    
+    def linear_func(beta, x): return beta[0] * x + beta[1]
+    
+    model = Model(linear_func)
+    data = RealData(color, mag, sx=color_err, sy=mag_err)
+    slope_guess = (mag.max() - mag.min()) / (color.max() - color.min() + 1e-6)
+    odr = ODR(data, model, beta0=[slope_guess, np.median(mag) - slope_guess * np.median(color)])
+    
+    try:
+        result = odr.run()
+        slope = float(result.beta[0])
+        slope_angle = np.degrees(np.arctan(slope))
+        ism_consistent = 74.1 <= slope_angle <= 79.2
+        implied_rv = 3.1 + (slope_angle - 74.1) / (79.2 - 74.1) * 1.9 if 60 < slope_angle < 85 else np.nan
+    except Exception:
+        return {'slope': np.nan, 'slope_angle_deg': np.nan,
+                'ism_consistent': False, 'implied_rv': np.nan}
+    
+    return {'slope': slope, 'slope_angle_deg': slope_angle,
+            'ism_consistent': ism_consistent, 'implied_rv': implied_rv}
+
+
+# =============================================================================
 # MAIN CLI
 # =============================================================================
 

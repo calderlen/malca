@@ -92,15 +92,17 @@ graph TB
       end
 
       subgraph "Multi-Wavelength Characterization"
-          CHAR[characterize.py<br/>Gaia + Dust + YSO]
+          CHAR[characterize.py<br/>Gaia + Dust + YSO + Catalogs]
           GAIA_CAT[Gaia DR3<br/>via astroquery]
           DUST_MAP[dustmaps3d<br/>Wang+ 2025]
           STARHORSE[StarHorse<br/>Local catalog]
+          AUX_CAT[Auxiliary Catalogs<br/>BANYAN/IPHAS/Clusters]
 
           CAND --> CHAR
           GAIA_CAT --> CHAR
           DUST_MAP -.-> CHAR
           STARHORSE -.-> CHAR
+          AUX_CAT -.-> CHAR
           CHAR --> CHAR_OUT[(Characterized<br/>Candidates)]
       end
 
@@ -168,6 +170,7 @@ graph TB
 1. **`events_filtered.py`**: Wrapper orchestrating pre-filters + events.py with batching and resume
 2. **`pre_filter.py`**: Removes sparse LCs, VSX matches, single-camera sources
 3. **`events.py`**: Bayesian event detection (core algorithm)
+   - Light-curve symmetry score (Tzanidakis+2025 Eq. 5) computed per dip
    - **`filter.py`**: Signal amplitude filtering (optional via `--min-mag-offset` flag)
 4. **`post_filter.py`**: Quality filters on candidates (posterior strength, morphology, RUWE)
 
@@ -194,6 +197,22 @@ graph TB
   - Classifies YSOs using IR color-color diagrams (Koenig & Leisawitz 2014)
   - Tags galactic populations (thin/thick disk) using metallicity or stellar ages
   - Joins with local StarHorse catalog for age/mass estimates (optional)
+  - **Auxiliary catalog crossmatches** (Tzanidakis+2025):
+    - `query_banyan_sigma()`: Young stellar association membership (BANYAN Σ)
+    - `crossmatch_iphas()`: IPHAS DR2 Hα emission detection
+    - `check_sfr_proximity()`: Star-forming region proximity (Prisinzano+2022)
+    - `crossmatch_open_clusters()`: Open cluster membership (Cantat-Gaudin+2020)
+    - `query_unwise_variability()`: unTimely mid-IR variability z-scores
+  - **Color evolution analysis** (Tzanidakis+2025 Section 4.3):
+    - `analyze_color_evolution()`: (g−r) quiescent vs dip color differences
+    - `fit_cmd_slope()`: CMD slope fitting via ODR, ISM extinction comparison
+- **`classify.py`**: Dipper classification module (Tzanidakis et al. 2025)
+  - Eclipsing Binary (EB) rejection: asymmetry, periodicity, Keplerian duration checks
+  - Cataclysmic Variable (CV) rejection: Gaia CMD position, Hα excess, PS1 color locus
+  - Starspot rejection: amplitude and timescale checks
+  - Circumstellar material estimation: semimajor axis from dip depth/duration
+  - Disk occultation probability: Hill sphere, WISE upper limits
+  - Optional IPHAS and PS1 queries (`--iphas`, `--ps1`)
 
 #### **CLI Entry Point**
 - **`__main__.py`**: Unified command-line interface
