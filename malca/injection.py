@@ -256,57 +256,87 @@ def _trial_indices_to_params(
     return amp_idx, dur_idx, inj_idx
 
 
+
 def _simulate_trial(
     trial_index: int,
     *,
     control_ids: np.ndarray,
     control_dirs: np.ndarray,
-    amplitude_grid: np.ndarray,
-    duration_grid: np.ndarray,
-    n_injections_per_grid: int,
-    skew_min: float,
-    skew_max: float,
+    amp_range: tuple[float, float],
+    dur_range: tuple[float, float],
+    skew_range: tuple[float, float],
     mag_err_poly: np.poly1d | None,
     detection_kwargs: dict,
     seed: int,
 ) -> dict:
-    amp_idx, dur_idx, inj_idx = _trial_indices_to_params(
-        trial_index, n_injections_per_grid, len(duration_grid)
-    )
-    if amp_idx >= len(amplitude_grid):
-        return dict(trial_index=trial_index, detected=False, error="trial_index_out_of_range")
-
-    amplitude = float(amplitude_grid[amp_idx])
-    duration = float(duration_grid[dur_idx])
-
     rng = np.random.default_rng(seed + int(trial_index))
-    control_idx = int(rng.integers(0, len(control_ids)))
-    asas_sn_id = str(control_ids[control_idx])
-    lc_dir = Path(str(control_dirs[control_idx]))
+    
+    # improved random sampling for MC coverage
+    # Amplitude: Uniform
+    amplitude = rng.uniform(amp_range[0], amp_range[1])
+    # Duration: Log-Uniform
+    log_dur_min = np.log10(dur_range[0])
+    log_dur_max = np.log10(dur_range[1])
+    duration = 10 ** rng.uniform(log_dur_min, log_dur_max)
+
+    # Retry loop to find a star with valid magnitude (12-15)
+    max_attempts = 10
+    for attempt in range(max_attempts):
+        control_idx = int(rng.integers(0, len(control_ids)))
+        asas_sn_id = str(control_ids[control_idx])
+        lc_dir = Path(str(control_dirs[control_idx]))
+
+        try:
+            df = _load_lc(asas_sn_id, lc_dir)
+            if df.empty or len(df) < 10:
+                if attempt == max_attempts - 1:
+                    return dict(
+                        trial_index=trial_index,
+                        amplitude=amplitude,
+                        duration=duration,
+                        asas_sn_id=asas_sn_id,
+                        detected=False,
+                        error="empty_or_short_lc_max_retries",
+                    )
+                continue
+
+            median_mag = float(np.nanmedian(df["mag"].values))
+            
+            # Only inject into stars with median magnitude between 12 and 15
+            if median_mag < 12.0 or median_mag > 15.0:
+                if attempt == max_attempts - 1:
+                     return dict(
+                        trial_index=trial_index,
+                        amplitude=amplitude,
+                        duration=duration,
+                        median_mag=median_mag,
+                        asas_sn_id=asas_sn_id,
+                        detected=False,
+                        error="magnitude_out_of_range",
+                    )
+                continue
+            
+            # Found a valid star
+            break
+            
+        except Exception as exc:
+            if attempt == max_attempts - 1:
+                return dict(
+                    trial_index=trial_index,
+                    amplitude=amplitude,
+                    duration=duration,
+                    asas_sn_id=asas_sn_id,
+                    detected=False,
+                    error=str(exc),
+                )
+            continue
 
     try:
-        df = _load_lc(asas_sn_id, lc_dir)
-        if df.empty or len(df) < 10:
-            return dict(
-                trial_index=trial_index,
-                amp_index=amp_idx,
-                dur_index=dur_idx,
-                inj_index=inj_idx,
-                amplitude=amplitude,
-                duration=duration,
-                asas_sn_id=asas_sn_id,
-                detected=False,
-                error="empty_or_short_lc",
-            )
-
         t_min = float(df["JD"].min())
         t_max = float(df["JD"].max())
         if not np.isfinite(t_min) or not np.isfinite(t_max) or (t_max - t_min <= 2 * duration):
             return dict(
                 trial_index=trial_index,
-                amp_index=amp_idx,
-                dur_index=dur_idx,
-                inj_index=inj_idx,
                 amplitude=amplitude,
                 duration=duration,
                 asas_sn_id=asas_sn_id,
@@ -315,24 +345,8 @@ def _simulate_trial(
             )
 
         t_center = rng.uniform(t_min + duration, t_max - duration)
-        skewness = rng.uniform(skew_min, skew_max)
-        median_mag = float(np.nanmedian(df["mag"].values))
+        skewness = rng.uniform(skew_range[0], skew_range[1])
         
-        # Only inject into stars with median magnitude between 12 and 15
-        if median_mag < 12.0 or median_mag > 15.0:
-            return dict(
-                trial_index=trial_index,
-                amp_index=amp_idx,
-                dur_index=dur_idx,
-                inj_index=inj_idx,
-                amplitude=amplitude,
-                duration=duration,
-                median_mag=median_mag,
-                asas_sn_id=asas_sn_id,
-                detected=False,
-                error="magnitude_out_of_range",
-            )
-
         df_injected = inject_dip(df, t_center, duration, amplitude, skewness, mag_err_poly)
         detection_result = _default_detection_func(df_injected, detection_kwargs)
 
@@ -341,9 +355,6 @@ def _simulate_trial(
 
         return dict(
             trial_index=trial_index,
-            amp_index=amp_idx,
-            dur_index=dur_idx,
-            inj_index=inj_idx,
             amplitude=amplitude,
             fractional_depth=fractional_depth,
             duration=duration,
@@ -356,9 +367,6 @@ def _simulate_trial(
     except Exception as exc:
         return dict(
             trial_index=trial_index,
-            amp_index=amp_idx,
-            dur_index=dur_idx,
-            inj_index=inj_idx,
             amplitude=amplitude,
             duration=duration,
             asas_sn_id=asas_sn_id,
@@ -370,22 +378,18 @@ def _simulate_trial(
 def _init_worker(
     control_ids: np.ndarray,
     control_dirs: np.ndarray,
-    amplitude_grid: np.ndarray,
-    duration_grid: np.ndarray,
-    n_injections_per_grid: int,
-    skew_min: float,
-    skew_max: float,
+    amp_range: tuple[float, float],
+    dur_range: tuple[float, float],
+    skew_range: tuple[float, float],
     mag_err_poly: np.poly1d | None,
     detection_kwargs: dict,
     seed: int,
 ) -> None:
     _GLOBAL["control_ids"] = control_ids
     _GLOBAL["control_dirs"] = control_dirs
-    _GLOBAL["amplitude_grid"] = amplitude_grid
-    _GLOBAL["duration_grid"] = duration_grid
-    _GLOBAL["n_injections_per_grid"] = n_injections_per_grid
-    _GLOBAL["skew_min"] = skew_min
-    _GLOBAL["skew_max"] = skew_max
+    _GLOBAL["amp_range"] = amp_range
+    _GLOBAL["dur_range"] = dur_range
+    _GLOBAL["skew_range"] = skew_range
     _GLOBAL["mag_err_poly"] = mag_err_poly
     _GLOBAL["detection_kwargs"] = detection_kwargs
     _GLOBAL["seed"] = seed
@@ -399,17 +403,16 @@ def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
                 trial_index,
                 control_ids=_GLOBAL["control_ids"],
                 control_dirs=_GLOBAL["control_dirs"],
-                amplitude_grid=_GLOBAL["amplitude_grid"],
-                duration_grid=_GLOBAL["duration_grid"],
-                n_injections_per_grid=_GLOBAL["n_injections_per_grid"],
-                skew_min=float(_GLOBAL["skew_min"]),
-                skew_max=float(_GLOBAL["skew_max"]),
+                amp_range=_GLOBAL["amp_range"],
+                dur_range=_GLOBAL["dur_range"],
+                skew_range=_GLOBAL["skew_range"],
                 mag_err_poly=_GLOBAL["mag_err_poly"],
                 detection_kwargs=_GLOBAL["detection_kwargs"],
                 seed=int(_GLOBAL["seed"]),
             )
         )
     return results
+
 
 
 class CsvWriter:
@@ -453,13 +456,14 @@ def _read_checkpoint(path: Path) -> int | None:
     return None
 
 
+
 def run_injection_recovery(
     control_sample: pd.DataFrame,
     *,
     detection_kwargs: dict,
-    amplitude_grid: np.ndarray | None = None,
-    duration_grid: np.ndarray | None = None,
-    n_injections_per_grid: int = 100,
+    total_trials: int = 10000,
+    amplitude_range: tuple[float, float] = (0.05, 2.0),
+    duration_range: tuple[float, float] = (1.0, 300.0),
     skewness_range: tuple[float, float] = (-0.5, 0.5),
     mag_err_order: int = 5,
     mag_err_sample: int = 100,
@@ -477,20 +481,10 @@ def run_injection_recovery(
 ) -> pd.DataFrame | None:
     """
     Run injection-recovery with optional parallelism and checkpointing.
+    Uses Monte Carlo sampling for Amplitude and Duration.
     """
-    rng = np.random.default_rng(seed)
-
-    if amplitude_grid is None:
-        amplitude_grid = np.linspace(0.05, 2.0, 100)
-    if duration_grid is None:
-        duration_grid = np.logspace(0.0, 2.5, 100)
-
-    amp_grid = np.asarray(amplitude_grid, float)
-    dur_grid = np.asarray(duration_grid, float)
-
-    total_trials = int(len(amp_grid) * len(dur_grid) * int(n_injections_per_grid))
     if max_trials is not None:
-        total_trials = int(min(total_trials, max_trials))
+        total_trials = min(total_trials, max_trials)
 
     if output_path is not None:
         output_path = Path(output_path)
@@ -554,7 +548,11 @@ def run_injection_recovery(
     results: list[dict] = []
 
     pbar = tqdm(total=total_trials, initial=start_index, disable=not show_progress)
-    skew_min, skew_max = float(skewness_range[0]), float(skewness_range[1])
+    
+    # Ranges
+    amp_range = (float(amplitude_range[0]), float(amplitude_range[1]))
+    dur_range = (float(duration_range[0]), float(duration_range[1]))
+    skew_range = (float(skewness_range[0]), float(skewness_range[1]))
 
     def flush_results(is_final: bool = False) -> None:
         nonlocal results
@@ -572,11 +570,9 @@ def run_injection_recovery(
                 trial_index,
                 control_ids=control_ids,
                 control_dirs=control_dirs,
-                amplitude_grid=amp_grid,
-                duration_grid=dur_grid,
-                n_injections_per_grid=n_injections_per_grid,
-                skew_min=skew_min,
-                skew_max=skew_max,
+                amp_range=amp_range,
+                dur_range=dur_range,
+                skew_range=skew_range,
                 mag_err_poly=mag_err_poly,
                 detection_kwargs=detection_kwargs,
                 seed=seed,
@@ -602,11 +598,9 @@ def run_injection_recovery(
         initargs=(
             control_ids,
             control_dirs,
-            amp_grid,
-            dur_grid,
-            n_injections_per_grid,
-            skew_min,
-            skew_max,
+            amp_range,
+            dur_range,
+            skew_range,
             mag_err_poly,
             detection_kwargs,
             seed,
@@ -634,6 +628,7 @@ def run_injection_recovery(
         _write_checkpoint(checkpoint_path, total_trials - 1)
     pbar.close()
     return None if output_path else pd.DataFrame(results)
+
 
 
 def compute_detection_efficiency(
@@ -1013,26 +1008,17 @@ def plot_efficiency_threshold_contour(
     return fig
 
 
+
 def plot_efficiency_3d(
     cube: dict,
     *,
-    opacity: float = 0.3,
-    surface_count: int = 10,
+    opacity: float = 0.5,
     output_path: Path | str | None = None,
 ) -> None:
     """
-    Create interactive 3D volume rendering using plotly.
-
-    Parameters
-    ----------
-    cube : dict
-        Efficiency cube from compute_detection_efficiency_3d() or load_efficiency_cube()
-    opacity : float
-        Volume opacity (0-1)
-    surface_count : int
-        Number of isosurfaces to render
-    output_path : Path, optional
-        Path to save as HTML file
+    Create interactive 3D scatter plot using plotly.
+    
+    Shows detection efficiency as colored points in 3D space.
     """
     try:
         import plotly.graph_objects as go
@@ -1045,12 +1031,12 @@ def plot_efficiency_3d(
 
     D, Du, M = np.meshgrid(depth, duration, mag, indexing="ij")
     
-    # Filter out NaN values for plotly
     efficiency_flat = cube["efficiency"].flatten()
     D_flat = D.flatten()
     Du_flat = Du.flatten()
     M_flat = M.flatten()
     
+    # Filter out NaNs
     valid_mask = np.isfinite(efficiency_flat)
     if not valid_mask.any():
         print("Warning: No valid efficiency data to plot (all NaN)")
@@ -1067,15 +1053,23 @@ def plot_efficiency_3d(
 
     grid_info = f"Grid: {len(depth)}×{len(duration)}×{len(mag)}"
     
-    fig = go.Figure(data=go.Volume(
+    fig = go.Figure(data=go.Scatter3d(
         x=D_valid,
         y=np.log10(Du_valid),
         z=M_valid,
-        value=eff_valid,
-        opacity=opacity,
-        surface_count=surface_count,
-        colorscale="Viridis",
-        colorbar=dict(title="Efficiency"),
+        mode='markers',
+        marker=dict(
+            size=5,
+            color=eff_valid,
+            colorscale='Viridis',
+            opacity=opacity,
+            colorbar=dict(title="Efficiency"),
+            cmin=0,
+            cmax=1
+        ),
+        text=[f"Depth: {d:.3f}<br>Dur: {10**du:.1f}d<br>Mag: {m:.1f}<br>Eff: {e:.2f}" 
+              for d, du, m, e in zip(D_valid, np.log10(Du_valid), M_valid, eff_valid)],
+        hoverinfo='text'
     ))
 
     fig.update_layout(
@@ -1084,7 +1078,8 @@ def plot_efficiency_3d(
             yaxis_title="log₁₀(Duration/days)",
             zaxis_title="Median Magnitude",
         ),
-        title=f"3D Detection Efficiency Cube<br>{grid_info}",
+        title=f"3D Detection Efficiency<br>{grid_info}",
+        margin=dict(l=0, r=0, b=0, t=40),
     )
 
     if output_path:
@@ -1096,6 +1091,7 @@ def plot_efficiency_3d(
         print(f"Saved: {output_path}")
     else:
         fig.show()
+
 
 
 def plot_efficiency_isosurface(
@@ -1395,24 +1391,28 @@ Output structure (default --out-dir output/injection):
         seed=args.seed,
     )
 
-    amp_grid = _build_grid_linear(args.amp_min, args.amp_max, args.amp_steps)
-    dur_grid = _build_grid_log(args.dur_min, args.dur_max, args.dur_steps)
 
     detection_kwargs = _build_detection_kwargs(args)
 
     print(f"Output directory: {out_dir}")
+
     print(f"  Results CSV: {csv_out}")
     if not args.skip_cube:
         print(f"  Efficiency cube: {cube_out}")
     if not args.skip_plots:
         print(f"  Plots directory: {plot_dir}")
 
+
+    # Calculate Total Trials equivalent to previous grid based approach
+    # We maintain the same "density" concept for user convenience
+    total_trials = args.amp_steps * args.dur_steps * args.n_injections_per_grid
+
     run_injection_recovery(
         control_sample,
         detection_kwargs=detection_kwargs,
-        amplitude_grid=amp_grid,
-        duration_grid=dur_grid,
-        n_injections_per_grid=args.n_injections_per_grid,
+        total_trials=total_trials,
+        amplitude_range=(args.amp_min, args.amp_max),
+        duration_range=(args.dur_min, args.dur_max),
         skewness_range=(args.skew_min, args.skew_max),
         mag_err_order=args.mag_err_order,
         mag_err_sample=args.mag_err_sample,
@@ -1428,6 +1428,7 @@ Output structure (default --out-dir output/injection):
         max_trials=args.max_trials,
         show_progress=True,
     )
+
 
     # Post-processing: compute cube and generate plots (unless skipped)
     if not args.skip_cube or not args.skip_plots:
