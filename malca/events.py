@@ -259,8 +259,8 @@ def compute_symmetry_score(
     deviation_sc = baseline_flux - f_sc
     deviation_ce = baseline_flux - f_ce
     
-    I_sc = np.trapz(deviation_sc, t_sc)
-    I_ce = np.trapz(deviation_ce, t_ce)
+    I_sc = np.trapezoid(deviation_sc, t_sc)
+    I_ce = np.trapezoid(deviation_ce, t_ce)
     
     # Paper Eq. 5: symmetry_score = (I_sc + I_ce) / sqrt(I_sc^2 + I_ce^2)
     denominator = np.sqrt(I_sc**2 + I_ce**2)
