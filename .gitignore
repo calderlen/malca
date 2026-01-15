@@ -3,14 +3,10 @@
 __pycache__/
 /output/
 .DS_Store
-dip/
-ltv/
 
-# Ignore generated output
 /output/
 output/
 
-# Ignore large/input data files
 input/*.csv
 input/*.zip
 input/*.parquet
