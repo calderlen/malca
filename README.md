@@ -220,11 +220,20 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
   
 - Validate results without raw data:
   ```bash
-  # Compare detection results to known candidates (fast, no raw data needed)
-  python -m malca validation --results output/results.csv
+  # Auto-discover and validate ALL results for LOO method
+  python -m tests.validation --method loo
   
-  # Or with custom candidates
-  python -m malca validation --results output/results.csv --candidates my_targets.csv -v
+  # Auto-discover for Bayes Factor method
+  python -m tests.validation --method bf
+  
+  # Filter to specific magnitude bin
+  python -m tests.validation --method loo --mag-bin 13_13.5
+  
+  # Direct file specification (original behavior)
+  python -m tests.validation --results output/results.csv
+  
+  # With custom candidates
+  python -m tests.validation --method loo --candidates my_targets.csv -v
   ```
 - Plot light curves with baseline/residuals:
   ```bash
@@ -380,7 +389,7 @@ pip install -e ".[multiwavelength]"
 - `malca.fp_analysis`: `python -m malca.fp_analysis --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
 - **Testing modules** (in `tests/` directory):
   - `tests.reproduction`: `python -m tests.reproduction --method bayes --manifest output/lc_manifest.parquet --candidates targets.csv --out-dir output/results_repro`
-  - `tests.validation`: `python -m tests.validation --results output/results.csv` (or via CLI: `python -m malca validation`)
+  - `tests.validation`: `python -m tests.validation --method {loo,bf} [--mag-bin 13_13.5] [--all-mag-bins]` (auto-discovers results in `output/{loo,logbf}_events_results/`)
 - **VSX tools** (now in `malca.vsx` subpackage):
   - `malca.vsx.filter`: `python -m malca.vsx.filter`
   - `malca.vsx.crossmatch`: `python -m malca.vsx.crossmatch`
