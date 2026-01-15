@@ -178,22 +178,112 @@ def print_validation_report(metrics: dict, verbose: bool = False) -> None:
     print("=" * 60 + "\n")
 
 
+def discover_results_files(
+    base_dir: Path,
+    method: str,
+    mag_bin: str | None = None,
+) -> list[Path]:
+    """
+    Discover events results files in the appropriate subdirectory.
+    
+    Args:
+        base_dir: Base output directory (e.g., output/)
+        method: Detection method ("loo" or "bf")
+        mag_bin: Optional magnitude bin filter (e.g., "13_13.5"). If None, all files.
+    
+    Returns:
+        List of paths to results files
+    """
+    # Map method to subdirectory name
+    subdir_map = {
+        "loo": "loo_events_results",
+        "bf": "logbf_events_results",
+    }
+    
+    subdir = base_dir / subdir_map[method]
+    
+    if not subdir.exists():
+        raise FileNotFoundError(f"Results directory not found: {subdir}")
+    
+    # Find all CSV/Parquet files
+    files = list(subdir.glob("*.csv")) + list(subdir.glob("*.parquet"))
+    
+    if not files:
+        raise FileNotFoundError(f"No results files found in: {subdir}")
+    
+    # Filter by mag_bin if specified
+    if mag_bin is not None:
+        # Match files containing the mag_bin pattern (e.g., "13_13.5" in filename)
+        files = [f for f in files if mag_bin in f.stem]
+        if not files:
+            raise FileNotFoundError(f"No results files found for mag_bin={mag_bin} in: {subdir}")
+    
+    return sorted(files)
+
+
+def load_and_aggregate_results(files: list[Path]) -> pd.DataFrame:
+    """Load multiple results files and aggregate into single DataFrame."""
+    dfs = []
+    for f in files:
+        if f.suffix == ".parquet":
+            df = pd.read_parquet(f)
+        else:
+            df = pd.read_csv(f)
+        df["_source_file"] = f.name
+        dfs.append(df)
+    
+    return pd.concat(dfs, ignore_index=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Validate detection results against known candidates"
     )
+    
+    # Method-based discovery (new)
+    parser.add_argument(
+        "--method",
+        type=str,
+        choices=["loo", "bf"],
+        default=None,
+        help="Detection method: 'loo' (leave-one-out) or 'bf' (Bayes factor). "
+             "Auto-discovers files in output/{loo,logbf}_events_results/",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="output",
+        help="Base output directory containing results subdirectories (default: output)",
+    )
+    parser.add_argument(
+        "--mag-bin",
+        type=str,
+        default=None,
+        help="Magnitude bin to filter (e.g., '13_13.5'). If not set, uses ALL files.",
+    )
+    parser.add_argument(
+        "--all-mag-bins",
+        action="store_true",
+        help="Explicitly search all magnitude bins (same as not setting --mag-bin)",
+    )
+    
+    # Direct file specification (original behavior)
     parser.add_argument(
         "--results",
         type=str,
-        required=True,
-        help="Path to detection results CSV/Parquet from events.py",
+        default=None,
+        help="Direct path to a single results file (overrides --method auto-discovery)",
     )
+    
+    # Candidates
     parser.add_argument(
         "--candidates",
         type=str,
         default=None,
         help="Path to known candidates CSV (optional, uses default Brayden list if not provided)",
     )
+    
+    # Validation options
     parser.add_argument(
         "--id-column",
         type=str,
@@ -221,12 +311,37 @@ def main():
     
     args = parser.parse_args()
     
+    # Determine mag_bin filter
+    mag_bin = None if args.all_mag_bins else args.mag_bin
+    
     # Load results
-    print(f"Loading results from: {args.results}")
-    if args.results.endswith(".parquet"):
-        results_df = pd.read_parquet(args.results)
+    if args.results:
+        # Direct file specification
+        print(f"Loading results from: {args.results}")
+        if args.results.endswith(".parquet"):
+            results_df = pd.read_parquet(args.results)
+        else:
+            results_df = pd.read_csv(args.results)
+    elif args.method:
+        # Method-based discovery
+        base_dir = Path(args.output_dir)
+        print(f"Discovering results for method={args.method} in {base_dir}/")
+        if mag_bin:
+            print(f"  Filtering to mag_bin={mag_bin}")
+        else:
+            print(f"  Using ALL magnitude bins")
+        
+        files = discover_results_files(base_dir, args.method, mag_bin)
+        print(f"  Found {len(files)} results files:")
+        for f in files[:10]:
+            print(f"    - {f.name}")
+        if len(files) > 10:
+            print(f"    ... and {len(files) - 10} more")
+        
+        results_df = load_and_aggregate_results(files)
+        print(f"  Loaded {len(results_df):,} total detection records")
     else:
-        results_df = pd.read_csv(args.results)
+        parser.error("Either --method or --results must be specified")
     
     # Load or use default candidates
     if args.candidates:
@@ -237,6 +352,11 @@ def main():
         candidates_df = pd.DataFrame(DEFAULT_CANDIDATES)
         # Filter to only expected detections
         candidates_df = candidates_df[candidates_df["expected_detected"] == True].copy()
+        
+        # Filter by mag_bin if specified
+        if mag_bin and "mag_bin" in candidates_df.columns:
+            candidates_df = candidates_df[candidates_df["mag_bin"] == mag_bin].copy()
+            print(f"  Filtered to {len(candidates_df)} candidates in mag_bin={mag_bin}")
     
     # Validate
     metrics = validate_detections(
@@ -272,3 +392,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
