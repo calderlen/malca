@@ -494,7 +494,7 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFr
     """
     Crossmatch to IPHAS DR2 for Hα emission detection.
     
-    Uses Vizier TAP query. Returns (r-Hα) and (r-i) colors.
+    Uses CDS XMatch for efficient batch crossmatching. Returns (r-Hα) and (r-i) colors.
     """
     if df.empty:
         return df
@@ -508,8 +508,8 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFr
         return df
     
     try:
-        from astroquery.vizier import Vizier
-        from astropy.coordinates import SkyCoord
+        from astroquery.xmatch import XMatch
+        from astropy.table import Table
         import astropy.units as u
     except ImportError:
         print("Warning: astroquery required for IPHAS crossmatch")
@@ -518,50 +518,66 @@ def crossmatch_iphas(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> pd.DataFr
         df['iphas_ha_excess'] = False
         return df
     
-    # Query IPHAS DR2 catalog
-    Vizier.ROW_LIMIT = -1
+    # Initialize output columns
+    df['iphas_r_ha'] = np.nan
+    df['iphas_r_i'] = np.nan
+    df['iphas_ha_excess'] = False
     
-    r_ha = []
-    r_i = []
-    ha_excess = []
+    # Prepare source table with unique index for matching back
+    valid_mask = df['ra'].notna() & df['dec'].notna()
+    if not valid_mask.any():
+        return df
     
-    # Process in chunks to avoid timeout
-    chunk_size = 100
-    for i in tqdm(range(0, len(df), chunk_size), desc="IPHAS crossmatch"):
-        chunk = df.iloc[i:i+chunk_size]
+    # Create astropy table for XMatch
+    source_table = Table()
+    source_table['_idx'] = np.where(valid_mask)[0]
+    source_table['ra'] = df.loc[valid_mask, 'ra'].values
+    source_table['dec'] = df.loc[valid_mask, 'dec'].values
+    
+    print(f"Running IPHAS XMatch for {len(source_table)} sources...")
+    
+    try:
+        result = XMatch.query(
+            cat1=source_table,
+            cat2='vizier:II/321/iphas2',
+            max_distance=max_sep_arcsec * u.arcsec,
+            colRA1='ra', colDec1='dec',
+            colRA2='RAJ2000', colDec2='DEJ2000'
+        )
         
-        for _, row in chunk.iterrows():
-            try:
-                coord = SkyCoord(ra=row['ra']*u.deg, dec=row['dec']*u.deg)
-                result = Vizier.query_region(
-                    coord, radius=max_sep_arcsec*u.arcsec,
-                    catalog='II/321/iphas2'  # IPHAS DR2
-                )
+        if result is not None and len(result) > 0:
+            result_df = result.to_pandas()
+            
+            # For sources with multiple matches, keep closest
+            if 'angDist' in result_df.columns:
+                result_df = result_df.sort_values('angDist').drop_duplicates(subset='_idx', keep='first')
+            else:
+                result_df = result_df.drop_duplicates(subset='_idx', keep='first')
+            
+            # Compute colors
+            for _, row in result_df.iterrows():
+                idx = int(row['_idx'])
+                r_mag = float(row.get('r', np.nan))
+                ha_mag = float(row.get('Ha', np.nan))
+                i_mag = float(row.get('i', np.nan))
                 
-                if result and len(result[0]) > 0:
-                    iphas = result[0][0]
-                    r_mag = float(iphas['r'])
-                    ha_mag = float(iphas['Ha'])
-                    i_mag = float(iphas['i'])
-                    
-                    r_ha.append(r_mag - ha_mag)
-                    r_i.append(r_mag - i_mag)
-                    # Hα excess: (r-Hα) > 0.25 above main sequence locus
-                    ha_excess.append((r_mag - ha_mag) > 0.25)
-                else:
-                    r_ha.append(np.nan)
-                    r_i.append(np.nan)
-                    ha_excess.append(False)
-            except Exception:
-                r_ha.append(np.nan)
-                r_i.append(np.nan)
-                ha_excess.append(False)
+                if np.isfinite(r_mag) and np.isfinite(ha_mag):
+                    r_ha = r_mag - ha_mag
+                    df.at[df.index[idx], 'iphas_r_ha'] = r_ha
+                    df.at[df.index[idx], 'iphas_ha_excess'] = r_ha > 0.25
+                
+                if np.isfinite(r_mag) and np.isfinite(i_mag):
+                    df.at[df.index[idx], 'iphas_r_i'] = r_mag - i_mag
+            
+            matched = len(result_df)
+            ha_excess_count = (df['iphas_ha_excess'] == True).sum()
+            print(f"IPHAS: {matched}/{len(df)} matched, {ha_excess_count} with Hα excess")
+        else:
+            print("IPHAS: No matches found")
+            
+    except Exception as e:
+        print(f"IPHAS XMatch error: {e}")
     
-    df['iphas_r_ha'] = r_ha
-    df['iphas_r_i'] = r_i
-    df['iphas_ha_excess'] = ha_excess
-    
-    print(f"IPHAS: {len(df) - np.isnan(r_ha).sum()}/{len(df)} matched, {sum(ha_excess)} with Hα excess")
     return df
 
 
@@ -574,6 +590,7 @@ def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = 1.5) -> pd.DataF
     Check proximity to known star-forming regions.
     
     Uses Prisinzano+2022 Table 1 coordinates and distances.
+    Vectorized implementation for efficient processing of large catalogs.
     """
     if df.empty:
         return df
@@ -602,48 +619,69 @@ def check_sfr_proximity(df: pd.DataFrame, max_dist_kpc: float = 1.5) -> pd.DataF
     
     # Get distance column
     if 'distance_gspphot' in df.columns:
-        dist_pc = df['distance_gspphot'].values
+        dist_pc = df['distance_gspphot'].values.astype(float)
     elif 'parallax' in df.columns:
-        plx = df['parallax'].values
+        plx = df['parallax'].values.astype(float)
         dist_pc = np.where((plx > 0) & np.isfinite(plx), 1000.0 / plx, np.nan)
     else:
         dist_pc = np.full(len(df), np.nan)
     
-    near_sfr = []
-    sfr_names = []
+    # Initialize output arrays
+    near_sfr = np.zeros(len(df), dtype=bool)
+    sfr_names = np.full(len(df), '', dtype=object)
     
-    for i, row in tqdm(df.iterrows(), total=len(df), desc="SFR proximity"):
-        coord = SkyCoord(ra=row['ra']*u.deg, dec=row['dec']*u.deg)
-        d = dist_pc[i] if i < len(dist_pc) else np.nan
+    # Build source coordinates once (vectorized)
+    valid_coords = df['ra'].notna() & df['dec'].notna()
+    if not valid_coords.any():
+        df['near_sfr'] = near_sfr
+        df['sfr_name'] = sfr_names
+        return df
+    
+    source_coords = SkyCoord(
+        ra=df.loc[valid_coords, 'ra'].values * u.deg,
+        dec=df.loc[valid_coords, 'dec'].values * u.deg
+    )
+    valid_indices = np.where(valid_coords)[0]
+    valid_dist_pc = dist_pc[valid_coords]
+    
+    print(f"Checking SFR proximity for {len(source_coords)} sources...")
+    
+    # Check each SFR with vectorized separation
+    for sfr in SFR_CATALOG:
+        sfr_coord = SkyCoord(ra=sfr['ra'] * u.deg, dec=sfr['dec'] * u.deg)
         
-        found = False
-        name = ''
+        # Vectorized angular separation
+        seps = source_coords.separation(sfr_coord).deg
         
-        for sfr in SFR_CATALOG:
-            sfr_coord = SkyCoord(ra=sfr['ra']*u.deg, dec=sfr['dec']*u.deg)
-            sep = coord.separation(sfr_coord).deg
+        # Sources within angular radius
+        within_radius = seps < sfr['radius_deg']
+        
+        if not within_radius.any():
+            continue
+        
+        # Check distance consistency for sources within radius
+        for local_idx in np.where(within_radius)[0]:
+            global_idx = valid_indices[local_idx]
             
-            # Check angular separation and distance consistency
-            if sep < sfr['radius_deg']:
-                if np.isfinite(d):
-                    # Distance within 50% of SFR distance
-                    if abs(d - sfr['dist_pc']) / sfr['dist_pc'] < 0.5:
-                        found = True
-                        name = sfr['name']
-                        break
-                else:
-                    # No distance info, flag based on position only
-                    found = True
-                    name = sfr['name'] + ' (pos only)'
-                    break
-        
-        near_sfr.append(found)
-        sfr_names.append(name)
+            # Skip if already matched to a closer SFR
+            if near_sfr[global_idx]:
+                continue
+            
+            d = valid_dist_pc[local_idx]
+            if np.isfinite(d):
+                # Distance within 50% of SFR distance
+                if abs(d - sfr['dist_pc']) / sfr['dist_pc'] < 0.5:
+                    near_sfr[global_idx] = True
+                    sfr_names[global_idx] = sfr['name']
+            else:
+                # No distance info, flag based on position only
+                near_sfr[global_idx] = True
+                sfr_names[global_idx] = sfr['name'] + ' (pos only)'
     
     df['near_sfr'] = near_sfr
     df['sfr_name'] = sfr_names
     
-    print(f"SFR proximity: {sum(near_sfr)}/{len(df)} sources near star-forming regions")
+    print(f"SFR proximity: {near_sfr.sum()}/{len(df)} sources near star-forming regions")
     return df
 
 
@@ -656,6 +694,7 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> p
     Crossmatch to Cantat-Gaudin+2020 open cluster catalog.
     
     Catalog contains 1867 clusters with ages and distances.
+    Uses CDS XMatch for efficient batch crossmatching.
     """
     if df.empty:
         return df
@@ -669,8 +708,8 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> p
         return df
     
     try:
-        from astroquery.vizier import Vizier
-        from astropy.coordinates import SkyCoord
+        from astroquery.xmatch import XMatch
+        from astropy.table import Table
         import astropy.units as u
     except ImportError:
         print("Warning: astroquery required for cluster crossmatch")
@@ -679,40 +718,63 @@ def crossmatch_open_clusters(df: pd.DataFrame, max_sep_arcsec: float = 1.0) -> p
         df['cluster_dist_pc'] = np.nan
         return df
     
-    Vizier.ROW_LIMIT = -1
+    # Initialize output columns
+    df['cluster_name'] = ''
+    df['cluster_age_myr'] = np.nan
+    df['cluster_dist_pc'] = np.nan
     
-    names = []
-    ages = []
-    dists = []
+    # Prepare source table with unique index for matching back
+    valid_mask = df['ra'].notna() & df['dec'].notna()
+    if not valid_mask.any():
+        return df
     
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Cluster crossmatch"):
-        try:
-            coord = SkyCoord(ra=row['ra']*u.deg, dec=row['dec']*u.deg)
-            result = Vizier.query_region(
-                coord, radius=max_sep_arcsec*u.arcsec,
-                catalog='J/A+A/640/A1/members'  # Cantat-Gaudin+2020 members
-            )
+    # Create astropy table for XMatch
+    source_table = Table()
+    source_table['_idx'] = np.where(valid_mask)[0]
+    source_table['ra'] = df.loc[valid_mask, 'ra'].values
+    source_table['dec'] = df.loc[valid_mask, 'dec'].values
+    
+    print(f"Running open cluster XMatch for {len(source_table)} sources...")
+    
+    try:
+        result = XMatch.query(
+            cat1=source_table,
+            cat2='vizier:J/A+A/640/A1/members',  # Cantat-Gaudin+2020 members
+            max_distance=max_sep_arcsec * u.arcsec,
+            colRA1='ra', colDec1='dec',
+            colRA2='RAJ2000', colDec2='DEJ2000'
+        )
+        
+        if result is not None and len(result) > 0:
+            result_df = result.to_pandas()
             
-            if result and len(result[0]) > 0:
-                member = result[0][0]
-                names.append(str(member.get('Cluster', '')))
-                ages.append(float(member.get('Age', np.nan)))
-                dists.append(float(member.get('Dist', np.nan)))
+            # For sources with multiple matches, keep closest
+            if 'angDist' in result_df.columns:
+                result_df = result_df.sort_values('angDist').drop_duplicates(subset='_idx', keep='first')
             else:
-                names.append('')
-                ages.append(np.nan)
-                dists.append(np.nan)
-        except Exception:
-            names.append('')
-            ages.append(np.nan)
-            dists.append(np.nan)
+                result_df = result_df.drop_duplicates(subset='_idx', keep='first')
+            
+            # Assign cluster properties
+            for _, row in result_df.iterrows():
+                idx = int(row['_idx'])
+                df.at[df.index[idx], 'cluster_name'] = str(row.get('Cluster', ''))
+                
+                age_val = row.get('Age', np.nan)
+                if age_val is not None:
+                    df.at[df.index[idx], 'cluster_age_myr'] = float(age_val)
+                
+                dist_val = row.get('Dist', np.nan)
+                if dist_val is not None:
+                    df.at[df.index[idx], 'cluster_dist_pc'] = float(dist_val)
+            
+            matched = len(result_df)
+            print(f"Cluster crossmatch: {matched}/{len(df)} sources in open clusters")
+        else:
+            print("Cluster crossmatch: No matches found")
+            
+    except Exception as e:
+        print(f"Cluster XMatch error: {e}")
     
-    df['cluster_name'] = names
-    df['cluster_age_myr'] = ages
-    df['cluster_dist_pc'] = dists
-    
-    matched = sum(1 for n in names if n)
-    print(f"Cluster crossmatch: {matched}/{len(df)} sources in open clusters")
     return df
 
 
