@@ -250,6 +250,7 @@ def lookup_source_metadata(asassn_id=None, *, source_name=None, dat_path=None, c
 def lookup_metadata_for_path(path: Path, detection_results_csv=None):
     """
     Infer metadata for a given light-curve path.
+    Falls back to brayden_candidates if no detection_results CSV is provided.
     """
     path = Path(path)
     stem = path.stem
@@ -263,12 +264,34 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
     if not meta and "-" in stem:
         meta = lookup_source_metadata(asassn_id=stem.split("-")[0], csv_path=detection_results_csv)
 
+    # Fallback to brayden_candidates if no metadata found from CSV
+    if not meta:
+        try:
+            from tests.reproduction import brayden_candidates
+            
+            # Extract source_id from filename
+            source_id = stem.replace("-light-curves", "").split("-")[0]
+            
+            # Look up in brayden_candidates
+            for candidate in brayden_candidates:
+                if candidate.get("source_id") == source_id:
+                    meta = {
+                        "source": candidate.get("source"),
+                        "source_id": source_id,
+                        "category": candidate.get("category"),
+                        "data_source": source_type,
+                    }
+                    return meta
+        except ImportError:
+            pass
+    
     if not meta:
         return {"data_source": source_type}
 
     meta = dict(meta)
     meta["data_source"] = source_type
     return meta
+
 
 
 BASELINE_FUNCTIONS = {
@@ -362,6 +385,10 @@ def plot_bayes_results(
         empty_res = {"significant": False, "run_summaries": [], "n_runs": 0}
         band_results = {0: {"dip": empty_res, "jump": empty_res}, 1: {"dip": empty_res, "jump": empty_res}}
     else:
+        # For GP baselines, ensure add_sigma_eff_col is enabled for sigma_eff computation
+        if baseline_func in (per_camera_gp_baseline, per_camera_gp_baseline_masked):
+            baseline_kwargs.setdefault("add_sigma_eff_col", True)
+        
         res_g = run_bayesian_significance(
             df_g,
             baseline_func=baseline_func,
@@ -379,6 +406,7 @@ def plot_bayes_results(
             logbf_threshold_jump=logbf_threshold_jump,
             compute_event_prob=True,
         ) if not df_v.empty else {"dip": {"significant": False, "run_summaries": [], "n_runs": 0}, "jump": {"significant": False, "run_summaries": [], "n_runs": 0}}
+
         
         band_results = {0: res_g, 1: res_v}
     
@@ -449,7 +477,7 @@ def plot_bayes_results(
                 capsize=1.5,
                 markeredgecolor="black",
                 markeredgewidth=0.3,
-                label=f"Camera {cam}",
+                label=f"{cam}",
             )
         
                        
@@ -639,6 +667,11 @@ def plot_bayes_results(
                             label="Jump (FRED)" if run_summary == jump["run_summaries"][0] else "",
                         )
         
+        # X-axis labels on TOP for upper panels (like old plot)
+        ax_main.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
+        ax_main.set_xlabel(f"JD - {int(jd_offset)} [d]", fontsize=10)
+        ax_main.xaxis.set_label_position("top")
+        
         ax_main.set_ylabel(f"{band_labels[band]} [mag]", fontsize=12)
         ax_main.grid(True, alpha=0.3)
         if band_idx == 0:
@@ -664,24 +697,58 @@ def plot_bayes_results(
                     marker=marker,
                 )
             
-            ax_resid.axhline(0, color="orange", linestyle="-", linewidth=1, alpha=0.5)
+            # Add shaded regions for ±0.3 mag threshold (like old plot)
+            jd_min = band_df["JD_plot"].min()
+            jd_max = band_df["JD_plot"].max()
+            ax_resid.fill_between([jd_min, jd_max], 0.3, 100, color="lightgrey", alpha=0.5, zorder=0)
+            ax_resid.fill_between([jd_min, jd_max], -0.3, -100, color="lightgrey", alpha=0.45, zorder=0)
+            
+            ax_resid.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
+            ax_resid.axhline(0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+            ax_resid.axhline(-0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+            
             ax_resid.set_ylabel(f"{band_labels[band]} residual [mag]", fontsize=12)
             ax_resid.grid(True, alpha=0.3)
             ax_resid.invert_yaxis()
+            
+            # Set y-limits to show threshold regions properly
+            resid_min, resid_max = band_df["resid"].min(), band_df["resid"].max()
+            pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
+            ax_resid.set_ylim(max(resid_max + pad, 0.35), min(resid_min - pad, -0.35))
         
-        if band_idx == 1:
-            ax_main.set_xlabel("Julian Date - 2458000 [d]", fontsize=12)
-            ax_resid.set_xlabel("Julian Date - 2458000 [d]", fontsize=12)
+        # X-axis labels at BOTTOM for residual panels, simpler label
+        ax_resid.set_xlabel("JD", fontsize=10)
     
 
-    title_parts = [f"ID: {asas_sn_id}"]
+
     meta = lookup_metadata_for_path(csv_path, detection_results_csv=detection_results_csv) or {}
-    if meta.get("source"):
-        title_parts.append(str(meta["source"]))
-    if meta.get("category"):
-        title_parts.append(str(meta["category"]))
-    if meta.get("data_source"):
-        title_parts.append(str(meta["data_source"]))
+    
+    # Build title in old format: "Source (ID) – Category – Source Type LC – JD range"
+    source_name = meta.get("source")
+    category = meta.get("category")
+    source_type = meta.get("data_source")
+    
+    # Start with source name (ID) format
+    if source_name and asas_sn_id:
+        label = f"{source_name} ({asas_sn_id})"
+    elif asas_sn_id:
+        label = str(asas_sn_id)
+    elif source_name:
+        label = str(source_name)
+    else:
+        label = "Source"
+    
+    # Calculate JD range from the data
+    jd_start = float(df["JD"].min())
+    jd_end = float(df["JD"].max())
+    jd_label = f"JD {jd_start:.0f}-{jd_end:.0f}"
+    
+    title_parts = [label]
+    if category:
+        title_parts.append(str(category))
+    if source_type:
+        title_parts.append(f"{source_type} LC")
+    title_parts.append(jd_label)
 
     if not skip_events:
         g_dip = band_results[0]["dip"]
@@ -695,7 +762,8 @@ def plot_bayes_results(
         if g_jump["significant"] or v_jump["significant"]:
             total_jumps = g_jump.get("n_runs", 0) + v_jump.get("n_runs", 0)
             title_parts.append(f"Jumps: {total_jumps} runs (g:{g_jump.get('n_runs', 0)}, V:{v_jump.get('n_runs', 0)})")
-    fig.suptitle(" | ".join(title_parts), fontsize=14, fontweight="bold")
+    fig.suptitle(" – ".join(title_parts), fontsize=14)
+
     
                   
     if out_path:

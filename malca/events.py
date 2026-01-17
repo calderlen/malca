@@ -433,10 +433,14 @@ def build_runs(
     trig_idx = np.unique(trig_idx)
     trig_idx.sort()
 
-    cad = robust_median_dt_days(jd)
     if max_gap_days is None:
-        if np.isfinite(cad):
-            max_gap_days = max(5.0 * cad, 5.0)
+        # Use 99.73th percentile (3-sigma) of gaps between subsequent data points
+        dt = np.diff(jd)
+        dt = dt[np.isfinite(dt) & (dt > 0)]
+        if dt.size > 0:
+            max_gap_days = float(np.nanpercentile(dt, 99.73))
+            # Ensure a reasonable minimum
+            max_gap_days = max(max_gap_days, 1.0)
         else:
             max_gap_days = 5.0
     max_gap_days = float(max_gap_days)
@@ -469,11 +473,10 @@ def filter_runs(
     min_points: int = 2,
     min_duration_days: float | None = None,
     per_point_threshold: float | None = None,
-    sum_threshold: float | None = None,
     cam_vec: np.ndarray | None = None,
 ):
     """
-    filter runs by minimum points, minimum duration, per_point_threshold, sum_threshold; returns dict of kept runs' starting and ending indices/JDs, number of points
+    filter runs by minimum points, minimum duration, per_point_threshold; returns dict of kept runs' starting and ending indices/JDs, number of points
     """
     jd = np.asarray(jd, float)
     score_vec = np.asarray(score_vec, float)
@@ -512,8 +515,6 @@ def filter_runs(
         if dur < min_duration_days:
             ok = False
         if (per_point_threshold is not None) and (not (np.isfinite(run_max) and run_max >= float(per_point_threshold))):
-            ok = False
-        if (sum_threshold is not None) and (not (np.isfinite(run_sum) and run_sum >= float(sum_threshold))):
             ok = False
 
         summaries.append(
@@ -716,8 +717,6 @@ def bayesian_event_significance(
     run_allow_gap_points: int = 1,
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
-    run_sum_threshold: float | None = None,
-    run_sum_multiplier: float = 2.5,
 
     compute_event_prob: bool = True,
 ):
@@ -1011,11 +1010,6 @@ def bayesian_event_significance(
         trigger_threshold_used = per_point_thr
         trigger_value_max = max_log_bf_local
 
-        if run_sum_threshold is None:
-            run_sum_threshold_eff = float(run_sum_multiplier) * per_point_thr
-        else:
-            run_sum_threshold_eff = float(run_sum_threshold)
-
     elif trigger_mode == "posterior_prob":
         if event_prob is None:
             raise RuntimeError("trigger_mode='posterior_prob' requires compute_event_prob=True")
@@ -1025,11 +1019,6 @@ def bayesian_event_significance(
         raw_idx = np.nonzero(np.isfinite(score_vec) & (score_vec >= thr_prob))[0]
         trigger_threshold_used = thr_prob
         trigger_value_max = float(np.nanmax(score_vec)) if score_vec.size else np.nan
-
-        if run_sum_threshold is None:
-            run_sum_threshold_eff = float(run_min_points) * thr_prob
-        else:
-            run_sum_threshold_eff = float(run_sum_threshold)
 
     else:
         raise ValueError("trigger_mode must be 'logbf' or 'posterior_prob'")
@@ -1056,7 +1045,6 @@ def bayesian_event_significance(
             min_points=int(run_min_points),
             min_duration_days=run_min_duration_days,
             per_point_threshold=trigger_threshold_used,
-            sum_threshold=run_sum_threshold_eff,
             cam_vec=cam_vec,
         )
 
@@ -1115,7 +1103,6 @@ def bayesian_event_significance(
         event_indices=event_indices,
         significant=bool(significant),
 
-        run_sum_threshold=float(run_sum_threshold_eff),
         run_summaries=run_summaries,
         **run_stats,
 
@@ -1153,8 +1140,6 @@ def run_bayesian_significance(
     run_allow_gap_points: int = 1,
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
-    run_sum_threshold: float | None = None,
-    run_sum_multiplier: float = 2.5,
 
     use_sigma_eff: bool = True,
     require_sigma_eff: bool = True,
@@ -1191,8 +1176,6 @@ def run_bayesian_significance(
         run_allow_gap_points=run_allow_gap_points,
         run_max_gap_days=run_max_gap_days,
         run_min_duration_days=run_min_duration_days,
-        run_sum_threshold=run_sum_threshold,
-        run_sum_multiplier=run_sum_multiplier,
         compute_event_prob=compute_event_prob,
     )
 
@@ -1216,8 +1199,6 @@ def run_bayesian_significance(
         run_allow_gap_points=run_allow_gap_points,
         run_max_gap_days=run_max_gap_days,
         run_min_duration_days=run_min_duration_days,
-        run_sum_threshold=run_sum_threshold,
-        run_sum_multiplier=run_sum_multiplier,
         compute_event_prob=compute_event_prob,
     )
 
@@ -1243,8 +1224,6 @@ def process_one(
     run_allow_gap_points: int,
     run_max_gap_days: float | None,
     run_min_duration_days: float | None,
-    run_sum_threshold: float | None,
-    run_sum_multiplier: float,
 
     baseline_tag: str,
     use_sigma_eff: bool,
@@ -1344,8 +1323,6 @@ def process_one(
         run_allow_gap_points=run_allow_gap_points,
         run_max_gap_days=run_max_gap_days,
         run_min_duration_days=run_min_duration_days,
-        run_sum_threshold=run_sum_threshold,
-        run_sum_multiplier=run_sum_multiplier,
 
         compute_event_prob=compute_event_prob,
         use_sigma_eff=use_sigma_eff,
@@ -1374,7 +1351,7 @@ def process_one(
         """
         if not run_list:
             return "none", 0.0, 0.0, np.nan
-        best = sorted(run_list, key=lambda x: x['run_sum'], reverse=True)[0]
+        best = sorted(run_list, key=lambda x: x['run_max'], reverse=True)[0]
         
         morph = best.get('morphology', 'none')
         delta_bic = best.get('delta_bic_null', 0.0)
@@ -1478,8 +1455,6 @@ def process_one(
         trigger_mode=str(trigger_mode),
         dip_trigger_threshold=float(dip.get("trigger_threshold", np.nan)),
         jump_trigger_threshold=float(jump.get("trigger_threshold", np.nan)),
-        dip_run_sum_threshold=float(dip.get("run_sum_threshold", np.nan)),
-        jump_run_sum_threshold=float(jump.get("run_sum_threshold", np.nan)),
     )
 
 
@@ -1499,9 +1474,7 @@ def main():
     parser.add_argument("--run-min-points", type=int, default=2, help="Min triggered points in a run")
     parser.add_argument("--run-allow-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
-    parser.add_argument("--run-min-duration-days", type=float, default=None, help="Require run duration >= this")
-    parser.add_argument("--run-sum-threshold", type=float, default=None, help="Require run sum-score >= this")
-    parser.add_argument("--run-sum-multiplier", type=float, default=2.5, help="sum_thr = multiplier * per_point_thr")
+    parser.add_argument("--run-min-duration-days", type=float, default=0.0, help="Require run duration >= this (default: 0.0 = disabled)")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
     parser.add_argument("--p-min-dip", type=float, default=None, help="Minimum dip fraction for p-grid (overrides default)")
     parser.add_argument("--p-max-dip", type=float, default=None, help="Maximum dip fraction for p-grid (overrides default)")
@@ -1863,7 +1836,6 @@ def main():
                 p_min_jump=args.p_min_jump, p_max_jump=args.p_max_jump, mag_points=args.mag_points,
                 run_min_points=args.run_min_points, run_allow_gap_points=args.run_allow_gap_points,
                 run_max_gap_days=args.run_max_gap_days, run_min_duration_days=args.run_min_duration_days,
-                run_sum_threshold=args.run_sum_threshold, run_sum_multiplier=args.run_sum_multiplier,
                 baseline_tag=baseline_tag, use_sigma_eff=use_sigma_eff, require_sigma_eff=require_sigma_eff,
                 compute_event_prob=compute_event_prob,
             ): path for path in expanded_inputs

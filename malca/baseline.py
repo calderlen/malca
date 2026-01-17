@@ -420,21 +420,28 @@ def per_camera_median_baseline(
 
 def per_camera_trend_baseline(
         df,
-        days_short=50., 
-        days_long=800.0, 
-        min_points=10, 
-        last_window_guard=120.0, 
-        t_col="JD", 
-        mag_col="mag", 
-        err_col="error", 
-        cam_col="camera#"):
+        days_short=50.,
+        days_long=800.0,
+        min_points=10,
+        last_window_guard=120.0,
+        t_col="JD",
+        mag_col="mag",
+        err_col="error",
+        cam_col="camera#",
+        add_sigma_eff_col=False,
+        **kwargs):
     """
     Multi-scale, one-sided (past-only) rolling-median baseline per camera to avoid
     future-leakage; rolling MAD for local significance; late-window guard for right-censored dips.
+
+    Extra **kwargs are accepted and ignored for compatibility with GP baseline interfaces.
     """
 
     df_out = df.copy()
-    for col in ("baseline", "resid", "sigma_resid"):
+    cols_to_add = ["baseline", "resid", "sigma_resid"]
+    if add_sigma_eff_col:
+        cols_to_add.append("sigma_eff")
+    for col in cols_to_add:
         if col not in df_out.columns:
             df_out[col] = np.nan
 
@@ -474,10 +481,12 @@ def per_camera_trend_baseline(
         df_out.loc[idx, "baseline"] = baseline
         df_out.loc[idx, "resid"] = resid
         df_out.loc[idx, "sigma_resid"] = sigma_resid
+        if add_sigma_eff_col:
+            df_out.loc[idx, "sigma_eff"] = sigma_loc
 
     return df_out
 
-    
+
 def per_camera_gp_baseline(
     df,
     *,
@@ -665,7 +674,7 @@ def per_camera_gp_baseline_masked(
 
     S0=0.0005,
     w0=0.0031415926535897933,
-    Q=0.7,
+    q=0.7,
 
     a1=None,
     rho1=None,
@@ -681,21 +690,63 @@ def per_camera_gp_baseline_masked(
     cam_col="camera#",
 
     min_gp_points=10,
+    add_sigma_eff_col=True,
+    sigma_floor=None,
+    floor_clip=3.0,
+    floor_iters=3,
+    min_floor_points=30,
+    **kwargs
 ):
     """
     per-camera GP baseline with masking (dips excluded from fit)
-    
+
     Masks out significant dips (thresholded by local MAD) before fitting the GP
     baseline to ensure the baseline follows the quiescent state rather than the dips.
-    
+
     Supports two kernel parameterizations:
     - SHO kernel (default): S0, w0, Q
     - RealTerm (OU mixture): a1, rho1, a2, rho2 (for backward compatibility)
-    
+
     If RealTerm parameters are explicitly provided, they take precedence.
+
+    If add_sigma_eff_col is True, computes sigma_eff = sqrt(yerr^2 + sigma_floor^2 + var)
+    for improved uncertainty estimation in event detection.
     """
+
+    def robust_sigma_floor(resid, yerr_here, var_here):
+        """Estimate sigma_floor from quiescent residuals via iterative MAD clipping."""
+        finite0 = np.isfinite(resid) & np.isfinite(yerr_here) & np.isfinite(var_here)
+        if finite0.sum() < max(10, min_floor_points):
+            return 0.0
+
+        r = resid[finite0].copy()
+
+        keep = np.ones_like(r, dtype=bool)
+        for _ in range(int(max(floor_iters, 1))):
+            rr = r[keep]
+            if rr.size < max(10, min_floor_points):
+                break
+            med = float(np.median(rr))
+            mad = 1.4826 * float(np.median(np.abs(rr - med)))
+            mad = max(mad, 1e-12)
+            keep = np.abs(r - med) <= float(floor_clip) * mad
+
+        rr = r[keep]
+        if rr.size < max(10, min_floor_points):
+            rr = r
+
+        s_quiet = 1.4826 * float(np.median(np.abs(rr - float(np.median(rr)))))
+        s_quiet = max(s_quiet, 1e-12)
+
+        yerr2_med = float(np.median((yerr_here[finite0][keep] if keep.size == yerr_here[finite0].size else yerr_here[finite0])**2))
+        var_med = float(np.median((var_here[finite0][keep] if keep.size == var_here[finite0].size else var_here[finite0])))
+
+        floor2 = max(s_quiet**2 - yerr2_med - var_med, 0.0)
+        return float(np.sqrt(floor2))
+
     df_out = df.copy()
-    for col in ("baseline", "resid", "sigma_resid"):
+    out_cols = ("baseline", "resid", "sigma_resid") + (("sigma_eff",) if add_sigma_eff_col else ())
+    for col in out_cols:
         if col not in df_out.columns:
             df_out[col] = np.nan
 
@@ -740,9 +791,22 @@ def per_camera_gp_baseline_masked(
         if keep.sum() < min_gp_points:
             baseline = np.full_like(y, y_med, dtype=float)
             resid = y - baseline
+
+            # Compute sigma_eff for fallback case if needed
+            if use_yerr and np.isfinite(yerr).any():
+                yerr_full = np.where(np.isfinite(yerr), yerr, e_med)
+            else:
+                yerr_full = np.full_like(y, e_med, dtype=float)
+
+            floor_here = float(max(sigma_floor, 0.0)) if sigma_floor is not None else float(jitter)
+            sigma_eff = np.sqrt(yerr_full**2 + floor_here**2)
+            sigma_resid = resid / sigma_eff
+
             df_out.loc[idx, "baseline"] = baseline
             df_out.loc[idx, "resid"] = resid
-            df_out.loc[idx, "sigma_resid"] = resid / s0
+            df_out.loc[idx, "sigma_resid"] = sigma_resid
+            if add_sigma_eff_col:
+                df_out.loc[idx, "sigma_eff"] = sigma_eff
             continue
 
         t_fit = t[keep]
@@ -765,7 +829,7 @@ def per_camera_gp_baseline_masked(
                 terms.RealTerm(a=float(a2), c=1.0 / float(rho2))
             )
         else:
-            k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(Q))
+            k = terms.SHOTerm(S0=float(S0), w0=float(w0), Q=float(q))
 
         try:
             gp = GaussianProcess(k)
@@ -774,19 +838,49 @@ def per_camera_gp_baseline_masked(
         except Exception:
             baseline = np.full_like(y, y_med, dtype=float)
             resid = y - baseline
+
+            # Compute sigma_eff for exception fallback case if needed
+            if use_yerr and np.isfinite(yerr).any():
+                yerr_full = np.where(np.isfinite(yerr), yerr, e_med)
+            else:
+                yerr_full = np.full_like(y, e_med, dtype=float)
+
+            floor_here = float(max(sigma_floor, 0.0)) if sigma_floor is not None else float(jitter)
+            sigma_eff = np.sqrt(yerr_full**2 + floor_here**2)
+            sigma_resid = resid / sigma_eff
+
             df_out.loc[idx, "baseline"] = baseline
             df_out.loc[idx, "resid"] = resid
-            df_out.loc[idx, "sigma_resid"] = resid / s0
+            df_out.loc[idx, "sigma_resid"] = sigma_resid
+            if add_sigma_eff_col:
+                df_out.loc[idx, "sigma_eff"] = sigma_eff
             continue
 
         baseline = np.asarray(mu, float) + y_mean
         resid = y - baseline
 
         var = np.asarray(var, float)
-        med_err = float(np.nanmedian(yerr_fit)) if np.isfinite(yerr_fit).any() else float(jitter)
-        scale = np.sqrt(np.maximum(var, 0.0) + med_err**2)
-        scale = np.where(np.isfinite(scale) & (scale > 0), scale, max(med_err, 1e-6))
-        sigma_resid = resid / scale
+        var = np.maximum(var, 0.0)  # Ensure non-negative variance
+
+        # Prepare yerr_full for sigma_eff computation
+        if use_yerr and np.isfinite(yerr).any():
+            yerr_full = np.where(np.isfinite(yerr), yerr, e_med)
+        else:
+            yerr_full = np.full_like(y, e_med, dtype=float)
+
+        # Estimate sigma_floor from quiescent residuals
+        if sigma_floor is None:
+            floor_here = robust_sigma_floor(resid, yerr_full, var)
+        else:
+            floor_here = float(max(sigma_floor, 0.0))
+
+        # Compute sigma_eff: combines photometric error, sigma_floor, and GP uncertainty
+        sigma_eff2 = yerr_full**2 + floor_here**2 + var
+        sigma_eff = np.sqrt(np.maximum(sigma_eff2, 1e-12))
+        sigma_resid = resid / sigma_eff
+
+        if add_sigma_eff_col:
+            df_out.loc[idx, "sigma_eff"] = sigma_eff
 
         df_out.loc[idx, "baseline"] = baseline
         df_out.loc[idx, "resid"] = resid

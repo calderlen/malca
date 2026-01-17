@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
+import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
@@ -14,7 +17,11 @@ import matplotlib.pyplot as pl
 # kept for backward compatibility. New code should use method='bayes'.
 from malca.events import run_bayesian_significance
 from malca.utils import read_lc_dat2
-from malca.baseline import per_camera_gp_baseline
+from malca.baseline import (
+    per_camera_gp_baseline,
+    per_camera_gp_baseline_masked,
+    per_camera_trend_baseline,
+)
 from malca.pre_filter import apply_pre_filters
 from malca.filter import filter_signal_amplitude
 
@@ -332,13 +339,19 @@ def plot_light_curve_with_dips(
     source_id: str,
     plot_path: Path,
     accepted_morphologies: set[str] | None = None,
+    g_significant: bool = False,
+    v_significant: bool = False,
 ):
+    """
+    Plot light curves with dips in 2x2 layout (raw + residuals for V and g bands).
+    Matches the old plot style with JD offset, thinner baselines, and residual panes.
+    """
     # Default: accept gaussian and paczynski, reject noise/none
     if accepted_morphologies is None:
         accepted_morphologies = {"gaussian", "paczynski"}
-    # Use 1x2 layout (side-by-side) with separate x-axes for each band
-    # V-band and g-band have different JD ranges and should not share x-axis
-    fig, axes = pl.subplots(1, 2, figsize=(16, 6))
+    
+    # Use 2x2 layout: V-band and g-band columns, raw + residuals rows
+    fig, axes = pl.subplots(2, 2, figsize=(12, 8), constrained_layout=True, sharex="col")
 
     # Baseline parameters (match the SHO-ish defaults; note baseline function takes q not Q)
     baseline_kwargs = {
@@ -351,126 +364,189 @@ def plot_light_curve_with_dips(
     }
 
     camera_colors = pl.cm.tab10(np.linspace(0, 1, 10))
+    JD_OFFSET = 2458000.0
+    band_labels = {0: "g band", 1: "V band"}
+    band_markers = {0: "o", 1: "s"}
 
-    def plot_band(ax, df_band: pd.DataFrame, res: dict, band_label: str):
+    def plot_band(band_idx, df_band: pd.DataFrame, res: dict, band: int):
+        """Plot one band column (raw + residuals)."""
+        band_label = band_labels[band]
+        
         if df_band is None or df_band.empty or "JD" not in df_band.columns or "mag" not in df_band.columns:
-            ax.text(0.5, 0.5, f"No {band_label}-band data", ha="center", va="center", transform=ax.transAxes)
-            ax.set_title(f"{source_id} - {band_label}-band (no data)", fontsize=12)
+            axes[0, band_idx].text(0.5, 0.5, f"No {band_label} data", 
+                                    ha="center", va="center", transform=axes[0, band_idx].transAxes)
+            axes[0, band_idx].set_title(f"{source_id} - {band_label} (no data)", fontsize=12)
             return
 
+        # Filter bad errors
         plot = df_band.copy()
         if "error" in plot.columns:
             plot = plot[plot["error"] <= 1.0]
+        
+        # Apply JD offset
+        median_jd = plot["JD"].median()
+        if median_jd > 2000000:
+            plot["JD_plot"] = plot["JD"] - JD_OFFSET
+        else:
+            plot["JD_plot"] = plot["JD"] - 8000.0
 
+        # Compute baseline
         df_baseline = None
         try:
             df_baseline = per_camera_gp_baseline(plot, **baseline_kwargs)
+            if "baseline" in df_baseline.columns:
+                plot["baseline"] = df_baseline["baseline"]
+                plot["resid"] = plot["mag"] - plot["baseline"]
         except Exception:
-            df_baseline = None
+            pass
 
+        # Main (raw) plot
+        ax_main = axes[0, band_idx]
+        ax_resid = axes[1, band_idx]
+        
+        ax_main.invert_yaxis()
+        ax_main.grid(True, alpha=0.3)
+        ax_main.tick_params(top=True, labeltop=True, bottom=False, labelbottom=False)
+        ax_main.set_xlabel(f"JD - {int(JD_OFFSET)} [d]", fontsize=10)
+        ax_main.xaxis.set_label_position("top")
+        ax_main.set_ylabel(f"{band_label} [mag]", fontsize=12)
+
+        # Get cameras
         cam_col = "camera#" if "camera#" in plot.columns else None
-        if cam_col and cam_col in plot.columns:
-            cameras = sorted(plot[cam_col].dropna().unique())
-            for i, cam in enumerate(cameras):
-                cam_mask = plot[cam_col] == cam
-                cam_data = plot[cam_mask]
+        camera_ids = sorted(plot[cam_col].dropna().unique()) if cam_col else []
+        
+        legend_handles = {}
+        
+        # Plot per camera
+        if cam_col and camera_ids:
+            for i, cam in enumerate(camera_ids):
+                cam_data = plot[plot[cam_col] == cam]
                 if cam_data.empty:
                     continue
 
                 color = camera_colors[i % len(camera_colors)]
-                label = f"Cam {cam}"
-
-                if "error" in cam_data.columns:
-                    ax.errorbar(
-                        cam_data["JD"], cam_data["mag"], yerr=cam_data["error"],
-                        fmt="o", markersize=3, alpha=0.6, color=color,
-                        label=label, elinewidth=1.0, capsize=1.5
-                    )
-                else:
-                    ax.scatter(cam_data["JD"], cam_data["mag"], s=10, alpha=0.6, color=color, label=label)
-
-                if df_baseline is not None and "baseline" in df_baseline.columns:
-                    cam_base = df_baseline[df_baseline[cam_col] == cam].sort_values("JD")
-                    if not cam_base.empty:
-                        ax.plot(
-                            cam_base["JD"], cam_base["baseline"],
-                            color=color, linewidth=2.0, alpha=0.9, linestyle="--",
-                            label=f"Baseline {label}"
+                marker = band_markers.get(band, "o")
+                
+                # Data points
+                ax_main.errorbar(
+                    cam_data["JD_plot"], cam_data["mag"], yerr=cam_data.get("error"),
+                    fmt=marker, ms=4, color=color, alpha=0.8,
+                    ecolor=color, elinewidth=0.8, capsize=2,
+                    markeredgecolor="black", markeredgewidth=0.5,
+                )
+                
+                # Baseline
+                if "baseline" in plot.columns:
+                    cam_base = plot[plot[cam_col] == cam].sort_values("JD_plot")
+                    if not cam_base.empty and cam_base["baseline"].notna().any():
+                        ax_main.plot(
+                            cam_base["JD_plot"], cam_base["baseline"],
+                            color=color, linestyle="-", linewidth=1.6, alpha=0.8, zorder=5
                         )
+                
+                # Residuals
+                if "resid" in plot.columns:
+                    ax_resid.scatter(
+                        cam_data["JD_plot"], cam_data["resid"],
+                        s=10, color=color, alpha=0.8,
+                        edgecolor="black", linewidth=0.3, marker=marker, zorder=3
+                    )
+                
+                legend_handles[cam] = pl.Line2D([], [], color=color, marker="o", linestyle="",
+                                                markeredgecolor="black", markeredgewidth=0.5,
+                                                label=f"{cam}")
         else:
-            if "error" in plot.columns:
-                ax.errorbar(
-                    plot["JD"], plot["mag"], yerr=plot["error"],
-                    fmt="o", markersize=3, alpha=0.6,
-                    label=f"{band_label}-band", elinewidth=1.0, capsize=1.5
-                )
-            else:
-                ax.scatter(plot["JD"], plot["mag"], s=10, alpha=0.6, label=f"{band_label}-band")
-
-            if df_baseline is not None and "baseline" in df_baseline.columns:
-                df_sorted = df_baseline.sort_values("JD")
-                ax.plot(
-                    df_sorted["JD"], df_sorted["baseline"],
-                    linewidth=2.0, alpha=0.9, linestyle="--", label="baseline"
-                )
-
-        # -------------------------------------------------------------
-        # MODIFIED LOGIC: Plot lines ONLY for BIC-confirmed events
-        # -------------------------------------------------------------
-        
-        # 1. Attempt to plot based on run_summaries (BIC aware)
-        run_summaries = res.get("dip", {}).get("run_summaries", [])
-        confirmed_count = 0
-        
-        if run_summaries:
-            for summary in run_summaries:
-                # Filter by accepted morphologies
-                morph = summary.get("morphology", "none").lower()
-                if morph in accepted_morphologies:
-                    confirmed_count += 1
-                    
-                    # Try to get t0 from params, otherwise use range center
-                    t0 = summary.get("params", {}).get("t0")
-                    if t0 is None:
-                        start_jd = summary.get("start_jd")
-                        end_jd = summary.get("end_jd")
-                        if start_jd is not None and end_jd is not None:
-                            t0 = (start_jd + end_jd) / 2.0
-                    
-                    if t0 is not None and np.isfinite(t0):
-                        # Plot distinct solid red line for confirmed event
-                        ax.axvline(t0, color='red', alpha=0.6, linestyle="-", linewidth=1.5)
-
-        else:
-            # 2. Fallback for legacy results (no summaries): Plot all triggered indices
-            dip_indices = res.get("dip", {}).get("event_indices", np.array([], dtype=int))
-            if isinstance(dip_indices, (list, tuple)):
-                dip_indices = np.asarray(dip_indices, dtype=int)
+            # No camera info - plot all together
+            ax_main.errorbar(
+                plot["JD_plot"], plot["mag"], yerr=plot.get("error"),
+                fmt="o", ms=4, alpha=0.8, elinewidth=0.8, capsize=2,
+                markeredgecolor="black", markeredgewidth=0.5,
+            )
             
-            if isinstance(dip_indices, np.ndarray) and dip_indices.size > 0:
-                valid = dip_indices[(dip_indices >= 0) & (dip_indices < len(plot))]
-                if valid.size:
-                    dip_jds = plot.iloc[valid]["JD"].to_numpy()
-                    for jd in dip_jds:
-                        ax.axvline(jd, alpha=0.3, linestyle="--", linewidth=1)
-                    confirmed_count = len(dip_jds) # approximations
-
-        n_triggers = int(res.get("dip", {}).get("n_dips", 0))
+            if "baseline" in plot.columns:
+                plot_sorted = plot.sort_values("JD_plot")
+                ax_main.plot(
+                    plot_sorted["JD_plot"], plot_sorted["baseline"],
+                    color="orange", linestyle="-", linewidth=2, alpha=0.8,
+                    label="Baseline", zorder=5
+                )
+            
+            if "resid" in plot.columns:
+                ax_resid.scatter(
+                    plot["JD_plot"], plot["resid"],
+                    s=10, alpha=0.8, edgecolor="black", linewidth=0.3, zorder=3
+                )
         
-        ax.set_ylabel(f"Magnitude ({band_label})", fontsize=12)
-        ax.set_title(f"{source_id} - {band_label}-band (triggers={n_triggers}, confirmed={confirmed_count})", fontsize=12)
-        ax.invert_yaxis()
-        ax.grid(True, alpha=0.3)
-        ax.legend(fontsize=8, loc="best", ncol=2)
+        # Legend for main plot
+        if legend_handles:
+            ax_main.legend(handles=list(legend_handles.values()), title="Cameras", 
+                          loc="best", fontsize="small")
+        
+        # Residual panel styling
+        if "resid" in plot.columns:
+            jd_min = plot["JD_plot"].min()
+            jd_max = plot["JD_plot"].max()
+            ax_resid.fill_between([jd_min, jd_max], 0.3, 100, color="lightgrey", alpha=0.5, zorder=0)
+            ax_resid.fill_between([jd_min, jd_max], -0.3, -100, color="lightgrey", alpha=0.45, zorder=0)
+            
+            ax_resid.axhline(0.0, color="black", linestyle="--", alpha=0.4, zorder=1)
+            ax_resid.axhline(0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+            ax_resid.axhline(-0.3, color="black", linestyle="-", linewidth=0.8, zorder=1)
+            
+            resid_min, resid_max = plot["resid"].min(), plot["resid"].max()
+            pad = (resid_max - resid_min) * 0.1 if resid_max != resid_min else 0.1
+            ax_resid.set_ylim(max(resid_max + pad, 0.35), min(resid_min - pad, -0.35))
+        ax_resid.set_ylabel(f"{band_label} residual [mag]", fontsize=12)
+        ax_resid.set_xlabel("JD", fontsize=10)
+        ax_resid.grid(True, alpha=0.3)
+        
+        # Plot event markers - ONLY if this band passed ALL filters
+        # band_idx=0 is V-band (left column), band_idx=1 is g-band (right column)
+        is_significant = v_significant if band_idx == 0 else g_significant
+        if is_significant:
+            run_summaries = res.get("dip", {}).get("run_summaries", [])
+            confirmed_count = 0
+            
+            if run_summaries:
+                for summary in run_summaries:
+                    morph = summary.get("morphology", "none").lower()
+                    if morph in accepted_morphologies:
+                        confirmed_count += 1
+                        
+                        t0 = summary.get("params", {}).get("t0")
+                        if t0 is None:
+                            start_jd = summary.get("start_jd")
+                            end_jd = summary.get("end_jd")
+                            if start_jd and end_jd:
+                                t0 = (start_jd + end_jd) / 2.0
+                        
+                        if t0 is not None and np.isfinite(t0):
+                            t0_plot = t0 - (JD_OFFSET if median_jd > 2000000 else 8000.0)
+                            ax_main.axvline(t0_plot, color='red', alpha=0.7, linestyle="--", linewidth=1.5)
+                            if "resid" in plot.columns:
+                                ax_resid.axvline(t0_plot, color='red', alpha=0.7, linestyle="--", linewidth=1.5)
 
-    # V-band on left (earlier JD, typically ends around JD 2458500)
-    # g-band on right (later JD, typically starts around JD 2458500)
-    plot_band(axes[0], dfv, res_v, "V")
-    plot_band(axes[1], dfg, res_g, "g")
-    axes[0].set_xlabel("JD", fontsize=12)
-    axes[1].set_xlabel("JD", fontsize=12)
+    # Plot both bands (V=1, g=0)
+    plot_band(0, dfv, res_v, 1)  # V-band in left column
+    plot_band(1, dfg, res_g, 0)  # g-band in right column
 
-    pl.tight_layout()
+    # Overall title
+    n_trig_v = int(res_v.get("dip", {}).get("n_dips", 0))
+    n_trig_g = int(res_g.get("dip", {}).get("n_dips", 0))
+    
+    # Compute JD range
+    jd_min = min(dfv["JD"].min() if not dfv.empty else float('inf'),
+                 dfg["JD"].min() if not dfg.empty else float('inf'))
+    jd_max = max(dfv["JD"].max() if not dfv.empty else float('-inf'),
+                 dfg["JD"].max() if not dfg.empty else float('-inf'))
+    
+    if np.isfinite(jd_min) and np.isfinite(jd_max):
+        jd_label = f"JD {jd_min:.0f}-{jd_max:.0f}"
+    else:
+        jd_label = "JD range unknown"
+    
+    fig.suptitle(f"{source_id} – SkyPatrol LC – {jd_label}", fontsize=14)
+
     plot_path.parent.mkdir(parents=True, exist_ok=True)
     pl.savefig(plot_path, dpi=150, bbox_inches="tight")
     pl.close()
@@ -481,6 +557,7 @@ def build_reproduction_report(
     *,
     out_dir: Path | str = "./peak_results_repro",
     out_format: str = "csv",
+    plot_format: str = "png",
     n_workers: int | None = None,
     chunk_size: int = 250000,
     metrics_baseline_func=None,
@@ -492,13 +569,23 @@ def build_reproduction_report(
     bayes_trigger_mode: str = "logbf",          # "logbf" or "posterior_prob"
     bayes_logbf_threshold_dip: float = 5.0,     # trigger if max log BF >= this
     bayes_logbf_threshold_jump: float = 5.0,
+    # Probability grid bounds (matching events.py)
+    bayes_p_min_dip: float | None = None,
+    bayes_p_max_dip: float | None = None,
+    bayes_p_min_jump: float | None = None,
+    bayes_p_max_jump: float | None = None,
+    # Magnitude grid
+    bayes_mag_points: int = 12,
+    # Baseline function
+    bayes_baseline_func: str = "gp",            # "gp", "gp_masked", "trend"
+    # Sigma_eff control
+    use_sigma_eff: bool = True,
+    require_sigma_eff: bool = True,
     # Run confirmation filters
     run_min_points: int = 2,
     run_allow_gap_points: int = 1,
     run_max_gap_days: float | None = None,
     run_min_duration_days: float | None = None,
-    run_sum_threshold: float | None = None,
-    run_sum_multiplier: float = 2.5,
     skypatrol_dir: Path | str | None = None,
     path_prefix: Path | str | None = None,
     path_root: Path | str | None = None,
@@ -736,6 +823,14 @@ def build_reproduction_report(
 
                     return result
 
+                # Select baseline function
+                baseline_func_map = {
+                    "gp": per_camera_gp_baseline,
+                    "gp_masked": per_camera_gp_baseline_masked,
+                    "trend": per_camera_trend_baseline,
+                }
+                selected_baseline_func = baseline_func_map.get(bayes_baseline_func, per_camera_gp_baseline)
+
                 def bayes(df: pd.DataFrame, band_name: str):
                     dfc = clean_for_bayes(df)
                     if dfc is None or dfc.empty:
@@ -748,8 +843,14 @@ def build_reproduction_report(
                         # physics convention note: if converting sigma->prob, we use one-tailed Gaussian CDF (norm.cdf)
                         result = run_bayesian_significance(
                             dfc,
+                            baseline_func=selected_baseline_func,
                             significance_threshold=float(bayes_significance_threshold) if bayes_significance_threshold is not None else 99.99997,
                             p_points=int(bayes_p_points),
+                            p_min_dip=bayes_p_min_dip,
+                            p_max_dip=bayes_p_max_dip,
+                            p_min_jump=bayes_p_min_jump,
+                            p_max_jump=bayes_p_max_jump,
+                            mag_points=bayes_mag_points,
                             trigger_mode=bayes_trigger_mode,
                             logbf_threshold_dip=bayes_logbf_threshold_dip,
                             logbf_threshold_jump=bayes_logbf_threshold_jump,
@@ -758,8 +859,9 @@ def build_reproduction_report(
                             run_allow_gap_points=run_allow_gap_points,
                             run_max_gap_days=run_max_gap_days,
                             run_min_duration_days=run_min_duration_days,
-                            run_sum_threshold=run_sum_threshold,
-                            run_sum_multiplier=run_sum_multiplier,
+                            # Sigma_eff control
+                            use_sigma_eff=use_sigma_eff,
+                            require_sigma_eff=require_sigma_eff,
                         )
                         result = apply_triggering(result, band_name)
                         return result
@@ -787,6 +889,57 @@ def build_reproduction_report(
                 res_v["dip"]["n_accepted"] = count_accepted_runs(res_v, "dip")
                 res_v["jump"]["n_accepted"] = count_accepted_runs(res_v, "jump")
 
+                def extract_run_info(res: dict, kind: str) -> dict:
+                    """Extract summary info from the best accepted run."""
+                    run_summaries = res.get(kind, {}).get("run_summaries", [])
+                    n_runs = len(run_summaries)
+                    n_triggered = len(res.get(kind, {}).get("event_indices", []))
+
+                    # Find best accepted run (first one that passes morphology filter)
+                    best_run = None
+                    for s in run_summaries:
+                        if s.get("morphology", "none").lower() in accepted_morphologies:
+                            best_run = s
+                            break
+
+                    if best_run is None and run_summaries:
+                        # No accepted runs, use first run for info
+                        best_run = run_summaries[0]
+
+                    if best_run:
+                        params = best_run.get("params", {})
+                        return {
+                            "n_runs": n_runs,
+                            "n_triggered": n_triggered,
+                            "best_morphology": best_run.get("morphology", "none"),
+                            "best_t0": params.get("t0", np.nan),
+                            "best_amplitude": params.get("amplitude", np.nan),
+                            "best_duration": params.get("sigma", params.get("tau", np.nan)),
+                            "best_run_n_points": best_run.get("n_points", 0),
+                            "best_run_start_jd": best_run.get("start_jd", np.nan),
+                            "best_run_end_jd": best_run.get("end_jd", np.nan),
+                        }
+                    return {
+                        "n_runs": n_runs,
+                        "n_triggered": n_triggered,
+                        "best_morphology": "none",
+                        "best_t0": np.nan,
+                        "best_amplitude": np.nan,
+                        "best_duration": np.nan,
+                        "best_run_n_points": 0,
+                        "best_run_start_jd": np.nan,
+                        "best_run_end_jd": np.nan,
+                    }
+
+                g_run_info = extract_run_info(res_g, "dip")
+                v_run_info = extract_run_info(res_v, "dip")
+
+                # Light curve statistics
+                g_n_points = len(clean_for_bayes(dfg)) if not dfg.empty else 0
+                v_n_points = len(clean_for_bayes(dfv)) if not dfv.empty else 0
+                g_time_span = float(dfg["JD"].max() - dfg["JD"].min()) if not dfg.empty and len(dfg) > 1 else 0.0
+                v_time_span = float(dfv["JD"].max() - dfv["JD"].min()) if not dfv.empty and len(dfv) > 1 else 0.0
+
                 # Override significant flag if no runs pass morphology filter
                 if res_g["dip"]["n_accepted"] == 0:
                     res_g["dip"]["significant"] = False
@@ -797,8 +950,47 @@ def build_reproduction_report(
                 if res_v["jump"]["n_accepted"] == 0:
                     res_v["jump"]["significant"] = False
 
+                # Determine rejection reason (first filter that fails)
+                def get_rejection_reason(res: dict, kind: str) -> str | None:
+                    """Determine why a detection was rejected."""
+                    block = res.get(kind, {})
+
+                    # Check if any triggers
+                    n_triggers = len(block.get("event_indices", []))
+                    max_logbf = block.get("max_log_bf_local", np.nan)
+
+                    if n_triggers == 0 and (not np.isfinite(max_logbf) or max_logbf < 5.0):
+                        return "no_triggers"
+
+                    # Check if runs formed
+                    n_runs = block.get("n_runs", 0)
+                    if n_runs == 0:
+                        return "run_confirmation"
+
+                    # Check if morphology passed
+                    n_accepted = block.get("n_accepted", 0)
+                    if n_accepted == 0:
+                        return "morphology"
+
+                    # Passed all filters
+                    return None
+
+                g_dip_reason = get_rejection_reason(res_g, "dip")
+                v_dip_reason = get_rejection_reason(res_v, "dip")
+
+                # Combined rejection reason: None if either band passes, else first failure
+                if res_g["dip"].get("significant") or res_v["dip"].get("significant"):
+                    combined_rejection = None
+                else:
+                    # Report the "furthest" rejection (morphology > run_confirmation > no_triggers)
+                    priority = {"morphology": 3, "run_confirmation": 2, "no_triggers": 1, None: 0}
+                    if priority.get(g_dip_reason, 0) >= priority.get(v_dip_reason, 0):
+                        combined_rejection = g_dip_reason
+                    else:
+                        combined_rejection = v_dip_reason
+
                 if out_dir:
-                    plot_path = Path(out_dir) / f"{asn}_dips.png"
+                    plot_path = Path(out_dir) / f"{asn}_dips.{plot_format}"
                     plot_light_curve_with_dips(
                         clean_for_bayes(dfg),
                         clean_for_bayes(dfv),
@@ -807,6 +999,8 @@ def build_reproduction_report(
                         str(asn),
                         plot_path,
                         accepted_morphologies=accepted_morphologies,
+                        g_significant=res_g["dip"].get("significant", False),
+                        v_significant=res_v["dip"].get("significant", False),
                     )
 
                 rows.append(
@@ -840,6 +1034,39 @@ def build_reproduction_report(
                         "v_bayes_n_dips": int(res_v["dip"].get("n_dips", 0)),
                         "g_bayes_n_jumps": int(res_g["jump"].get("n_jumps", 0)),
                         "v_bayes_n_jumps": int(res_v["jump"].get("n_jumps", 0)),
+
+                        # Rejection tracking
+                        "g_rejection_reason": g_dip_reason,
+                        "v_rejection_reason": v_dip_reason,
+                        "rejection_reason": combined_rejection,
+
+                        # Light curve statistics
+                        "g_n_points": g_n_points,
+                        "v_n_points": v_n_points,
+                        "g_time_span": g_time_span,
+                        "v_time_span": v_time_span,
+
+                        # Run details - g band
+                        "g_n_runs": g_run_info["n_runs"],
+                        "g_n_triggered": g_run_info["n_triggered"],
+                        "g_best_morphology": g_run_info["best_morphology"],
+                        "g_best_t0": g_run_info["best_t0"],
+                        "g_best_amplitude": g_run_info["best_amplitude"],
+                        "g_best_duration": g_run_info["best_duration"],
+                        "g_best_run_n_points": g_run_info["best_run_n_points"],
+                        "g_best_run_start_jd": g_run_info["best_run_start_jd"],
+                        "g_best_run_end_jd": g_run_info["best_run_end_jd"],
+
+                        # Run details - V band
+                        "v_n_runs": v_run_info["n_runs"],
+                        "v_n_triggered": v_run_info["n_triggered"],
+                        "v_best_morphology": v_run_info["best_morphology"],
+                        "v_best_t0": v_run_info["best_t0"],
+                        "v_best_amplitude": v_run_info["best_amplitude"],
+                        "v_best_duration": v_run_info["best_duration"],
+                        "v_best_run_n_points": v_run_info["best_run_n_points"],
+                        "v_best_run_start_jd": v_run_info["best_run_start_jd"],
+                        "v_best_run_end_jd": v_run_info["best_run_end_jd"],
                     }
                 )
     else:
@@ -855,23 +1082,41 @@ def build_reproduction_report(
         rows_df = pd.DataFrame(columns=["source_id", "mag_bin"])
 
     # Apply signal amplitude filter if enabled
+    # Instead of removing rows, mark rejection_reason for rows that fail
     if not rows_df.empty and min_mag_offset > 0:
         if verbose:
             print(f"\n[SIGNAL-FILTER] Applying signal amplitude filter (min_mag_offset={min_mag_offset})...")
             n_before = len(rows_df)
-        
+
         try:
-            rows_df = filter_signal_amplitude(
-                rows_df,
+            # Get filtered result to identify which rows pass
+            rows_df_filtered = filter_signal_amplitude(
+                rows_df.copy(),
                 min_mag_offset=min_mag_offset,
                 show_tqdm=verbose,
             )
-            
+
+            # Identify rejected rows and mark their rejection reason
+            if "asas_sn_id" in rows_df.columns:
+                before_ids = set(rows_df["asas_sn_id"].astype(str))
+                after_ids = set(rows_df_filtered["asas_sn_id"].astype(str)) if not rows_df_filtered.empty else set()
+                rejected_ids = before_ids - after_ids
+
+                if rejected_ids:
+                    # Mark rows that were detected but failed signal amplitude
+                    mask = rows_df["asas_sn_id"].astype(str).isin(rejected_ids)
+                    # Only update if they had passed previous filters (rejection_reason was None)
+                    if "rejection_reason" in rows_df.columns:
+                        mask &= rows_df["rejection_reason"].isna()
+                    rows_df.loc[mask, "rejection_reason"] = "signal_amplitude"
+                    # Also mark as not significant since they failed the filter
+                    rows_df.loc[mask, "g_bayes_dip_significant"] = False
+                    rows_df.loc[mask, "v_bayes_dip_significant"] = False
+
             if verbose:
-                n_after = len(rows_df)
-                print(f"[SIGNAL-FILTER] Kept {n_after}/{n_before} detections after signal amplitude filter")
-                print(f"[SIGNAL-FILTER] Rejected {n_before - n_after} low-amplitude detections")
-        
+                n_rejected = len(rejected_ids) if "asas_sn_id" in rows_df.columns else 0
+                print(f"[SIGNAL-FILTER] Marked {n_rejected}/{n_before} as rejected by signal amplitude filter")
+
         except Exception as e:
             if verbose:
                 print(f"[SIGNAL-FILTER] Warning: signal amplitude filter failed: {e}")
@@ -950,9 +1195,12 @@ def build_reproduction_report(
         "category",
         "mag_bin",
         "detected",
+        "rejection_reason",
         "detection_details",
     ]
     for col in [
+        "g_rejection_reason",
+        "v_rejection_reason",
         "g_n_peaks",
         "v_n_peaks",
         "g_bayes_dip_significant",
@@ -975,6 +1223,31 @@ def build_reproduction_report(
         "v_max_depth",
         "jd_first",
         "jd_last",
+        # Light curve statistics
+        "g_n_points",
+        "v_n_points",
+        "g_time_span",
+        "v_time_span",
+        # Run details - g band
+        "g_n_runs",
+        "g_n_triggered",
+        "g_best_morphology",
+        "g_best_t0",
+        "g_best_amplitude",
+        "g_best_duration",
+        "g_best_run_n_points",
+        "g_best_run_start_jd",
+        "g_best_run_end_jd",
+        # Run details - V band
+        "v_n_runs",
+        "v_n_triggered",
+        "v_best_morphology",
+        "v_best_t0",
+        "v_best_amplitude",
+        "v_best_duration",
+        "v_best_run_n_points",
+        "v_best_run_start_jd",
+        "v_best_run_end_jd",
     ]:
         if col in merged.columns:
             ordered_cols.append(col)
@@ -990,6 +1263,114 @@ __all__ = [
     "brayden_candidates",
     "build_reproduction_report",
 ]
+
+
+def get_non_default_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    """
+    Compare parsed args to parser defaults and return only non-default values.
+    """
+    non_defaults = {}
+    for action in parser._actions:
+        if action.dest == "help":
+            continue
+        default = action.default
+        value = getattr(args, action.dest, None)
+        # Skip if value equals default
+        if value != default:
+            non_defaults[action.dest] = value
+    return non_defaults
+
+
+def generate_subdir_name(non_default_args: dict) -> str:
+    """
+    Generate a subdirectory name based on non-default arguments.
+    Format: YYYYMMDD_HHMMSS[_flag1=val1_flag2=val2...]
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Filter out args that shouldn't affect naming
+    filtered_args = {k: v for k, v in non_default_args.items() if k not in {"verbose"}}
+
+    if not filtered_args:
+        return timestamp
+
+    # Build suffix from filtered args (abbreviated)
+    parts = []
+    # Prioritize certain flags for the directory name
+    priority_keys = [
+        "bayes_trigger_mode", "bayes_logbf_threshold_dip", "bayes_p_points",
+        "baseline_func", "run_min_points", "accepted_morphologies",
+        "candidates", "input",
+    ]
+
+    for key in priority_keys:
+        if key in filtered_args:
+            val = filtered_args[key]
+            # Abbreviate key names
+            short_key = key.replace("bayes_", "").replace("threshold_", "thr_")
+            short_key = short_key.replace("logbf_", "bf_").replace("_", "")
+            # Abbreviate values
+            if isinstance(val, bool):
+                val_str = "1" if val else "0"
+            elif isinstance(val, float):
+                val_str = f"{val:.2g}".replace(".", "p")
+            elif isinstance(val, Path):
+                val_str = val.stem[:20]
+            elif isinstance(val, str):
+                val_str = Path(val).stem[:20] if "/" in val or "\\" in val else val[:15]
+            else:
+                val_str = str(val)[:15]
+            parts.append(f"{short_key}={val_str}")
+
+    # Add remaining filtered args (up to a limit)
+    for key, val in filtered_args.items():
+        if key not in priority_keys and len(parts) < 8:
+            short_key = key.replace("_", "")[:12]
+            if isinstance(val, bool):
+                val_str = "1" if val else "0"
+            elif isinstance(val, float):
+                val_str = f"{val:.2g}".replace(".", "p")
+            elif isinstance(val, Path):
+                val_str = val.stem[:15]
+            elif isinstance(val, str):
+                val_str = Path(val).stem[:15] if "/" in val or "\\" in val else val[:10]
+            else:
+                val_str = str(val)[:10]
+            parts.append(f"{short_key}={val_str}")
+
+    suffix = "_".join(parts)
+    # Limit total length
+    if len(suffix) > 150:
+        suffix = suffix[:150]
+
+    return f"{timestamp}_{suffix}"
+
+
+def generate_log_filename(non_default_args: dict) -> str:
+    """
+    Generate a log filename based on non-default arguments.
+    Format: reproduction_YYYYMMDD_HHMMSS[_flag1=val1_flag2=val2...].log
+    """
+    subdir_name = generate_subdir_name(non_default_args)
+    return f"reproduction_{subdir_name}.log"
+
+
+class TeeOutput:
+    """Capture stdout/stderr to both terminal and a string buffer."""
+
+    def __init__(self, original_stream):
+        self.original = original_stream
+        self.buffer = io.StringIO()
+
+    def write(self, text):
+        self.original.write(text)
+        self.buffer.write(text)
+
+    def flush(self):
+        self.original.flush()
+
+    def getvalue(self):
+        return self.buffer.getvalue()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1012,7 +1393,7 @@ Examples:
     # Output options
     parser.add_argument(
         "--out-dir",
-        default="./results_test",
+        default="./output/plots/reproduction",
         help="Directory for peak_results output",
     )
     parser.add_argument(
@@ -1020,6 +1401,18 @@ Examples:
         choices=("csv", "parquet"),
         default="csv",
         help="Output format (default: csv)",
+    )
+    parser.add_argument(
+        "--plot-format",
+        choices=("png", "pdf"),
+        default="pdf",
+        help="Plot output format (default: png)",
+    )
+    parser.add_argument(
+        "--log-format",
+        choices=("text", "csv"),
+        default="csv",
+        help="Log output format: text (human-readable) or csv (structured data). Default: text",
     )
     parser.add_argument(
         "--workers",
@@ -1036,7 +1429,7 @@ Examples:
     parser.add_argument(
         "--metrics-dip-threshold",
         type=float,
-        default=0.3,
+        default=0.2,
         help="Dip threshold for run_metrics",
     )
     parser.add_argument(
@@ -1056,7 +1449,7 @@ Examples:
     parser.add_argument(
         "--bayes-trigger-mode",
         choices=("logbf", "posterior_prob"),
-        default="logbf",
+        default="posterior_prob",
         help="Trigger Bayesian detections using log BF (recommended) or posterior probability (legacy).",
     )
     parser.add_argument(
@@ -1074,7 +1467,7 @@ Examples:
     parser.add_argument(
         "--bayes-p-points",
         type=int,
-        default=80,
+        default=50,
         help="Number of logit-spaced probability grid points",
     )
 
@@ -1089,7 +1482,62 @@ Examples:
         "--bayes-sigma",
         type=float,
         default=None,
-        help="Sigma threshold converted to a one-tailed Gaussian CDF (%). Only used if --bayes-trigger-mode=posterior_prob.",
+        help="Sigma threshold converted to a one-tailed Gaussian CDF (%%). Only used if --bayes-trigger-mode=posterior_prob.",
+    )
+
+    # Probability grid bounds (matching events.py)
+    parser.add_argument(
+        "--p-min-dip",
+        type=float,
+        default=None,
+        help="Minimum dip fraction for p-grid (overrides default).",
+    )
+    parser.add_argument(
+        "--p-max-dip",
+        type=float,
+        default=None,
+        help="Maximum dip fraction for p-grid (overrides default).",
+    )
+    parser.add_argument(
+        "--p-min-jump",
+        type=float,
+        default=None,
+        help="Minimum jump fraction for p-grid (overrides default).",
+    )
+    parser.add_argument(
+        "--p-max-jump",
+        type=float,
+        default=None,
+        help="Maximum jump fraction for p-grid (overrides default).",
+    )
+
+    # Magnitude grid
+    parser.add_argument(
+        "--mag-points",
+        type=int,
+        default=50,
+        help="Number of points in the magnitude grid (default: 12).",
+    )
+
+    # Baseline function
+    parser.add_argument(
+        "--baseline-func",
+        type=str,
+        choices=["gp", "gp_masked", "trend"],
+        default="gp",
+        help="Baseline function to use: gp (default), gp_masked, or trend.",
+    )
+
+    # Sigma_eff control
+    parser.add_argument(
+        "--no-sigma-eff",
+        action="store_true",
+        help="Do not replace errors with sigma_eff from baseline.",
+    )
+    parser.add_argument(
+        "--allow-missing-sigma-eff",
+        action="store_true",
+        help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False).",
     )
 
     # Run confirmation filters
@@ -1114,20 +1562,8 @@ Examples:
     parser.add_argument(
         "--run-min-duration-days",
         type=float,
-        default=None,
-        help="Minimum duration in days for a confirmed run (default: 2x cadence).",
-    )
-    parser.add_argument(
-        "--run-sum-threshold",
-        type=float,
-        default=None,
-        help="Minimum sum of scores in a run (default: run_sum_multiplier * trigger_threshold).",
-    )
-    parser.add_argument(
-        "--run-sum-multiplier",
-        type=float,
-        default=2.5,
-        help="Multiplier for automatic run_sum_threshold (default: 2.5).",
+        default=0.0,
+        help="Minimum duration in days for a confirmed run (default: 0.0 = disabled).",
     )
 
     # Pre-filter options
@@ -1176,8 +1612,8 @@ Examples:
     parser.add_argument(
         "--min-mag-offset",
         type=float,
-        default=0.1,
-        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.1)",
+        default=0.2,
+        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)",
     )
 
     # Post-filter options
@@ -1198,7 +1634,7 @@ Examples:
     # Input Data Sources
     parser.add_argument(
         "--skypatrol-dir",
-        default=None,
+        default="input/skypatrol2",
         help="Directory with SkyPatrol CSV files (<source_id>-light-curves.csv)",
     )
     parser.add_argument(
@@ -1226,29 +1662,85 @@ Examples:
         default=None,
         help="Local root that replaces --path-prefix for candidates with a 'path' column.",
     )
-    parser.add_argument(
-        "--baseline-func",
-        default=None,
-        help="Naive-method baseline function import path (e.g. module:func). This does not affect Bayesian baseline.",
-    )
 
     return parser
 
 
 def main(argv: Iterable[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
-    kwargs = {}
-    if args.baseline_func:
-        if ":" in args.baseline_func:
-            mod_name, func_name = args.baseline_func.split(":", 1)
+    # Set up logging
+    log_dir = Path("output/logs/reproduction")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    non_default_args = get_non_default_args(args, parser)
+    subdir_name = generate_subdir_name(non_default_args)
+    log_filename = f"reproduction_{subdir_name}.log"
+
+    # Determine log file extension based on format
+    log_ext = ".csv" if args.log_format == "csv" else ".log"
+    log_filename_base = log_filename.rsplit(".", 1)[0] if "." in log_filename else log_filename
+    log_path = log_dir / f"{log_filename_base}{log_ext}"
+
+    # Compute plot output directory (subdirectory based on non-default args)
+    plot_base_dir = Path(args.out_dir)
+    plot_out_dir = plot_base_dir / subdir_name
+    plot_out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Capture stdout/stderr
+    tee_stdout = TeeOutput(sys.stdout)
+    tee_stderr = TeeOutput(sys.stderr)
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = tee_stdout
+    sys.stderr = tee_stderr
+
+    report = None
+    try:
+        # Log the full command
+        if argv is not None:
+            cmd_str = f"python -m malca.reproduction {' '.join(str(a) for a in argv)}"
         else:
-            mod_name, func_name = "baseline", args.baseline_func
-        mod = __import__(mod_name, fromlist=[func_name])
-        kwargs["metrics_baseline_func"] = getattr(mod, func_name)
+            cmd_str = f"python -m malca.reproduction {' '.join(sys.orig_argv[1:]) if hasattr(sys, 'orig_argv') else '(unknown)'}"
+        print(f"Command: {cmd_str}")
+        print(f"Log file: {log_path}")
+        print(f"Plot dir: {plot_out_dir}")
+        print(f"Non-default args: {non_default_args}")
+        print()
 
+        report = _main_impl(args, plot_out_dir=plot_out_dir)
+
+    finally:
+        # Restore stdout/stderr
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+
+        # Write log file based on format
+        if args.log_format == "csv" and report is not None:
+            # CSV format: save the full report DataFrame
+            report.to_csv(log_path, index=False)
+            print(f"\nCSV log saved to: {log_path}")
+        else:
+            # Text format: save captured stdout/stderr
+            log_content = tee_stdout.getvalue()
+            stderr_content = tee_stderr.getvalue()
+            if stderr_content:
+                log_content += "\n\n=== STDERR ===\n" + stderr_content
+
+            with open(log_path, "w") as f:
+                f.write(log_content)
+
+            print(f"\nLog saved to: {log_path}")
+
+
+def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd.DataFrame:
+    """Main implementation, called by main() with logging wrapper. Returns the report DataFrame."""
     candidates_spec = args.input or args.candidates
     candidate_data = resolve_candidates(candidates_spec)
+
+    # Use provided plot_out_dir or fall back to args.out_dir
+    out_dir = plot_out_dir if plot_out_dir is not None else Path(args.out_dir)
 
     # posterior-prob threshold (only if requested)
     bayes_significance_threshold = args.bayes_significance_threshold
@@ -1271,16 +1763,21 @@ def main(argv: Iterable[str] | None = None) -> None:
 
     # Parse accepted morphologies
     if args.accepted_morphologies.lower() == "all":
-        accepted_morphologies = {"gaussian", "paczynski", "noise", "none"}
+        accepted_morphologies = {"gaussian", "skew_gaussian", "paczynski", "fred", "noise", "none"}
     else:
         accepted_morphologies = {m.strip().lower() for m in args.accepted_morphologies.split(",")}
     if args.verbose:
         print(f"[DEBUG] Accepted morphologies: {accepted_morphologies}")
 
+    # Compute sigma_eff flags
+    use_sigma_eff = not args.no_sigma_eff
+    require_sigma_eff = use_sigma_eff and (not args.allow_missing_sigma_eff)
+
     report = build_reproduction_report(
         candidates=candidate_data,
-        out_dir=args.out_dir,
+        out_dir=out_dir,
         out_format=args.out_format,
+        plot_format=args.plot_format,
         n_workers=args.workers,
         chunk_size=args.chunk_size,
         metrics_dip_threshold=args.metrics_dip_threshold,
@@ -1289,13 +1786,23 @@ def main(argv: Iterable[str] | None = None) -> None:
         bayes_trigger_mode=args.bayes_trigger_mode,
         bayes_logbf_threshold_dip=args.bayes_logbf_threshold_dip,
         bayes_logbf_threshold_jump=args.bayes_logbf_threshold_jump,
+        # Probability grid bounds
+        bayes_p_min_dip=args.p_min_dip,
+        bayes_p_max_dip=args.p_max_dip,
+        bayes_p_min_jump=args.p_min_jump,
+        bayes_p_max_jump=args.p_max_jump,
+        # Magnitude grid
+        bayes_mag_points=args.mag_points,
+        # Baseline function
+        bayes_baseline_func=args.baseline_func,
+        # Sigma_eff control
+        use_sigma_eff=use_sigma_eff,
+        require_sigma_eff=require_sigma_eff,
         # Run confirmation filters
         run_min_points=args.run_min_points,
         run_allow_gap_points=args.run_allow_gap_points,
         run_max_gap_days=args.run_max_gap_days,
         run_min_duration_days=args.run_min_duration_days,
-        run_sum_threshold=args.run_sum_threshold,
-        run_sum_multiplier=args.run_sum_multiplier,
         skypatrol_dir=args.skypatrol_dir,
         path_prefix=args.path_prefix,
         path_root=args.path_root,
@@ -1314,26 +1821,31 @@ def main(argv: Iterable[str] | None = None) -> None:
         skip_post_filters=args.skip_post_filters,
         # Morphology filter
         accepted_morphologies=accepted_morphologies,
-        **kwargs,
     )
 
     # Print filtering summary
     print("\n" + "=" * 60)
     print("FILTERING SUMMARY")
     print("=" * 60)
+    print(f"Plot format:          {args.plot_format}")
+    print(f"Baseline function:    {args.baseline_func}")
+    print(f"Sigma_eff:            use={use_sigma_eff}, require={require_sigma_eff}")
+    print(f"Mag grid points:      {args.mag_points}")
+    if args.p_min_dip is not None or args.p_max_dip is not None:
+        print(f"P-grid (dip):         min={args.p_min_dip}, max={args.p_max_dip}")
+    if args.p_min_jump is not None or args.p_max_jump is not None:
+        print(f"P-grid (jump):        min={args.p_min_jump}, max={args.p_max_jump}")
     print(f"Pre-filters:          {'APPLIED' if not args.skip_pre_filters else 'SKIPPED'}")
     if not args.skip_pre_filters:
         print(f"  - Sparse LC filter:   min_time_span={args.min_time_span}d, min_cadence={args.min_points_per_day}/d")
         print(f"  - Multi-camera:       min_cameras={args.min_cameras}")
         print(f"  - VSX filter:         {'APPLIED' if not args.skip_vsx else 'SKIPPED'}")
     print(f"Signal amplitude:     {'APPLIED (min_mag_offset=' + str(args.min_mag_offset) + ')' if args.min_mag_offset > 0 else 'DISABLED'}")
-    print(f"Run confirmation:     min_points={args.run_min_points}, allow_gap={args.run_allow_gap_points}, sum_mult={args.run_sum_multiplier}")
+    print(f"Run confirmation:     min_points={args.run_min_points}, allow_gap={args.run_allow_gap_points}")
     if args.run_max_gap_days is not None:
         print(f"                      max_gap_days={args.run_max_gap_days}")
     if args.run_min_duration_days is not None:
         print(f"                      min_duration_days={args.run_min_duration_days}")
-    if args.run_sum_threshold is not None:
-        print(f"                      sum_threshold={args.run_sum_threshold}")
     print(f"Morphology filter:    accepted={{{', '.join(sorted(accepted_morphologies))}}}")
     print(f"Post-filters:         {'APPLIED' if not args.skip_post_filters else 'SKIPPED (none implemented)'}")
     print("=" * 60 + "\n")
@@ -1341,8 +1853,10 @@ def main(argv: Iterable[str] | None = None) -> None:
     columns = [
         "source",
         "source_id",
+        "category",
         "mag_bin",
         "detected",
+        "rejection_reason",
         "detection_details",
         "g_n_peaks",
         "v_n_peaks",
@@ -1359,6 +1873,8 @@ def main(argv: Iterable[str] | None = None) -> None:
     ]
     existing = [c for c in columns if c in report.columns]
     print(report[existing].to_string(index=False))
+
+    return report
 
 
 if __name__ == "__main__":

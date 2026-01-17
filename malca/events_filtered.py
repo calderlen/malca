@@ -120,7 +120,7 @@ def main():
     parser.add_argument("--run-min-points", type=int, default=2, help="Min triggered points in a run")
     parser.add_argument("--run-allow-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
-    parser.add_argument("--run-min-duration-days", type=float, default=None, help="Require run duration >= this")
+    parser.add_argument("--run-min-duration-days", type=float, default=0.0, help="Require run duration >= this (default: 0.0 = disabled)")
     parser.add_argument("--run-sum-threshold", type=float, default=None, help="Require run sum-score >= this")
     parser.add_argument("--run-sum-multiplier", type=float, default=2.5, help="sum_thr = multiplier * per_point_thr")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
