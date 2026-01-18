@@ -219,8 +219,6 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
         run_allow_gap_points=args.run_allow_gap_points,
         run_max_gap_days=args.run_max_gap_days,
         run_min_duration_days=args.run_min_duration_days,
-        run_sum_threshold=args.run_sum_threshold,
-        run_sum_multiplier=args.run_sum_multiplier,
         compute_event_prob=(not args.no_event_prob),
         use_sigma_eff=use_sigma_eff,
         require_sigma_eff=require_sigma_eff,
@@ -629,6 +627,109 @@ def run_injection_recovery(
     pbar.close()
     return None if output_path else pd.DataFrame(results)
 
+
+def compute_quality_metrics(results_df: pd.DataFrame) -> dict:
+    """
+    Compute quality metrics from injection-recovery results.
+    
+    Returns a dict with:
+    - total_trials: Total number of trials attempted
+    - successful_trials: Trials that completed without error
+    - failed_trials: Trials that failed with an error
+    - failure_rate: Fraction of trials that failed
+    - detection_rate: Fraction of successful trials that detected the injection
+    - error_breakdown: Dict mapping error type to count
+    - error_percentages: Dict mapping error type to percentage of total
+    """
+    total = len(results_df)
+    if total == 0:
+        return {
+            "total_trials": 0,
+            "successful_trials": 0,
+            "failed_trials": 0,
+            "failure_rate": 0.0,
+            "detection_rate": 0.0,
+            "error_breakdown": {},
+            "error_percentages": {},
+        }
+    
+    # Identify failures (rows with non-null 'error' column)
+    has_error = results_df.get("error", pd.Series([None] * total)).notna()
+    failed = has_error.sum()
+    successful = total - failed
+    
+    # Detection rate among successful trials
+    if successful > 0:
+        detected_col = "detected" if "detected" in results_df.columns else "dip_significant"
+        if detected_col in results_df.columns:
+            successful_mask = ~has_error
+            detection_rate = results_df.loc[successful_mask, detected_col].sum() / successful
+        else:
+            detection_rate = np.nan
+    else:
+        detection_rate = np.nan
+    
+    # Error breakdown
+    error_breakdown = {}
+    error_percentages = {}
+    if "error" in results_df.columns:
+        error_counts = results_df["error"].dropna().value_counts()
+        for error_type, count in error_counts.items():
+            error_breakdown[str(error_type)] = int(count)
+            error_percentages[str(error_type)] = float(count / total * 100)
+    
+    return {
+        "total_trials": int(total),
+        "successful_trials": int(successful),
+        "failed_trials": int(failed),
+        "failure_rate": float(failed / total) if total > 0 else 0.0,
+        "detection_rate": float(detection_rate) if np.isfinite(detection_rate) else None,
+        "error_breakdown": error_breakdown,
+        "error_percentages": error_percentages,
+    }
+
+
+def print_quality_summary(metrics: dict, output_path: Path | None = None) -> None:
+    """
+    Print a formatted summary of injection-recovery quality metrics.
+    Optionally saves to a text file.
+    """
+    lines = []
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("INJECTION-RECOVERY QUALITY METRICS")
+    lines.append("=" * 60)
+    lines.append(f"Total trials:      {metrics['total_trials']:,}")
+    lines.append(f"Successful trials: {metrics['successful_trials']:,} ({100 * (1 - metrics['failure_rate']):.1f}%)")
+    lines.append(f"Failed trials:     {metrics['failed_trials']:,} ({100 * metrics['failure_rate']:.1f}%)")
+    
+    if metrics['detection_rate'] is not None:
+        lines.append(f"Detection rate:    {100 * metrics['detection_rate']:.1f}% (of successful trials)")
+    
+    if metrics['error_breakdown']:
+        lines.append("")
+        lines.append("Error breakdown:")
+        # Sort by count descending
+        sorted_errors = sorted(metrics['error_breakdown'].items(), key=lambda x: -x[1])
+        for error_type, count in sorted_errors:
+            pct = metrics['error_percentages'].get(error_type, 0)
+            lines.append(f"  {error_type}: {count:,} ({pct:.1f}%)")
+    else:
+        lines.append("")
+        lines.append("No errors recorded.")
+    
+    lines.append("=" * 60)
+    lines.append("")
+    
+    summary = "\n".join(lines)
+    print(summary)
+    
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            f.write(summary)
+        print(f"Quality metrics saved to: {output_path}")
 
 
 def compute_detection_efficiency(
@@ -1346,9 +1447,7 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--run-min-points", type=int, default=3)
     parser.add_argument("--run-allow-gap-points", type=int, default=1)
     parser.add_argument("--run-max-gap-days", type=float, default=None)
-    parser.add_argument("--run-min-duration-days", type=float, default=None)
-    parser.add_argument("--run-sum-threshold", type=float, default=None)
-    parser.add_argument("--run-sum-multiplier", type=float, default=2.5)
+    parser.add_argument("--run-min-duration-days", type=float, default=0.0)
     parser.add_argument("--baseline-func", type=str, default="trend", choices=["gp", "gp_masked", "trend"],
                         help="Baseline function (default: trend for speed)")
     parser.add_argument("--no-event-prob", action="store_true", default=True,
@@ -1430,11 +1529,17 @@ Output structure (default --out-dir output/injection):
     )
 
 
-    # Post-processing: compute cube and generate plots (unless skipped)
-    if not args.skip_cube or not args.skip_plots:
-        print(f"\nLoading results from {csv_out}...")
-        results_df = pd.read_csv(csv_out)
+    # Post-processing: load results and compute metrics
+    print(f"\nLoading results from {csv_out}...")
+    results_df = pd.read_csv(csv_out)
 
+    # Compute and display quality metrics
+    metrics = compute_quality_metrics(results_df)
+    metrics_path = results_dir / "quality_metrics.txt"
+    print_quality_summary(metrics, output_path=metrics_path)
+
+    # Compute cube and generate plots (unless skipped)
+    if not args.skip_cube or not args.skip_plots:
         if "fractional_depth" not in results_df.columns or "median_mag" not in results_df.columns:
             print("Warning: Results missing fractional_depth or median_mag columns, skipping 3D cube.")
         else:
