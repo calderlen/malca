@@ -26,7 +26,13 @@ visualization = ["plotly"]
 database = ["duckdb"]
 multiwavelength = ["astroquery>=0.4.6", "dustmaps3d", "pyvo"]
 notebooks = ["jupyterlab", "ipykernel", "seaborn", "scikit-learn", "joblib"]
+dev = ["pytest", "pytest-cov", "pytest-xdist"]
 all = ["plotly", "duckdb", "astroquery", "jupyterlab", "ipykernel", "seaborn", "scikit-learn", "joblib"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
 
 [tool.setuptools.packages.find]
 where = ["."]
