@@ -1,5 +1,7 @@
 # MALCA: Multi-timescale ASAS-SN Light Curve Analysis
 
+![Tests](https://github.com/calderlen/malca/actions/workflows/tests.yml/badge.svg)
+
 #### What files are expected
 - Per-mag-bin directories: `/data/poohbah/1/assassin/rowan.90/lcsv2/<mag_bin>/`
   - Index CSVs: `index*.csv` with columns like `asas_sn_id, ra_deg, dec_deg, pm_ra, pm_dec, ...`
