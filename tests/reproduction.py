@@ -563,25 +563,25 @@ def build_reproduction_report(
     metrics_baseline_func=None,
     metrics_dip_threshold: float = 0.3,
     # posterior-prob thresholding (legacy)
-    bayes_significance_threshold: float | None = 99.99997,
-    bayes_p_points: int = 80,
+    significance_threshold: float | None = 99.99997,
+    p_points: int = 80,
     # NEW: log BF triggering
-    bayes_trigger_mode: str = "logbf",          # "logbf" or "posterior_prob"
-    bayes_logbf_threshold_dip: float = 5.0,     # trigger if max log BF >= this
-    bayes_logbf_threshold_jump: float = 5.0,
+    trigger_mode: str = "logbf",          # "logbf" or "posterior_prob"
+    logbf_threshold_dip: float = 5.0,     # trigger if max log BF >= this
+    logbf_threshold_jump: float = 5.0,
     # Probability grid bounds (matching events.py)
-    bayes_p_min_dip: float | None = None,
-    bayes_p_max_dip: float | None = None,
-    bayes_p_min_jump: float | None = None,
-    bayes_p_max_jump: float | None = None,
+    p_min_dip: float | None = None,
+    p_max_dip: float | None = None,
+    p_min_jump: float | None = None,
+    p_max_jump: float | None = None,
     # Magnitude grid
-    bayes_mag_points: int = 12,
-    bayes_mag_min_dip: float | None = None,
-    bayes_mag_max_dip: float | None = None,
-    bayes_mag_min_jump: float | None = None,
-    bayes_mag_max_jump: float | None = None,
+    mag_points: int = 12,
+    mag_min_dip: float | None = None,
+    mag_max_dip: float | None = None,
+    mag_min_jump: float | None = None,
+    mag_max_jump: float | None = None,
     # Baseline function
-    bayes_baseline_func: str = "gp",            # "gp", "gp_masked", "trend"
+    baseline_func: str = "gp",            # "gp", "gp_masked", "trend"
     # Baseline kwargs (GP kernel parameters)
     baseline_s0: float = 0.0005,
     baseline_w0: float = 0.0031415926535897933,
@@ -780,8 +780,8 @@ def build_reproduction_report(
                             result[kind] = {"significant": False}
                             continue
 
-                        if bayes_trigger_mode == "logbf":
-                            thr = bayes_logbf_threshold_dip if kind == "dip" else bayes_logbf_threshold_jump
+                        if trigger_mode == "logbf":
+                            thr = logbf_threshold_dip if kind == "dip" else logbf_threshold_jump
                             log_bf_local = block.get("log_bf_local", None)
                             if log_bf_local is None:
                                 # if the bayes module wasn't updated, this stays off
@@ -839,15 +839,15 @@ def build_reproduction_report(
                     "gp_masked": per_camera_gp_baseline_masked,
                     "trend": per_camera_trend_baseline,
                 }
-                selected_baseline_func = baseline_func_map.get(bayes_baseline_func, per_camera_gp_baseline)
+                selected_baseline_func = baseline_func_map.get(baseline_func, per_camera_gp_baseline)
 
                 # Build mag grids from min/max/points if bounds are provided
                 mag_grid_dip = None
                 mag_grid_jump = None
-                if bayes_mag_min_dip is not None and bayes_mag_max_dip is not None:
-                    mag_grid_dip = np.linspace(bayes_mag_min_dip, bayes_mag_max_dip, bayes_mag_points)
-                if bayes_mag_min_jump is not None and bayes_mag_max_jump is not None:
-                    mag_grid_jump = np.linspace(bayes_mag_min_jump, bayes_mag_max_jump, bayes_mag_points)
+                if mag_min_dip is not None and mag_max_dip is not None:
+                    mag_grid_dip = np.linspace(mag_min_dip, mag_max_dip, mag_points)
+                if mag_min_jump is not None and mag_max_jump is not None:
+                    mag_grid_jump = np.linspace(mag_min_jump, mag_max_jump, mag_points)
 
                 # Build baseline_kwargs from explicit params
                 baseline_kwargs_dict = dict(
@@ -873,18 +873,18 @@ def build_reproduction_report(
                             dfc,
                             baseline_func=selected_baseline_func,
                             baseline_kwargs=baseline_kwargs_dict,
-                            significance_threshold=float(bayes_significance_threshold) if bayes_significance_threshold is not None else 99.99997,
-                            p_points=int(bayes_p_points),
-                            p_min_dip=bayes_p_min_dip,
-                            p_max_dip=bayes_p_max_dip,
-                            p_min_jump=bayes_p_min_jump,
-                            p_max_jump=bayes_p_max_jump,
-                            mag_points=bayes_mag_points,
+                            significance_threshold=float(significance_threshold) if significance_threshold is not None else 99.99997,
+                            p_points=int(p_points),
+                            p_min_dip=p_min_dip,
+                            p_max_dip=p_max_dip,
+                            p_min_jump=p_min_jump,
+                            p_max_jump=p_max_jump,
+                            mag_points=mag_points,
                             mag_grid_dip=mag_grid_dip,
                             mag_grid_jump=mag_grid_jump,
-                            trigger_mode=bayes_trigger_mode,
-                            logbf_threshold_dip=bayes_logbf_threshold_dip,
-                            logbf_threshold_jump=bayes_logbf_threshold_jump,
+                            trigger_mode=trigger_mode,
+                            logbf_threshold_dip=logbf_threshold_dip,
+                            logbf_threshold_jump=logbf_threshold_jump,
                             # Run confirmation filters
                             run_min_points=run_min_points,
                             run_allow_gap_points=run_allow_gap_points,
@@ -1329,7 +1329,7 @@ def generate_subdir_name(non_default_args: dict) -> str:
     parts = []
     # Prioritize certain flags for the directory name
     priority_keys = [
-        "bayes_trigger_mode", "bayes_logbf_threshold_dip", "bayes_p_points",
+        "trigger_mode", "logbf_threshold_dip", "p_points",
         "baseline_func", "run_min_points", "accepted_morphologies",
         "candidates", "input",
     ]
@@ -1478,25 +1478,25 @@ Examples:
         help="Detection method. Only 'bayes' (Bayesian) is currently supported.",
     )
     parser.add_argument(
-        "--bayes-trigger-mode",
+        "--trigger-mode",
         choices=("logbf", "posterior_prob"),
         default="posterior_prob",
         help="Trigger Bayesian detections using log BF (recommended) or posterior probability (legacy).",
     )
     parser.add_argument(
-        "--bayes-logbf-threshold-dip",
+        "--logbf-threshold-dip",
         type=float,
         default=5.0,
-        help="Dip triggers when max per-point log BF >= this (only if --bayes-trigger-mode=logbf).",
+        help="Dip triggers when max per-point log BF >= this (only if --trigger-mode=logbf).",
     )
     parser.add_argument(
-        "--bayes-logbf-threshold-jump",
+        "--logbf-threshold-jump",
         type=float,
         default=5.0,
-        help="Jump triggers when max per-point log BF >= this (only if --bayes-trigger-mode=logbf).",
+        help="Jump triggers when max per-point log BF >= this (only if --trigger-mode=logbf).",
     )
     parser.add_argument(
-        "--bayes-p-points",
+        "--p-points",
         type=int,
         default=50,
         help="Number of logit-spaced probability grid points",
@@ -1504,16 +1504,16 @@ Examples:
 
     # Bayesian legacy settings (posterior_prob)
     parser.add_argument(
-        "--bayes-significance-threshold",
+        "--significance-threshold",
         type=float,
         default=None,
-        help="Per-point posterior threshold (percentage, e.g. 99.99997). Only used if --bayes-trigger-mode=posterior_prob.",
+        help="Per-point posterior threshold (percentage, e.g. 99.99997). Only used if --trigger-mode=posterior_prob.",
     )
     parser.add_argument(
-        "--bayes-sigma",
+        "--sigma-threshold",
         type=float,
         default=None,
-        help="Sigma threshold converted to a one-tailed Gaussian CDF (%%). Only used if --bayes-trigger-mode=posterior_prob.",
+        help="Sigma threshold converted to a one-tailed Gaussian CDF (%%). Only used if --trigger-mode=posterior_prob.",
     )
 
     # Probability grid bounds (matching events.py)
@@ -1785,23 +1785,23 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
     out_dir = plot_out_dir if plot_out_dir is not None else Path(args.out_dir)
 
     # posterior-prob threshold (only if requested)
-    bayes_significance_threshold = args.bayes_significance_threshold
-    if args.bayes_trigger_mode == "posterior_prob":
+    significance_threshold = args.significance_threshold
+    if args.trigger_mode == "posterior_prob":
         # physics convention note: one-tailed Gaussian threshold uses CDF(sigma)
-        if args.bayes_sigma is not None:
-            prob = stats.norm.cdf(args.bayes_sigma)
-            bayes_significance_threshold = prob * 100.0
+        if args.sigma_threshold is not None:
+            prob = stats.norm.cdf(args.sigma_threshold)
+            significance_threshold = prob * 100.0
             if args.verbose:
-                print(f"[DEBUG] Converting {args.bayes_sigma}-sigma to significance threshold: {bayes_significance_threshold:.8f}%")
-        elif bayes_significance_threshold is None:
+                print(f"[DEBUG] Converting {args.sigma_threshold}-sigma to significance threshold: {significance_threshold:.8f}%")
+        elif significance_threshold is None:
             prob = stats.norm.cdf(5.0)
-            bayes_significance_threshold = prob * 100.0
+            significance_threshold = prob * 100.0
             if args.verbose:
-                print(f"[DEBUG] Using default 5-sigma significance threshold: {bayes_significance_threshold:.8f}%")
+                print(f"[DEBUG] Using default 5-sigma significance threshold: {significance_threshold:.8f}%")
     else:
-        bayes_significance_threshold = None
+        significance_threshold = None
         if args.verbose:
-            print(f"[DEBUG] Using logBF triggering: dip_thr={args.bayes_logbf_threshold_dip}, jump_thr={args.bayes_logbf_threshold_jump}")
+            print(f"[DEBUG] Using logBF triggering: dip_thr={args.logbf_threshold_dip}, jump_thr={args.logbf_threshold_jump}")
 
     # Parse accepted morphologies
     if args.accepted_morphologies.lower() == "all":
@@ -1823,24 +1823,24 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         n_workers=args.workers,
         chunk_size=args.chunk_size,
         metrics_dip_threshold=args.metrics_dip_threshold,
-        bayes_significance_threshold=bayes_significance_threshold,
-        bayes_p_points=args.bayes_p_points,
-        bayes_trigger_mode=args.bayes_trigger_mode,
-        bayes_logbf_threshold_dip=args.bayes_logbf_threshold_dip,
-        bayes_logbf_threshold_jump=args.bayes_logbf_threshold_jump,
+        significance_threshold=significance_threshold,
+        p_points=args.p_points,
+        trigger_mode=args.trigger_mode,
+        logbf_threshold_dip=args.logbf_threshold_dip,
+        logbf_threshold_jump=args.logbf_threshold_jump,
         # Probability grid bounds
-        bayes_p_min_dip=args.p_min_dip,
-        bayes_p_max_dip=args.p_max_dip,
-        bayes_p_min_jump=args.p_min_jump,
-        bayes_p_max_jump=args.p_max_jump,
+        p_min_dip=args.p_min_dip,
+        p_max_dip=args.p_max_dip,
+        p_min_jump=args.p_min_jump,
+        p_max_jump=args.p_max_jump,
         # Magnitude grid
-        bayes_mag_points=args.mag_points,
-        bayes_mag_min_dip=args.mag_min_dip,
-        bayes_mag_max_dip=args.mag_max_dip,
-        bayes_mag_min_jump=args.mag_min_jump,
-        bayes_mag_max_jump=args.mag_max_jump,
+        mag_points=args.mag_points,
+        mag_min_dip=args.mag_min_dip,
+        mag_max_dip=args.mag_max_dip,
+        mag_min_jump=args.mag_min_jump,
+        mag_max_jump=args.mag_max_jump,
         # Baseline function
-        bayes_baseline_func=args.baseline_func,
+        baseline_func=args.baseline_func,
         # Baseline kwargs
         baseline_s0=args.baseline_s0,
         baseline_w0=args.baseline_w0,
