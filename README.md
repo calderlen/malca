@@ -15,8 +15,7 @@
 - Core pipeline: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm
 - Optional outputs: pyarrow (parquet), duckdb
 - Optional visualization: plotly (3D injection plots)
-- Multi-wavelength characterization: astroquery (Gaia queries), dustmaps3d (3D dust extinction)
-- Optional characterization: banyan-sigma (young associations), requests (unWISE queries)
+- Multi-wavelength characterization: astroquery (Gaia queries), dustmaps3d (3D dust extinction), pyvo (StarHorse TAP queries), banyan-sigma (young associations), requests (unWISE queries)
 - Notebooks/EDA: jupyterlab, ipykernel, seaborn, scikit-learn, joblib
 
 ## Quick Start
@@ -258,15 +257,6 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
   # Score microlensing events (Paczyński curves)
   python -m malca.score --events /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --output /home/lenhart.106/code/malca/output/microlens_scores.csv --event-type microlensing
   ```
-- Plot metrics (multiple y vs p_points/mag_points; optional 3D scatter via matplotlib 3D):
-  ```python
-  import pandas as pd
-  from malca.plot_metrics import plot_metrics_for_ids, plot_3d_surface
-
-  df = pd.read_csv("/home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv")
-  plot_metrics_for_ids(df, id_col="asas_sn_id", ids=["123", "456"], x_cols=("p_points", "mag_points"))
-  plot_3d_surface(df, x_col="p_points", y_col="mag_points", z_col="dip_bd", color_col="elapsed_s")
-  ```
 - Injection-recovery testing (validate pipeline completeness/contamination):
   ```bash
   # Full run: uses default manifest (output/lc_manifest_all.parquet)
@@ -372,7 +362,7 @@ pip install -e ".[multiwavelength]"
   - Measures completeness as function of dip depth, duration, and stellar magnitude
   - 3D efficiency cube for completeness corrections in occurrence rate calculations
 - Seasonal trend summary (LTVar-style):
-  `python -m malca.ltv --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
+  `python -m malca.ltv.core --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
 - Quick stats for a single LC file:
   `python -m malca.stats /path/to/lc123.dat2`
 - False-positive reduction summary (pre vs post filter):
@@ -386,7 +376,7 @@ pip install -e ".[multiwavelength]"
 - `malca.plot`: `python -m malca.plot --input /path/to/lc123.dat2 --out-dir /home/lenhart.106/code/malca/output/plots --format png`
 - `malca.score`: `python -m malca.score --events /home/lenhart.106/code/malca/output/results.csv --output /home/lenhart.106/code/malca/output/dipper_scores.csv --event-type dip`
 - `malca.injection`: `python -m malca.injection --workers 10` (uses `output/lc_manifest_all.parquet`, outputs to `output/injection/`)
-- `malca.ltv`: `python -m malca.ltv --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
+- `malca.ltv.core`: `python -m malca.ltv.core --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
 - `malca.stats`: `python -m malca.stats /path/to/lc123.dat2`
 - `malca.fp_analysis`: `python -m malca.fp_analysis --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
 - **Testing modules** (in `tests/` directory):

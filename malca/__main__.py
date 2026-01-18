@@ -110,11 +110,11 @@ def main():
     
     elif args.command == "validate":
         if hasattr(args, 'help_full') and args.help_full:
-            from malca import reproduction
+            from tests import reproduction
             sys.argv = [sys.argv[0], '--help']
             reproduction.main()
         else:
-            from malca import reproduction
+            from tests import reproduction
             sys.argv = [sys.argv[0]] + remaining
             reproduction.main()
     
@@ -150,11 +150,11 @@ def main():
     
     elif args.command == "validation":
         if hasattr(args, 'help_full') and args.help_full:
-            from malca import validation
+            from tests import validation
             sys.argv = [sys.argv[0], '--help']
             validation.main()
         else:
-            from malca import validation
+            from tests import validation
             sys.argv = [sys.argv[0]] + remaining
             validation.main()
     

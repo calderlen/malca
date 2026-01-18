@@ -121,14 +121,23 @@ def main():
     parser.add_argument("--run-allow-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
     parser.add_argument("--run-min-duration-days", type=float, default=0.0, help="Require run duration >= this (default: 0.0 = disabled)")
-    parser.add_argument("--run-sum-threshold", type=float, default=None, help="Require run sum-score >= this")
-    parser.add_argument("--run-sum-multiplier", type=float, default=2.5, help="sum_thr = multiplier * per_point_thr")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
     parser.add_argument("--p-min-dip", type=float, default=None, help="Minimum dip fraction for p-grid")
     parser.add_argument("--p-max-dip", type=float, default=None, help="Maximum dip fraction for p-grid")
     parser.add_argument("--p-min-jump", type=float, default=None, help="Minimum jump fraction for p-grid")
     parser.add_argument("--p-max-jump", type=float, default=None, help="Maximum jump fraction for p-grid")
     parser.add_argument("--baseline-func", type=str, default="gp", choices=["gp", "gp_masked", "trend"], help="Baseline function")
+    # Baseline kwargs (GP kernel parameters)
+    parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
+    parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
+    parser.add_argument("--baseline-q", type=float, default=0.7, help="GP kernel Q parameter (default: 0.7)")
+    parser.add_argument("--baseline-jitter", type=float, default=0.006, help="GP jitter term (default: 0.006)")
+    parser.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
+    # Magnitude grid bounds (override auto-detection)
+    parser.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
+    parser.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
+    parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
+    parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
     parser.add_argument("--no-sigma-eff", action="store_true", help="Do not replace errors with sigma_eff")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff")
     parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Require |event_mag - baseline_mag| > threshold")
@@ -160,9 +169,6 @@ def main():
         events_args.extend(["--run-max-gap-days", str(args.run_max_gap_days)])
     if args.run_min_duration_days is not None:
         events_args.extend(["--run-min-duration-days", str(args.run_min_duration_days)])
-    if args.run_sum_threshold is not None:
-        events_args.extend(["--run-sum-threshold", str(args.run_sum_threshold)])
-    events_args.extend(["--run-sum-multiplier", str(args.run_sum_multiplier)])
     if args.no_event_prob:
         events_args.append("--no-event-prob")
     if args.p_min_dip is not None:
@@ -174,6 +180,22 @@ def main():
     if args.p_max_jump is not None:
         events_args.extend(["--p-max-jump", str(args.p_max_jump)])
     events_args.extend(["--baseline-func", args.baseline_func])
+    # Baseline kwargs
+    events_args.extend(["--baseline-s0", str(args.baseline_s0)])
+    events_args.extend(["--baseline-w0", str(args.baseline_w0)])
+    events_args.extend(["--baseline-q", str(args.baseline_q)])
+    events_args.extend(["--baseline-jitter", str(args.baseline_jitter)])
+    if args.baseline_sigma_floor is not None:
+        events_args.extend(["--baseline-sigma-floor", str(args.baseline_sigma_floor)])
+    # Magnitude grid bounds
+    if args.mag_min_dip is not None:
+        events_args.extend(["--mag-min-dip", str(args.mag_min_dip)])
+    if args.mag_max_dip is not None:
+        events_args.extend(["--mag-max-dip", str(args.mag_max_dip)])
+    if args.mag_min_jump is not None:
+        events_args.extend(["--mag-min-jump", str(args.mag_min_jump)])
+    if args.mag_max_jump is not None:
+        events_args.extend(["--mag-max-jump", str(args.mag_max_jump)])
     if args.no_sigma_eff:
         events_args.append("--no-sigma-eff")
     if args.allow_missing_sigma_eff:

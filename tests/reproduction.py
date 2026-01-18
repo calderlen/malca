@@ -576,8 +576,18 @@ def build_reproduction_report(
     bayes_p_max_jump: float | None = None,
     # Magnitude grid
     bayes_mag_points: int = 12,
+    bayes_mag_min_dip: float | None = None,
+    bayes_mag_max_dip: float | None = None,
+    bayes_mag_min_jump: float | None = None,
+    bayes_mag_max_jump: float | None = None,
     # Baseline function
     bayes_baseline_func: str = "gp",            # "gp", "gp_masked", "trend"
+    # Baseline kwargs (GP kernel parameters)
+    baseline_s0: float = 0.0005,
+    baseline_w0: float = 0.0031415926535897933,
+    baseline_q: float = 0.7,
+    baseline_jitter: float = 0.006,
+    baseline_sigma_floor: float | None = None,
     # Sigma_eff control
     use_sigma_eff: bool = True,
     require_sigma_eff: bool = True,
@@ -831,6 +841,24 @@ def build_reproduction_report(
                 }
                 selected_baseline_func = baseline_func_map.get(bayes_baseline_func, per_camera_gp_baseline)
 
+                # Build mag grids from min/max/points if bounds are provided
+                mag_grid_dip = None
+                mag_grid_jump = None
+                if bayes_mag_min_dip is not None and bayes_mag_max_dip is not None:
+                    mag_grid_dip = np.linspace(bayes_mag_min_dip, bayes_mag_max_dip, bayes_mag_points)
+                if bayes_mag_min_jump is not None and bayes_mag_max_jump is not None:
+                    mag_grid_jump = np.linspace(bayes_mag_min_jump, bayes_mag_max_jump, bayes_mag_points)
+
+                # Build baseline_kwargs from explicit params
+                baseline_kwargs_dict = dict(
+                    S0=baseline_s0,
+                    w0=baseline_w0,
+                    q=baseline_q,
+                    jitter=baseline_jitter,
+                    sigma_floor=baseline_sigma_floor,
+                    add_sigma_eff_col=True,
+                )
+
                 def bayes(df: pd.DataFrame, band_name: str):
                     dfc = clean_for_bayes(df)
                     if dfc is None or dfc.empty:
@@ -844,6 +872,7 @@ def build_reproduction_report(
                         result = run_bayesian_significance(
                             dfc,
                             baseline_func=selected_baseline_func,
+                            baseline_kwargs=baseline_kwargs_dict,
                             significance_threshold=float(bayes_significance_threshold) if bayes_significance_threshold is not None else 99.99997,
                             p_points=int(bayes_p_points),
                             p_min_dip=bayes_p_min_dip,
@@ -851,6 +880,8 @@ def build_reproduction_report(
                             p_min_jump=bayes_p_min_jump,
                             p_max_jump=bayes_p_max_jump,
                             mag_points=bayes_mag_points,
+                            mag_grid_dip=mag_grid_dip,
+                            mag_grid_jump=mag_grid_jump,
                             trigger_mode=bayes_trigger_mode,
                             logbf_threshold_dip=bayes_logbf_threshold_dip,
                             logbf_threshold_jump=bayes_logbf_threshold_jump,
@@ -1527,6 +1558,17 @@ Examples:
         default="gp",
         help="Baseline function to use: gp (default), gp_masked, or trend.",
     )
+    # Baseline kwargs (GP kernel parameters)
+    parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
+    parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
+    parser.add_argument("--baseline-q", type=float, default=0.7, help="GP kernel Q parameter (default: 0.7)")
+    parser.add_argument("--baseline-jitter", type=float, default=0.006, help="GP jitter term (default: 0.006)")
+    parser.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
+    # Magnitude grid bounds (override auto-detection)
+    parser.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
+    parser.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
+    parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
+    parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
 
     # Sigma_eff control
     parser.add_argument(
@@ -1793,8 +1835,18 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         bayes_p_max_jump=args.p_max_jump,
         # Magnitude grid
         bayes_mag_points=args.mag_points,
+        bayes_mag_min_dip=args.mag_min_dip,
+        bayes_mag_max_dip=args.mag_max_dip,
+        bayes_mag_min_jump=args.mag_min_jump,
+        bayes_mag_max_jump=args.mag_max_jump,
         # Baseline function
         bayes_baseline_func=args.baseline_func,
+        # Baseline kwargs
+        baseline_s0=args.baseline_s0,
+        baseline_w0=args.baseline_w0,
+        baseline_q=args.baseline_q,
+        baseline_jitter=args.baseline_jitter,
+        baseline_sigma_floor=args.baseline_sigma_floor,
         # Sigma_eff control
         use_sigma_eff=use_sigma_eff,
         require_sigma_eff=require_sigma_eff,

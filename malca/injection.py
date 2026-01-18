@@ -205,6 +205,25 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
     }
     use_sigma_eff = not args.no_sigma_eff
     require_sigma_eff = use_sigma_eff and (not args.allow_missing_sigma_eff)
+
+    # Build baseline_kwargs from CLI args
+    baseline_kwargs = dict(
+        S0=args.baseline_s0,
+        w0=args.baseline_w0,
+        q=args.baseline_q,
+        jitter=args.baseline_jitter,
+        sigma_floor=args.baseline_sigma_floor,
+        add_sigma_eff_col=True,
+    )
+
+    # Build mag grids from min/max/points if bounds are provided
+    mag_grid_dip = None
+    mag_grid_jump = None
+    if args.mag_min_dip is not None and args.mag_max_dip is not None:
+        mag_grid_dip = np.linspace(args.mag_min_dip, args.mag_max_dip, args.mag_points)
+    if args.mag_min_jump is not None and args.mag_max_jump is not None:
+        mag_grid_jump = np.linspace(args.mag_min_jump, args.mag_max_jump, args.mag_points)
+
     return dict(
         trigger_mode=args.trigger_mode,
         logbf_threshold_dip=args.logbf_threshold_dip,
@@ -215,6 +234,9 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
         p_max_dip=args.p_max_dip,
         p_min_jump=args.p_min_jump,
         p_max_jump=args.p_max_jump,
+        mag_points=args.mag_points,
+        mag_grid_dip=mag_grid_dip,
+        mag_grid_jump=mag_grid_jump,
         run_min_points=args.run_min_points,
         run_allow_gap_points=args.run_allow_gap_points,
         run_max_gap_days=args.run_max_gap_days,
@@ -223,6 +245,7 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
         use_sigma_eff=use_sigma_eff,
         require_sigma_eff=require_sigma_eff,
         baseline_func=baseline_map.get(args.baseline_func, per_camera_gp_baseline),
+        baseline_kwargs=baseline_kwargs,
     )
 
 
@@ -1444,12 +1467,24 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--p-max-dip", type=float, default=None)
     parser.add_argument("--p-min-jump", type=float, default=None)
     parser.add_argument("--p-max-jump", type=float, default=None)
+    parser.add_argument("--mag-points", type=int, default=12, help="Number of magnitude grid points (default: 12)")
     parser.add_argument("--run-min-points", type=int, default=3)
     parser.add_argument("--run-allow-gap-points", type=int, default=1)
     parser.add_argument("--run-max-gap-days", type=float, default=None)
     parser.add_argument("--run-min-duration-days", type=float, default=0.0)
     parser.add_argument("--baseline-func", type=str, default="trend", choices=["gp", "gp_masked", "trend"],
                         help="Baseline function (default: trend for speed)")
+    # Baseline kwargs (GP kernel parameters)
+    parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
+    parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
+    parser.add_argument("--baseline-q", type=float, default=0.7, help="GP kernel Q parameter (default: 0.7)")
+    parser.add_argument("--baseline-jitter", type=float, default=0.006, help="GP jitter term (default: 0.006)")
+    parser.add_argument("--baseline-sigma-floor", type=float, default=None, help="Minimum sigma floor (default: None)")
+    # Magnitude grid bounds (override auto-detection)
+    parser.add_argument("--mag-min-dip", type=float, default=None, help="Min magnitude for dip grid (overrides auto)")
+    parser.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
+    parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
+    parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
     parser.add_argument("--no-event-prob", action="store_true", default=True,
                         help="Disable event probability computation (default: disabled for speed)")
     parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
