@@ -1606,14 +1606,26 @@ Output structure (default --out-dir output/injection):
     metrics_path = results_dir / "quality_metrics.txt"
     print_quality_summary(metrics, output_path=metrics_path)
 
+    results_ok = results_df
+    if "error" in results_df.columns:
+        results_ok = results_df.loc[results_df["error"].isna()].copy()
+        if len(results_ok) < len(results_df):
+            print(f"Using {len(results_ok)}/{len(results_df)} successful trials for efficiency cube/plots.")
+    if "median_mag" in results_ok.columns:
+        results_ok = results_ok[np.isfinite(results_ok["median_mag"])].copy()
+    if "fractional_depth" in results_ok.columns:
+        results_ok = results_ok[np.isfinite(results_ok["fractional_depth"])].copy()
+
     # Compute cube and generate plots (unless skipped)
     if not args.skip_cube or not args.skip_plots:
-        if "fractional_depth" not in results_df.columns or "median_mag" not in results_df.columns:
+        if "fractional_depth" not in results_ok.columns or "median_mag" not in results_ok.columns:
             print("Warning: Results missing fractional_depth or median_mag columns, skipping 3D cube.")
+        elif results_ok.empty:
+            print("Warning: No successful trials with valid magnitudes/depths; skipping 3D cube.")
         else:
             print("Computing 3D efficiency cube...")
             cube = compute_detection_efficiency_3d(
-                results_df,
+                results_ok,
                 depth_bins=args.depth_bins,
                 duration_bins=args.duration_bins,
                 mag_bins=args.mag_bins,
