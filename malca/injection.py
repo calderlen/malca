@@ -1560,8 +1560,8 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--no-resume", action="store_true", help="Disable resume even if checkpoint exists.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output/checkpoint.")
 
-    parser.add_argument("--trigger-mode", type=str, default="logbf", choices=["logbf", "posterior_prob"],
-                        help="Trigger mode for injection testing (default: logbf for speed)")
+    parser.add_argument("--trigger-mode", type=str, default="posterior_prob", choices=["logbf", "posterior_prob"],
+                        help="Trigger mode for injection testing")
     parser.add_argument("--logbf-threshold-dip", type=float, default=5.0)
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0)
     parser.add_argument("--significance-threshold", type=float, default=99.99997)
@@ -1575,8 +1575,8 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--run-allow-gap-points", type=int, default=1)
     parser.add_argument("--run-max-gap-days", type=float, default=None)
     parser.add_argument("--run-min-duration-days", type=float, default=0.0)
-    parser.add_argument("--baseline-func", type=str, default="trend", choices=["gp", "gp_masked", "trend"],
-                        help="Baseline function (default: trend for speed)")
+    parser.add_argument("--baseline-func", type=str, default="gp" choices=["gp", "gp_masked", "trend"],
+                        help="Baseline function")
     # Baseline kwargs (GP kernel parameters)
     parser.add_argument("--baseline-s0", type=float, default=0.0005, help="GP kernel S0 parameter (default: 0.0005)")
     parser.add_argument("--baseline-w0", type=float, default=0.0031415926535897933, help="GP kernel w0 parameter (default: pi/1000)")
