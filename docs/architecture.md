@@ -41,7 +41,7 @@ graph TB
           EV_FILT[events_filtered.py<br/>Wrapper + Batching + Resume]
           PREFILT[pre_filter.py<br/>Sparse/VSX/Multi-cam]
           EVENTS[events.py<br/>Bayesian Detection]
-          AMP_FILT[filter.py<br/>Signal amplitude (optional)]
+          AMP_FILT[filter.py<br/>Signal amplitude filter]
           POSTFILT[post_filter.py<br/>Posterior/Morphology/Robustness]
 
           MAN_OUT --> EV_FILT
@@ -78,7 +78,7 @@ graph TB
       subgraph "Analysis & Visualization"
           PLOT[plot.py<br/>LC + event plots]
           SCORE_CLI[score.py<br/>Standalone scoring]
-          LTV[ltv/<br/>Long-term variability]
+          LTV[ltv/pipeline.py<br/>Long-term variability]
           FP[fp_analysis.py<br/>Pre/post comparison]
 
           CAND --> PLOT

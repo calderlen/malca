@@ -111,6 +111,7 @@ python -m malca.injection --manifest output/lc_manifest_all.parquet \
 graph TB
     subgraph "Data Sources"
         RAW[ASAS-SN Raw Data<br/>.dat2 files]
+        SKY[SkyPatrol CSVs]
         VSX_CAT[VSX Catalog]
         GAIA[Gaia Catalog]
     end
@@ -141,7 +142,7 @@ graph TB
         EV_FILT[events_filtered.py<br/>Wrapper + Batching]
         PREFILT[pre_filter.py<br/>Quality filters]
         EVENTS[events.py<br/>Bayesian Detection]
-        AMP_FILT[filter.py<br/>Signal amplitude (optional)]
+        AMP_FILT[filter.py<br/>Signal amplitude filter]
         POSTFILT[post_filter.py<br/>Quality filters]
 
         MAN_OUT --> EV_FILT
@@ -186,11 +187,12 @@ graph TB
 
     subgraph "Analysis"
         PLOT[plot.py<br/>Visualization]
-        LTV[ltv/<br/>Long-term variability]
+        LTV[ltv/pipeline.py<br/>Long-term variability]
         FP[fp_analysis.py<br/>FP analysis]
 
         CAND --> PLOT
         RAW -.-> PLOT
+        SKY -.-> PLOT
 
         MAN_OUT --> LTV
         LTV --> LTV_OUT[(LTV Results)]
@@ -216,6 +218,7 @@ graph TB
     BASE -.-> EVENTS
     BASE -.-> REPRO
     SCORE_LIB -.-> EVENTS
+    STATS_LIB -.-> SCORE_LIB
 
     %% Styling
     style EVENTS fill:#9cf,stroke:#333,stroke-width:2px
