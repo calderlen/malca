@@ -49,6 +49,30 @@ python -m malca --help
 python -m malca detect --help
 ```
 
+#### More example variations
+```bash
+# Detect on a single mag bin with logBF triggering (faster)
+python -m malca detect --mag-bin 13_13.5 --workers 8 \
+    --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
+    -- --output output/events_logbf.csv --trigger-mode logbf --baseline-func trend --min-mag-offset 0.1
+
+# Detect on multiple mag bins (writes one output per bin)
+python -m malca detect --mag-bin 12_12.5 12.5_13 13_13.5 \
+    --lc-root /path/to/lcsv2 --index-root /path/to/lcsv2 \
+    -- --output output/lc_events_results.csv --trigger-mode logbf
+
+# Reproduce on built-in candidates using local SkyPatrol CSVs
+python -m malca validate --candidates brayden_candidates --skypatrol-dir input/skypatrol2 \
+    --method bayes --trigger-mode logbf --workers 4
+
+# Reproduce using events.py output directly (uses the 'path' column)
+python -m malca validate --input output/events_logbf.csv --method bayes --trigger-mode logbf
+
+# Injection-recovery quick test (small run)
+python -m malca.injection --manifest output/lc_manifest_all.parquet \
+    --control-sample-size 2000 --max-trials 2000 --workers 4 --overwrite
+```
+
 #### Typical run (large batches)
 1) Build a manifest (map IDs -> light-curve directories):
    ```bash

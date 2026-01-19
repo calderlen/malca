@@ -1688,6 +1688,9 @@ def main():
         chunk_size = 1
 
     total_written = 0
+    total_dip_sig = 0
+    total_jump_sig = 0
+    total_any_sig = 0
 
     class CsvWriter:
         def __init__(self, path: Path):
@@ -1813,10 +1816,25 @@ def main():
     if output_path:
         args.output = str(output_path)
 
+    def count_significant(rows: list[dict]) -> tuple[int, int, int]:
+        dip = 0
+        jump = 0
+        any_sig = 0
+        for row in rows:
+            dip_sig = bool(row.get("dip_significant"))
+            jump_sig = bool(row.get("jump_significant"))
+            if dip_sig:
+                dip += 1
+            if jump_sig:
+                jump += 1
+            if dip_sig or jump_sig:
+                any_sig += 1
+        return dip, jump, any_sig
+
     def write_chunk(chunk_results, is_final=False):
         if not chunk_results: 
             return
-        nonlocal total_written, writer
+        nonlocal total_written, total_dip_sig, total_jump_sig, total_any_sig, writer
         
         # Apply signal amplitude filter if requested
         if args.min_mag_offset is not None and args.min_mag_offset > 0:
@@ -1845,14 +1863,24 @@ def main():
             except Exception as e:
                 log(f"WARNING: Could not update checkpoint log: {e}")
 
+        chunk_dip, chunk_jump, chunk_any = count_significant(chunk_results)
+        total_dip_sig += chunk_dip
+        total_jump_sig += chunk_jump
+        total_any_sig += chunk_any
         total_written += len(chunk_results)
         if is_final:
             if writer is not None:
                 writer.close()
             if args.output:
-                log(f"Wrote {total_written} total rows to {args.output}")
+                log(
+                    f"Wrote {total_written} total rows to {args.output} "
+                    f"(dip_sig={total_dip_sig}, jump_sig={total_jump_sig}, any_sig={total_any_sig})"
+                )
         else:
-            log(f"Wrote chunk: {len(chunk_results)} rows (total: {total_written})")
+            log(
+                f"Wrote chunk: {len(chunk_results)} rows (total: {total_written}) "
+                f"(dip_sig={total_dip_sig}, jump_sig={total_jump_sig}, any_sig={total_any_sig})"
+            )
 
     # Build baseline_kwargs from CLI args
     baseline_kwargs = dict(
