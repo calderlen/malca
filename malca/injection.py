@@ -230,7 +230,6 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
         logbf_threshold_jump=args.logbf_threshold_jump,
         significance_threshold=args.significance_threshold,
         p_points=args.p_points,
-        mag_points=args.mag_points,
         p_min_dip=args.p_min_dip,
         p_max_dip=args.p_max_dip,
         p_min_jump=args.p_min_jump,
@@ -1499,7 +1498,6 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--p-max-dip", type=float, default=None)
     parser.add_argument("--p-min-jump", type=float, default=None)
     parser.add_argument("--p-max-jump", type=float, default=None)
-    parser.add_argument("--mag-points", type=int, default=12, help="Number of magnitude grid points (default: 12)")
     parser.add_argument("--run-min-points", type=int, default=3)
     parser.add_argument("--run-allow-gap-points", type=int, default=1)
     parser.add_argument("--run-max-gap-days", type=float, default=None)
