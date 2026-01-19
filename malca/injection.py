@@ -1430,6 +1430,79 @@ def _build_grid_log(min_val: float, max_val: float, steps: int) -> np.ndarray:
     return np.logspace(np.log10(float(min_val)), np.log10(float(max_val)), int(steps))
 
 
+def _get_non_default_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> dict:
+    non_defaults = {}
+    for action in parser._actions:
+        if action.dest == "help":
+            continue
+        default = action.default
+        value = getattr(args, action.dest, None)
+        if value != default:
+            non_defaults[action.dest] = value
+    return non_defaults
+
+
+def _generate_output_suffix(non_default_args: dict) -> str:
+    ignored_keys = {
+        "out_dir",
+        "out",
+        "cube_out",
+        "plot_dir",
+        "overwrite",
+        "no_resume",
+    }
+    filtered_args = {k: v for k, v in non_default_args.items() if k not in ignored_keys}
+    if not filtered_args:
+        return ""
+
+    def format_value(val: object) -> str:
+        if isinstance(val, bool):
+            return "1" if val else "0"
+        if isinstance(val, float):
+            return f"{val:.2g}".replace(".", "p")
+        if isinstance(val, Path):
+            return val.stem[:20]
+        if isinstance(val, str):
+            return Path(val).stem[:20] if ("/" in val or "\\" in val) else val[:15]
+        return str(val)[:15]
+
+    parts = []
+    priority_keys = [
+        "trigger_mode",
+        "logbf_threshold_dip",
+        "logbf_threshold_jump",
+        "significance_threshold",
+        "baseline_func",
+        "min_mag_offset",
+        "amp_min",
+        "amp_max",
+        "dur_min",
+        "dur_max",
+        "n_injections_per_grid",
+        "skew_min",
+        "skew_max",
+        "mag_err_order",
+        "control_sample_size",
+        "workers",
+    ]
+
+    for key in priority_keys:
+        if key in filtered_args:
+            val = filtered_args[key]
+            short_key = key.replace("threshold_", "thr_").replace("logbf_", "bf_").replace("_", "")
+            parts.append(f"{short_key}={format_value(val)}")
+
+    for key, val in filtered_args.items():
+        if key not in priority_keys and len(parts) < 8:
+            short_key = key.replace("_", "")[:12]
+            parts.append(f"{short_key}={format_value(val)}")
+
+    suffix = "_".join(parts)
+    if len(suffix) > 150:
+        suffix = suffix[:150]
+    return suffix
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run injection-recovery tests for dip detection.",
@@ -1536,17 +1609,20 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--mag-bins", type=int, default=10, help="Number of magnitude bins for cube.")
 
     args = parser.parse_args()
+    non_default_args = _get_non_default_args(args, parser)
+    output_suffix = _generate_output_suffix(non_default_args)
+    output_tag = f"_{output_suffix}" if output_suffix else ""
 
     # Set up output paths with defaults
     out_dir = Path(args.out_dir)
     results_dir = out_dir / "results"
     cubes_dir = out_dir / "cubes"
-    plots_dir = out_dir / "plots"
+    plots_dir = out_dir / f"plots{output_tag}"
 
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_out = args.out if args.out else (results_dir / "injection_results.csv")
-    cube_out = args.cube_out if args.cube_out else (cubes_dir / "efficiency_cube.npz")
+    csv_out = args.out if args.out else (results_dir / f"injection_results{output_tag}.csv")
+    cube_out = args.cube_out if args.cube_out else (cubes_dir / f"efficiency_cube{output_tag}.npz")
     plot_dir = args.plot_dir if args.plot_dir else plots_dir
 
     manifest = pd.read_parquet(args.manifest)
@@ -1603,7 +1679,7 @@ Output structure (default --out-dir output/injection):
 
     # Compute and display quality metrics
     metrics = compute_quality_metrics(results_df)
-    metrics_path = results_dir / "quality_metrics.txt"
+    metrics_path = results_dir / f"quality_metrics{output_tag}.txt"
     print_quality_summary(metrics, output_path=metrics_path)
 
     results_ok = results_df
