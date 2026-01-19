@@ -11,23 +11,25 @@ graph TB
           SKY[SkyPatrol CSVs]
           VSX_CAT[VSX Catalog<br/>vsxcat.csv]
           GAIA[Gaia Catalog<br/>Optional]
+          PERIODIC[Periodic Catalogs<br/>Optional]
       end
 
       subgraph "Core Libraries"
           UTILS[utils.py<br/>LC I/O, cleaning]
           BASE[baseline.py<br/>GP/trend fitting]
           STATS_LIB[stats.py<br/>LC statistics]
+          SCORE_LIB[score.py<br/>Event score utils]
       end
 
       subgraph "Data Management"
-          MAN[manifest.py<br/>Build source_id → path index]
+          MAN[manifest.py<br/>Build source_id -> path index]
           RAW --> MAN
           MAN --> MAN_OUT[(Manifest<br/>Parquet)]
       end
 
       subgraph "VSX Subpackage"
           VSX_FILT[vsx/filter.py<br/>Clean VSX classes]
-          VSX_CROSS[vsx/crossmatch.py<br/>ASASSN ↔ VSX matching]
+          VSX_CROSS[vsx/crossmatch.py<br/>ASASSN <-> VSX matching]
           VSX_REPRO[vsx/reproducibility.py<br/>VSX object recovery]
           VSX_CAT --> VSX_FILT
           VSX_CAT --> VSX_CROSS
@@ -39,16 +41,18 @@ graph TB
           EV_FILT[events_filtered.py<br/>Wrapper + Batching + Resume]
           PREFILT[pre_filter.py<br/>Sparse/VSX/Multi-cam]
           EVENTS[events.py<br/>Bayesian Detection]
-          FILT[filter.py<br/>Signal amplitude]
+          AMP_FILT[filter.py<br/>Signal amplitude (optional)]
           POSTFILT[post_filter.py<br/>Posterior/Morphology/Robustness]
 
           MAN_OUT --> EV_FILT
-          VSX_CLEAN -.-> PREFILT
+          VSX_MATCH -.-> PREFILT
           EV_FILT --> PREFILT
           PREFILT --> EVENTS
-          FILT -.-> EVENTS
           EVENTS --> POSTFILT
+          EVENTS -.-> AMP_FILT
+          AMP_FILT -.-> POSTFILT
           GAIA -.-> POSTFILT
+          PERIODIC -.-> POSTFILT
           POSTFILT --> CAND[(Final Candidates<br/>CSV/Parquet)]
       end
 
@@ -73,16 +77,16 @@ graph TB
 
       subgraph "Analysis & Visualization"
           PLOT[plot.py<br/>LC + event plots]
-          SCORE[score.py<br/>Event scoring]
-          LTV[ltv.py<br/>Seasonal trends]
+          SCORE_CLI[score.py<br/>Standalone scoring]
+          LTV[ltv/<br/>Long-term variability]
           FP[fp_analysis.py<br/>Pre/post comparison]
 
           CAND --> PLOT
           RAW -.-> PLOT
           SKY -.-> PLOT
 
-          CAND --> SCORE
-          SCORE --> SCORE_OUT[(Scored Events)]
+          CAND -.-> SCORE_CLI
+          SCORE_CLI --> SCORE_OUT[(Scored Events)]
 
           MAN_OUT --> LTV
           LTV --> LTV_OUT[(LTV Results)]
@@ -93,17 +97,20 @@ graph TB
 
       subgraph "Multi-Wavelength Characterization"
           CHAR[characterize.py<br/>Gaia + Dust + YSO + Catalogs]
+          CLASSIFY[classify.py<br/>Dipper classification]
           GAIA_CAT[Gaia DR3<br/>via astroquery]
           DUST_MAP[dustmaps3d<br/>Wang+ 2025]
           STARHORSE[StarHorse<br/>Local catalog]
           AUX_CAT[Auxiliary Catalogs<br/>BANYAN/IPHAS/Clusters]
 
-          CAND --> CHAR
+          CAND -.-> CHAR
           GAIA_CAT --> CHAR
           DUST_MAP -.-> CHAR
           STARHORSE -.-> CHAR
           AUX_CAT -.-> CHAR
           CHAR --> CHAR_OUT[(Characterized<br/>Candidates)]
+          CHAR_OUT -.-> CLASSIFY
+          CLASSIFY --> CLASSIFY_OUT[(Classified<br/>Candidates)]
       end
 
       subgraph "CLI Entry Point"
@@ -113,7 +120,7 @@ graph TB
           CLI -.validate.-> REPRO
           CLI -.validation.-> VALID
           CLI -.plot.-> PLOT
-          CLI -.score.-> SCORE
+          CLI -.score.-> SCORE_CLI
           CLI -.filter.-> POSTFILT
       end
 
@@ -122,7 +129,7 @@ graph TB
       UTILS -.-> REPRO
       UTILS -.-> INJ
       UTILS -.-> PLOT
-      UTILS -.-> SCORE
+      UTILS -.-> SCORE_LIB
       UTILS -.-> LTV
       UTILS -.-> PREFILT
 
@@ -130,10 +137,10 @@ graph TB
       BASE -.-> REPRO
       BASE -.-> PLOT
 
-      STATS_LIB -.-> SCORE
+      STATS_LIB -.-> SCORE_LIB
       
-      %% Score is used within events.py for dipper scoring
-      SCORE -.-> EVENTS
+      %% score.py used within events.py for dipper scoring
+      SCORE_LIB -.-> EVENTS
 
       %% Styling
       style REPRO fill:#ff9,stroke:#333,stroke-width:3px,color:#000
@@ -188,8 +195,8 @@ graph TB
 
 #### **Analysis & Visualization**
 - **`plot.py`**: Light curve plotting with event overlays
-- **`score.py`**: Event scoring (dip/microlensing quality metrics)
-- **`ltv.py`**: Long-term variability (seasonal trend analysis)
+- **`score.py`**: Event scoring (library used in `events.py` + standalone CLI)
+- **`ltv/`**: Long-term variability pipeline (seasonal trend analysis)
 - **`fp_analysis.py`**: False-positive reduction analysis (pre vs post filter)
 - **`characterize.py`**: Multi-wavelength characterization (Gaia DR3, dustmaps3d, StarHorse, YSO classification)
   - Queries Gaia DR3 for astrometry, astrophysics, 2MASS/AllWISE photometry

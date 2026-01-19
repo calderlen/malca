@@ -79,9 +79,9 @@ def validate_detections(
     # Determine significance column if not provided
     if significance_column is None:
         if event_type == "dip":
-            significance_column = "dip_significant"
+            significance_column = "dip_significant" if "dip_significant" in results_df.columns else None
         elif event_type == "jump":
-            significance_column = "jump_significant"
+            significance_column = "jump_significant" if "jump_significant" in results_df.columns else None
         else:  # either
             significance_column = None
     
@@ -103,6 +103,23 @@ def validate_detections(
         raise ValueError(f"Cannot find ID column '{id_column}' in candidates")
     
     # Filter to significant detections if column exists
+    legacy_peaks_mask = None
+    if significance_column is None or significance_column not in results_df.columns:
+        if event_type in {"dip", "either"} and (
+            "g_n_peaks" in results_df.columns or "v_n_peaks" in results_df.columns
+        ):
+            g_peaks = (
+                results_df["g_n_peaks"].fillna(0).astype(float)
+                if "g_n_peaks" in results_df.columns
+                else pd.Series(0, index=results_df.index, dtype=float)
+            )
+            v_peaks = (
+                results_df["v_n_peaks"].fillna(0).astype(float)
+                if "v_n_peaks" in results_df.columns
+                else pd.Series(0, index=results_df.index, dtype=float)
+            )
+            legacy_peaks_mask = (g_peaks > 0) | (v_peaks > 0)
+
     if significance_column and significance_column in results_df.columns:
         significant_mask = results_df[significance_column].astype(bool)
         if event_type == "either" and "jump_significant" in results_df.columns:
@@ -111,6 +128,14 @@ def validate_detections(
             results_df[significant_mask][id_column].astype(str)
             if id_column in results_df.columns
             else results_df[significant_mask]["path"].apply(
+                lambda x: Path(x).stem.replace(".dat2", "").replace(".csv", "")
+            )
+        )
+    elif legacy_peaks_mask is not None:
+        detected_ids = set(
+            results_df[legacy_peaks_mask][id_column].astype(str)
+            if id_column in results_df.columns
+            else results_df[legacy_peaks_mask]["path"].apply(
                 lambda x: Path(x).stem.replace(".dat2", "").replace(".csv", "")
             )
         )
@@ -392,4 +417,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

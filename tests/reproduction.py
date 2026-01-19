@@ -714,19 +714,64 @@ def build_reproduction_report(
                 print(f"[PRE-FILTER] Warning: pre-filter failed: {e}")
                 print(f"[PRE-FILTER] Continuing without pre-filtering...")
 
+    baseline_func_map = {
+        "gp": per_camera_gp_baseline,
+        "gp_masked": per_camera_gp_baseline_masked,
+        "trend": per_camera_trend_baseline,
+    }
+    selected_baseline_func = baseline_func_map.get(baseline_func, per_camera_gp_baseline)
+    baseline_kwargs_dict = dict(
+        S0=baseline_s0,
+        w0=baseline_w0,
+        q=baseline_q,
+        jitter=baseline_jitter,
+        sigma_floor=baseline_sigma_floor,
+        add_sigma_eff_col=True,
+    )
+
     if method == "naive":
-        raise DeprecationWarning(
-            "The 'naive' method is deprecated and has been removed. "
-            "Please use method='bayes' instead, which is the current implementation. "
-            "The naive method used legacy code from malca.old.lc_events_naive."
-        )
+        if records_map is None or not records_map:
+            raise SystemExit("Naive method requires light-curve paths. Provide --manifest or --skypatrol-dir.")
+
+        from malca.old.lc_events_naive import lc_proc_naive
+
+        rows = []
+        for mag_bin in sorted(records_map):
+            for rec in records_map[mag_bin]:
+                try:
+                    row = lc_proc_naive(
+                        rec,
+                        baseline_kwargs_dict,
+                        baseline_func=selected_baseline_func,
+                        metrics_baseline_func=selected_baseline_func,
+                        metrics_dip_threshold=metrics_dip_threshold,
+                    )
+                    rows.append(row)
+                except Exception as e:
+                    if verbose:
+                        print(f"[DEBUG] naive {rec.get('asas_sn_id')}: {e}")
 
     elif method == "biweight":
-        raise DeprecationWarning(
-            "The 'biweight' method is deprecated and has been removed. "
-            "Please use method='bayes' instead, which is the current implementation. "
-            "The biweight method used legacy code from malca.old.lc_events."
-        )
+        if records_map is None or not records_map:
+            raise SystemExit("Biweight method requires light-curve paths. Provide --manifest or --skypatrol-dir.")
+
+        from malca.old.lc_events import lc_proc as lc_proc_biweight
+
+        rows = []
+        for mag_bin in sorted(records_map):
+            for rec in records_map[mag_bin]:
+                try:
+                    row = lc_proc_biweight(
+                        rec,
+                        mode="dips",
+                        peak_kwargs=None,
+                        baseline_func=selected_baseline_func,
+                        baseline_kwargs=baseline_kwargs_dict,
+                    )
+                    rows.append(row)
+                except Exception as e:
+                    if verbose:
+                        print(f"[DEBUG] biweight {rec.get('asas_sn_id')}: {e}")
 
     elif method == "bayes":
         if records_map is None or not records_map:
@@ -834,13 +879,6 @@ def build_reproduction_report(
                     return result
 
                 # Select baseline function
-                baseline_func_map = {
-                    "gp": per_camera_gp_baseline,
-                    "gp_masked": per_camera_gp_baseline_masked,
-                    "trend": per_camera_trend_baseline,
-                }
-                selected_baseline_func = baseline_func_map.get(baseline_func, per_camera_gp_baseline)
-
                 # Build mag grids from min/max/points if bounds are provided
                 mag_grid_dip = None
                 mag_grid_jump = None
@@ -848,16 +886,6 @@ def build_reproduction_report(
                     mag_grid_dip = np.linspace(mag_min_dip, mag_max_dip, mag_points)
                 if mag_min_jump is not None and mag_max_jump is not None:
                     mag_grid_jump = np.linspace(mag_min_jump, mag_max_jump, mag_points)
-
-                # Build baseline_kwargs from explicit params
-                baseline_kwargs_dict = dict(
-                    S0=baseline_s0,
-                    w0=baseline_w0,
-                    q=baseline_q,
-                    jitter=baseline_jitter,
-                    sigma_floor=baseline_sigma_floor,
-                    add_sigma_eff_col=True,
-                )
 
                 def bayes(df: pd.DataFrame, band_name: str):
                     dfc = clean_for_bayes(df)
@@ -1473,9 +1501,9 @@ Examples:
     # Bayesian detection settings
     parser.add_argument(
         "--method",
-        choices=("bayes",),
+        choices=("bayes", "naive", "biweight"),
         default="bayes",
-        help="Detection method. Only 'bayes' (Bayesian) is currently supported.",
+        help="Detection method: bayes (Bayesian), naive (legacy per-point), biweight (legacy delta).",
     )
     parser.add_argument(
         "--trigger-mode",

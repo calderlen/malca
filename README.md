@@ -119,6 +119,7 @@ graph TB
         UTILS[utils.py<br/>LC I/O, cleaning]
         BASE[baseline.py<br/>GP/trend fitting]
         STATS_LIB[stats.py<br/>Statistics]
+        SCORE_LIB[score.py<br/>Event score utils]
     end
 
     subgraph "Data Management"
@@ -140,19 +141,31 @@ graph TB
         EV_FILT[events_filtered.py<br/>Wrapper + Batching]
         PREFILT[pre_filter.py<br/>Quality filters]
         EVENTS[events.py<br/>Bayesian Detection]
-        FILT[filter.py<br/>Signal amplitude]
-        SCORE[score.py<br/>Event scoring]
+        AMP_FILT[filter.py<br/>Signal amplitude (optional)]
         POSTFILT[post_filter.py<br/>Quality filters]
 
         MAN_OUT --> EV_FILT
-        VSX_CLEAN -.-> PREFILT
+        VSX_MATCH -.-> PREFILT
         EV_FILT --> PREFILT
         PREFILT --> EVENTS
-        FILT -.-> EVENTS
-        SCORE -.-> EVENTS
         EVENTS --> POSTFILT
+        EVENTS -.-> AMP_FILT
+        AMP_FILT -.-> POSTFILT
         GAIA -.-> POSTFILT
         POSTFILT --> CAND[(Final Candidates)]
+    end
+
+    subgraph "Post-Detection"
+        SCORE_CLI[score.py<br/>Standalone scoring]
+        CHAR[characterize.py<br/>Multi-wavelength]
+        CLASSIFY[classify.py<br/>Dipper classification]
+
+        CAND -.-> SCORE_CLI
+        SCORE_CLI --> SCORE_OUT[(Scores)]
+        CAND -.-> CHAR
+        CHAR --> CHAR_OUT[(Characterized)]
+        CHAR_OUT -.-> CLASSIFY
+        CLASSIFY --> CLASSIFY_OUT[(Classified)]
     end
 
     subgraph "Testing & Validation (tests/)"
@@ -173,7 +186,7 @@ graph TB
 
     subgraph "Analysis"
         PLOT[plot.py<br/>Visualization]
-        LTV[ltv.py<br/>Seasonal trends]
+        LTV[ltv/<br/>Long-term variability]
         FP[fp_analysis.py<br/>FP analysis]
 
         CAND --> PLOT
@@ -191,18 +204,18 @@ graph TB
         CLI -.-> MAN
         CLI -.-> EV_FILT
         CLI -.-> REPRO
+        CLI -.-> VALID
         CLI -.-> PLOT
+        CLI -.-> SCORE_CLI
+        CLI -.-> POSTFILT
     end
     
-    %% Score outputs (outside subgraph to avoid cycle)
-    CAND --> SCORE_STANDALONE[score.py<br/>Standalone scoring]
-    SCORE_STANDALONE --> SCORE_OUT[(Scores)]
-
     %% Dependencies
     UTILS -.-> EVENTS
     UTILS -.-> REPRO
     BASE -.-> EVENTS
     BASE -.-> REPRO
+    SCORE_LIB -.-> EVENTS
 
     %% Styling
     style EVENTS fill:#9cf,stroke:#333,stroke-width:2px
