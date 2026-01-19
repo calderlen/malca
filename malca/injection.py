@@ -230,6 +230,7 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
         logbf_threshold_jump=args.logbf_threshold_jump,
         significance_threshold=args.significance_threshold,
         p_points=args.p_points,
+        mag_points=args.mag_points,
         p_min_dip=args.p_min_dip,
         p_max_dip=args.p_max_dip,
         p_min_jump=args.p_min_jump,
@@ -249,18 +250,37 @@ def _build_detection_kwargs(args: argparse.Namespace) -> dict:
     )
 
 
-def _default_detection_func(df: pd.DataFrame, detection_kwargs: dict) -> dict:
+def _default_detection_func(df: pd.DataFrame, detection_kwargs: dict, min_mag_offset: float = 0.0) -> dict:
     res = run_bayesian_significance(df, **detection_kwargs)
     dip = res["dip"]
     jump = res["jump"]
+
+    baseline_mag = float(dip.get("baseline_mag", jump.get("baseline_mag", np.nan)))
+    dip_best_mag_event = float(dip.get("best_mag_event", np.nan))
+    jump_best_mag_event = float(jump.get("best_mag_event", np.nan))
+
+    # Apply signal amplitude filter if min_mag_offset > 0
+    dip_significant = bool(dip["significant"])
+    jump_significant = bool(jump["significant"])
+    if min_mag_offset > 0 and np.isfinite(baseline_mag):
+        dip_diff = abs(dip_best_mag_event - baseline_mag) if np.isfinite(dip_best_mag_event) else 0.0
+        jump_diff = abs(jump_best_mag_event - baseline_mag) if np.isfinite(jump_best_mag_event) else 0.0
+        if dip_diff <= min_mag_offset:
+            dip_significant = False
+        if jump_diff <= min_mag_offset:
+            jump_significant = False
+
     return dict(
-        detected=bool(dip["significant"]),
-        dip_significant=bool(dip["significant"]),
-        jump_significant=bool(jump["significant"]),
+        detected=dip_significant,
+        dip_significant=dip_significant,
+        jump_significant=jump_significant,
         dip_bayes_factor=float(dip["bayes_factor"]),
         jump_bayes_factor=float(jump["bayes_factor"]),
         dip_best_p=float(dip["best_p"]),
         jump_best_p=float(jump["best_p"]),
+        baseline_mag=baseline_mag,
+        dip_best_mag_event=dip_best_mag_event,
+        jump_best_mag_event=jump_best_mag_event,
     )
 
 
@@ -288,6 +308,7 @@ def _simulate_trial(
     skew_range: tuple[float, float],
     mag_err_poly: np.poly1d | None,
     detection_kwargs: dict,
+    min_mag_offset: float,
     seed: int,
 ) -> dict:
     rng = np.random.default_rng(seed + int(trial_index))
@@ -369,7 +390,11 @@ def _simulate_trial(
         skewness = rng.uniform(skew_range[0], skew_range[1])
         
         df_injected = inject_dip(df, t_center, duration, amplitude, skewness, mag_err_poly)
-        detection_result = _default_detection_func(df_injected, detection_kwargs)
+        detection_result = _default_detection_func(
+            df_injected,
+            detection_kwargs,
+            min_mag_offset=min_mag_offset,
+        )
 
         # Convert amplitude (mag) to fractional transit depth
         fractional_depth = 1.0 - 10 ** (-0.4 * amplitude)
@@ -404,6 +429,7 @@ def _init_worker(
     skew_range: tuple[float, float],
     mag_err_poly: np.poly1d | None,
     detection_kwargs: dict,
+    min_mag_offset: float,
     seed: int,
 ) -> None:
     _GLOBAL["control_ids"] = control_ids
@@ -413,6 +439,7 @@ def _init_worker(
     _GLOBAL["skew_range"] = skew_range
     _GLOBAL["mag_err_poly"] = mag_err_poly
     _GLOBAL["detection_kwargs"] = detection_kwargs
+    _GLOBAL["min_mag_offset"] = min_mag_offset
     _GLOBAL["seed"] = seed
 
 
@@ -429,6 +456,7 @@ def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
                 skew_range=_GLOBAL["skew_range"],
                 mag_err_poly=_GLOBAL["mag_err_poly"],
                 detection_kwargs=_GLOBAL["detection_kwargs"],
+                min_mag_offset=float(_GLOBAL["min_mag_offset"]),
                 seed=int(_GLOBAL["seed"]),
             )
         )
@@ -482,6 +510,7 @@ def run_injection_recovery(
     control_sample: pd.DataFrame,
     *,
     detection_kwargs: dict,
+    min_mag_offset: float = 0.0,
     total_trials: int = 10000,
     amplitude_range: tuple[float, float] = (0.05, 2.0),
     duration_range: tuple[float, float] = (1.0, 300.0),
@@ -596,6 +625,7 @@ def run_injection_recovery(
                 skew_range=skew_range,
                 mag_err_poly=mag_err_poly,
                 detection_kwargs=detection_kwargs,
+                min_mag_offset=min_mag_offset,
                 seed=seed,
             )
             results.append(res)
@@ -624,6 +654,7 @@ def run_injection_recovery(
             skew_range,
             mag_err_poly,
             detection_kwargs,
+            min_mag_offset,
             seed,
         ),
     ) as ex:
@@ -1463,6 +1494,7 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--logbf-threshold-jump", type=float, default=5.0)
     parser.add_argument("--significance-threshold", type=float, default=99.99997)
     parser.add_argument("--p-points", type=int, default=15)
+    parser.add_argument("--mag-points", type=int, default=12, help="Number of points in the magnitude grid")
     parser.add_argument("--p-min-dip", type=float, default=None)
     parser.add_argument("--p-max-dip", type=float, default=None)
     parser.add_argument("--p-min-jump", type=float, default=None)
@@ -1491,6 +1523,8 @@ Output structure (default --out-dir output/injection):
                         help="Enable event probability computation (slower)")
     parser.add_argument("--no-sigma-eff", action="store_true")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true")
+    parser.add_argument("--min-mag-offset", type=float, default=0.1,
+                        help="Require |event_mag - baseline_mag| > threshold (default: 0.1)")
 
     # Post-processing options
     parser.add_argument("--skip-cube", action="store_true", help="Skip computing efficiency cube.")
@@ -1544,6 +1578,7 @@ Output structure (default --out-dir output/injection):
     run_injection_recovery(
         control_sample,
         detection_kwargs=detection_kwargs,
+        min_mag_offset=args.min_mag_offset,
         total_trials=total_trials,
         amplitude_range=(args.amp_min, args.amp_max),
         duration_range=(args.dur_min, args.dur_max),
