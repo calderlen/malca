@@ -90,11 +90,11 @@ python -m malca.injection --manifest output/lc_manifest_all.parquet \
        --trigger-mode posterior_prob --baseline-func gp --min-mag-offset 0.1
    ```
    - The wrapper builds/loads the manifest, runs pre-filters from `malca/pre_filter.py`, then calls `malca/events.py` in batches.
-   - Pre-filters: sparse LC removal, multi-camera requirement, VSX tagging (sep_arcsec/class)
+   - Pre-filters: sparse LC removal, multi-camera requirement, VSX filtering (tags retained on survivors)
    - Resume: if interrupted, it skips already processed paths using the `*_PROCESSED.txt` checkpoint next to the output.
    - VSX tags are saved to `prefilter/vsx_tags/vsx_tags_<magbin>.csv` and merged into events results.
-   - To disable VSX tagging: add `--skip-vsx`
-   - To filter instead of tag: add `--vsx-mode filter`
+   - To disable VSX handling: add `--skip-vsx`
+   - To tag instead of filter: add `--vsx-mode tag`
    - All events.py arguments (trigger-mode, baseline-func, thresholds, etc.) are passed directly to events_filtered.py
 
 3) Post-filter events (strict quality cuts on candidates only):
@@ -254,8 +254,8 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 - Post-filter only:
   `python -m malca.post_filter --input /home/lenhart.106/code/malca/output/results.parquet --output /home/lenhart.106/code/malca/output/results_filtered.parquet`
   - VSX handling in pre-filter:
-    - Default is tag-only: adds `sep_arcsec` and `class` columns without removing matches.
-    - Use `--vsx-mode filter` (with `--skip-vsx` off) to drop VSX matches.
+    - Default is filter: drops VSX matches, but keeps `sep_arcsec` and `class` on survivors.
+    - Use `--vsx-mode tag` (with `--skip-vsx` off) to keep all matches and only tag.
     - When using `events_filtered.py`, tags are also merged into events results and saved to `prefilter/vsx_tags/vsx_tags_<magbin>.csv`.
 - Targeted reproduction of specific candidates (Bayesian only):
   ```bash
@@ -450,10 +450,10 @@ pip install -e ".[multiwavelength]"
 
 ### Notes
 - Always generate the manifest first; everything else depends on knowing where each `<asas_sn_id>.dat2` lives.
-- VSX tagging is enabled by default in `events_filtered.py` - uses pre-crossmatched file `input/vsx/asassn_x_vsx_matches_20250919_2252.csv`
-  - To disable tagging: add `--skip-vsx` flag
-  - To filter instead of tag: add `--vsx-mode filter`
-  - Tags are stored in `prefilter/vsx_tags/vsx_tags_<magbin>.csv` and merged into events results.
+- VSX filtering is enabled by default in `events_filtered.py` - uses pre-crossmatched file `input/vsx/asassn_x_vsx_matches_20250919_2252.csv`
+  - To disable VSX handling: add `--skip-vsx` flag
+  - To tag instead of filter: add `--vsx-mode tag`
+  - Tags are stored in `prefilter/vsx_tags/vsx_tags_<magbin>.csv` and merged into events results (even when filtering).
   - To use a different crossmatch file: `--vsx-crossmatch /path/to/crossmatch.csv`
   - Crossmatch file must have columns: `asas_sn_id`, `sep_arcsec`, `class`
 - Bright nearby star (BNS) filtering is NOT needed - ASAS-SN already filtered this during LC generation

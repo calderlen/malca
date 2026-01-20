@@ -458,7 +458,7 @@ def apply_pre_filters(
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
     vsx_crossmatch_csv: str | Path = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
-    vsx_mode: str = "tag",
+    vsx_mode: str = "filter",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,
@@ -487,7 +487,7 @@ def apply_pre_filters(
     apply_* : bool
         Whether to apply each filter
     vsx_mode : str
-        "tag" to attach VSX metadata only, "filter" to remove VSX matches
+        "tag" to attach VSX metadata only, "filter" to remove VSX matches (default)
     n_workers : int
         Number of parallel workers for computing stats (default 1 = sequential).
         Filters 2 and 3 (sparse, multi_camera) can benefit from parallelization.
