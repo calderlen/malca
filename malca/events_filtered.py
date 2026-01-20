@@ -249,6 +249,7 @@ def main():
 
     manifest_file = Path(args.manifest_file).expanduser() if args.manifest_file else (manifests_dir / f"lc_manifest_{mag_bin_tag}.parquet")
     filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (prefilter_dir / f"lc_filtered_{mag_bin_tag}.parquet")
+    stats_checkpoint_file = prefilter_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
 
     # Write a simple run log with the command and key paths.
     run_log = out_dir / "run.log"
@@ -299,7 +300,6 @@ def main():
         log(f"Loaded {len(df_manifest)} sources")
 
     # Step 2: Apply pre-filters
-    stats_checkpoint_file = prefilter_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
 
     if args.force_filter or not filtered_file.exists():
         log(f"\nApplying pre-filters with {args.workers} workers...")
