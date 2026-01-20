@@ -14,6 +14,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -38,20 +40,17 @@ def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
         raise
 
 
-def parse_output_path(events_args: list[str]) -> Path | None:
-    """Find --output value in events args if provided."""
-    for i, arg in enumerate(events_args):
-        if arg == "--output" and i + 1 < len(events_args):
-            return Path(events_args[i + 1]).expanduser()
-    return None
-
-
 def parse_output_format(events_args: list[str]) -> str:
     """Find --output-format value in events args if provided."""
     for i, arg in enumerate(events_args):
         if arg == "--output-format" and i + 1 < len(events_args):
             return str(events_args[i + 1]).lower()
     return "csv"
+
+
+def default_run_dir(base_root: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return base_root / "runs" / timestamp
 
 
 def clear_existing_output(path: Path | None, fmt: str, quiet: bool = False) -> None:
@@ -103,8 +102,10 @@ def main():
     parser.add_argument("--min-cameras", type=int, default=2, help="Min cameras required")
     parser.add_argument("--skip-sparse", action="store_true", help="Skip sparse LC filter")
     parser.add_argument("--skip-multi-camera", action="store_true", help="Skip multi-camera filter")
-    parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX known variable filter")
+    parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX crossmatch/tagging")
     parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
+    parser.add_argument("--vsx-mode", type=str, default="tag", choices=["tag", "filter"],
+                        help="VSX handling: tag adds sep_arcsec/class columns, filter removes matches (default: tag)")
     parser.add_argument("--vsx-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="Path to pre-crossmatched VSX CSV (with asas_sn_id, sep_arcsec, class)")
     parser.add_argument("--workers", type=int, default=10, help="Workers for parallel processing")
     parser.add_argument("--stats-chunk-size", type=int, default=5000, help="Rows per checkpoint save during stats computation")
@@ -141,7 +142,9 @@ def main():
     parser.add_argument("--no-sigma-eff", action="store_true", help="Do not replace errors with sigma_eff")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff")
     parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Require |event_mag - baseline_mag| > threshold")
-    parser.add_argument("--output", type=str, default=None, help="Output path for results")
+    parser.add_argument("--output", type=str, default=None, help="Output path for results (default: <out_dir>/lc_events_results.csv)")
+    parser.add_argument("--out-dir", type=str, default=None,
+                        help="Directory for all outputs (default: output/runs/<timestamp>)")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows")
 
@@ -201,8 +204,6 @@ def main():
     if args.allow_missing_sigma_eff:
         events_args.append("--allow-missing-sigma-eff")
     events_args.extend(["--min-mag-offset", str(args.min_mag_offset)])
-    if args.output is not None:
-        events_args.extend(["--output", args.output])
     events_args.extend(["--output-format", args.output_format])
     events_args.extend(["--chunk-size", str(args.chunk_size)])
 
@@ -214,20 +215,67 @@ def main():
     mag_bin_tag = args.mag_bin[0] if len(args.mag_bin) == 1 else "multi"
 
     # IMPORTANT: never write to filesystem root (/output). Default to a writable directory.
-    events_output = parse_output_path(events_args)
     events_format = parse_output_format(events_args)
-    if args.filtered_file is not None:
+    base_output_root = Path("/home/lenhart.106/code/malca/output")
+    if args.out_dir is not None:
+        out_dir = Path(args.out_dir).expanduser()
+    elif args.filtered_file is not None:
         out_dir = Path(args.filtered_file).expanduser().parent
     elif args.manifest_file is not None:
         out_dir = Path(args.manifest_file).expanduser().parent
-    elif events_output is not None:
-        out_dir = events_output.parent
+    elif args.output is not None:
+        out_dir = Path(args.output).expanduser().parent
     else:
-        out_dir = Path("/home/lenhart.106/code/malca/output")
+        out_dir = default_run_dir(base_output_root)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest_file = Path(args.manifest_file).expanduser() if args.manifest_file else (out_dir / f"lc_manifest_{mag_bin_tag}.parquet")
-    filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (out_dir / f"lc_filtered_{mag_bin_tag}.parquet")
+    manifests_dir = out_dir / "manifests"
+    prefilter_dir = out_dir / "prefilter"
+    paths_dir = out_dir / "paths"
+    results_dir = out_dir / "results"
+    for d in (manifests_dir, prefilter_dir, paths_dir, results_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    if args.output is None:
+        events_output = results_dir / "lc_events_results.csv"
+    else:
+        events_output = Path(args.output).expanduser()
+        if args.out_dir is not None and not events_output.is_absolute():
+            events_output = out_dir / events_output
+        elif args.out_dir is None and not events_output.is_absolute():
+            events_output = out_dir / events_output
+
+    events_args.extend(["--output", str(events_output)])
+
+    manifest_file = Path(args.manifest_file).expanduser() if args.manifest_file else (manifests_dir / f"lc_manifest_{mag_bin_tag}.parquet")
+    filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (prefilter_dir / f"lc_filtered_{mag_bin_tag}.parquet")
+
+    # Write a simple run log with the command and key paths.
+    run_log = out_dir / "run.log"
+    try:
+        orig_argv = getattr(sys, "orig_argv", None)
+        cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
+        events_cmd_preview = shlex.join([sys.executable, "-m", "malca.events", *events_args, "--", "<paths_file>"])
+        run_log.write_text(
+            "\n".join([
+                f"timestamp: {datetime.now().isoformat()}",
+                f"command: {cmd}",
+                f"events_cmd: {events_cmd_preview}",
+                f"out_dir: {out_dir}",
+                f"manifests_dir: {manifests_dir}",
+                f"prefilter_dir: {prefilter_dir}",
+                f"paths_dir: {paths_dir}",
+                f"results_dir: {results_dir}",
+                f"results_output: {events_output}",
+                f"manifest_file: {manifest_file}",
+                f"filtered_file: {filtered_file}",
+                f"stats_checkpoint: {stats_checkpoint_file}",
+                f"rejected_pre_filter: {prefilter_dir / f'rejected_pre_filter_{mag_bin_tag}.csv'}",
+            ]) + "\n"
+        )
+    except Exception as e:
+        if args.verbose:
+            print(f"Warning: could not write run log: {e}")
 
     # Step 1: Build or load manifest
     if args.force_manifest or not manifest_file.exists():
@@ -251,7 +299,7 @@ def main():
         log(f"Loaded {len(df_manifest)} sources")
 
     # Step 2: Apply pre-filters
-    stats_checkpoint_file = out_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
+    stats_checkpoint_file = prefilter_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
 
     if args.force_filter or not filtered_file.exists():
         log(f"\nApplying pre-filters with {args.workers} workers...")
@@ -266,12 +314,13 @@ def main():
             min_points_per_day=args.min_points_per_day,
             apply_vsx=not args.skip_vsx,
             vsx_max_sep_arcsec=args.vsx_max_sep,
+            vsx_mode=args.vsx_mode,
             vsx_crossmatch_csv=args.vsx_crossmatch,
             apply_multi_camera=not args.skip_multi_camera,
             min_cameras=args.min_cameras,
             n_workers=args.workers,
             show_tqdm=args.verbose,
-            rejected_log_csv=str(out_dir / f"rejected_pre_filter_{mag_bin_tag}.csv"),
+            rejected_log_csv=str(prefilter_dir / f"rejected_pre_filter_{mag_bin_tag}.csv"),
             stats_checkpoint=str(stats_checkpoint_file),
             stats_chunk_size=args.stats_chunk_size,
         )
@@ -287,6 +336,23 @@ def main():
     # Step 3: Construct file paths (use full dat_path for events.py input)
     file_col = "dat_path" if "dat_path" in df_filtered.columns else "path"
 
+    vsx_tags_file = None
+    if not args.skip_vsx and "sep_arcsec" in df_filtered.columns and "class" in df_filtered.columns:
+        vsx_tags_dir = prefilter_dir / "vsx_tags"
+        vsx_tags_dir.mkdir(parents=True, exist_ok=True)
+        vsx_tags_file = vsx_tags_dir / f"vsx_tags_{mag_bin_tag}.csv"
+        tag_df = df_filtered[[file_col, "sep_arcsec", "class"]].rename(columns={file_col: "path"})
+        tag_df.to_csv(vsx_tags_file, index=False)
+        events_args.extend(["--metadata-csv", str(vsx_tags_file)])
+        if run_log.exists():
+            try:
+                with run_log.open("a") as f:
+                    f.write(f"vsx_tags: {vsx_tags_file}\n")
+                    f.write(f"events_metadata_csv: {vsx_tags_file}\n")
+            except Exception as e:
+                if args.verbose:
+                    print(f"Warning: could not update run log with vsx_tags: {e}")
+
     file_paths = df_filtered[file_col].tolist()
 
     if not file_paths:
@@ -297,13 +363,20 @@ def main():
     log(f"\nPreparing to run events.py on {len(file_paths)} light curves...")
 
     # Write paths to temp file for events.py to consume
-    paths_file = out_dir / f"filtered_paths_{mag_bin_tag}.txt"
+    paths_file = paths_dir / f"filtered_paths_{mag_bin_tag}.txt"
     with open(paths_file, "w") as f:
         for path in file_paths:
             f.write(f"{path}\n")
+    if run_log.exists():
+        try:
+            with run_log.open("a") as f:
+                f.write(f"paths_file: {paths_file}\n")
+        except Exception as e:
+            if args.verbose:
+                print(f"Warning: could not update run log with paths_file: {e}")
 
     # Resume logic: skip paths already recorded in events checkpoint log if present
-    base_output = events_output or (out_dir / "lc_events_results.csv")
+    base_output = events_output or (results_dir / "lc_events_results.csv")
     suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None, "duckdb": ".duckdb"}
     ext = suffix_map.get(events_format)
     if ext and base_output.suffix.lower() != ext:

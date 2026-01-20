@@ -246,6 +246,39 @@ def discover_results_files(
     return sorted(files)
 
 
+def resolve_run_results_dir(run_dir: Path) -> Path:
+    """
+    Resolve a run directory to its results directory.
+
+    Accepts either the run root (contains "results/") or the results directory itself.
+    """
+    run_dir = Path(run_dir)
+    if run_dir.is_file():
+        raise FileNotFoundError(f"Run directory is a file: {run_dir}")
+    if run_dir.name == "results":
+        return run_dir
+    results_dir = run_dir / "results"
+    if results_dir.exists():
+        return results_dir
+    if run_dir.exists():
+        # Allow pointing directly at a directory that already contains results files.
+        return run_dir
+    raise FileNotFoundError(f"Run directory not found: {run_dir}")
+
+
+def discover_run_results_files(run_dir: Path, mag_bin: str | None = None) -> list[Path]:
+    """Discover results files within a run directory."""
+    results_dir = resolve_run_results_dir(run_dir)
+    files = list(results_dir.glob("*.csv")) + list(results_dir.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No results files found in: {results_dir}")
+    if mag_bin is not None:
+        files = [f for f in files if mag_bin in f.stem]
+        if not files:
+            raise FileNotFoundError(f"No results files found for mag_bin={mag_bin} in: {results_dir}")
+    return sorted(files)
+
+
 def load_and_aggregate_results(files: list[Path]) -> pd.DataFrame:
     """Load multiple results files and aggregate into single DataFrame."""
     dfs = []
@@ -279,6 +312,17 @@ def main():
         type=str,
         default="output",
         help="Base output directory containing results subdirectories (default: output)",
+    )
+    parser.add_argument(
+        "--run-dir",
+        type=str,
+        default=None,
+        help="Run directory (e.g., output/runs/20250119_1349) or results dir to scan",
+    )
+    parser.add_argument(
+        "--latest-run",
+        action="store_true",
+        help="Use most recent run under output/runs/ (default if no --method/--results)",
     )
     parser.add_argument(
         "--mag-bin",
@@ -347,6 +391,32 @@ def main():
             results_df = pd.read_parquet(args.results)
         else:
             results_df = pd.read_csv(args.results)
+    elif args.run_dir or args.latest_run or (args.method is None and args.results is None):
+        base_dir = Path(args.output_dir)
+        run_dir = Path(args.run_dir).expanduser() if args.run_dir else None
+        if run_dir is None:
+            runs_root = base_dir / "runs"
+            if not runs_root.exists():
+                raise FileNotFoundError(f"No runs directory found: {runs_root}")
+            run_dirs = sorted([p for p in runs_root.iterdir() if p.is_dir()])
+            if not run_dirs:
+                raise FileNotFoundError(f"No run directories found in: {runs_root}")
+            run_dir = run_dirs[-1]
+            print(f"Using latest run dir: {run_dir}")
+        else:
+            print(f"Using run dir: {run_dir}")
+        if mag_bin:
+            print(f"  Filtering to mag_bin={mag_bin}")
+        else:
+            print("  Using ALL magnitude bins")
+        files = discover_run_results_files(run_dir, mag_bin)
+        print(f"  Found {len(files)} results files:")
+        for f in files[:10]:
+            print(f"    - {f.name}")
+        if len(files) > 10:
+            print(f"    ... and {len(files) - 10} more")
+        results_df = load_and_aggregate_results(files)
+        print(f"  Loaded {len(results_df):,} total detection records")
     elif args.method:
         # Method-based discovery
         base_dir = Path(args.output_dir)
@@ -366,7 +436,7 @@ def main():
         results_df = load_and_aggregate_results(files)
         print(f"  Loaded {len(results_df):,} total detection records")
     else:
-        parser.error("Either --method or --results must be specified")
+        parser.error("Either --method, --results, or --run-dir must be specified")
     
     # Load or use default candidates
     if args.candidates:

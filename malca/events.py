@@ -11,6 +11,7 @@ import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -1511,7 +1512,9 @@ def main():
     parser.add_argument("--no-sigma-eff", action="store_true", help="Do not replace errors with sigma_eff from baseline")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False)")
     parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Apply signal amplitude filter: require |event_mag - baseline_mag| > threshold (e.g., 0.05)")
-    parser.add_argument("--output", type=str, default="/home/lenhart.106/code/malca/output/lc_events_results.csv", help="Output path for results (suffix adjusted per format).")
+    parser.add_argument("--output", type=str, default=None, help="Output path for results (suffix adjusted per format).")
+    parser.add_argument("--metadata-csv", type=str, default=None,
+                        help="Optional CSV with 'path' and extra metadata columns to attach to results.")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format for results.")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
@@ -1529,6 +1532,24 @@ def main():
 
     output_format = args.output_format.lower()
     quiet = not args.verbose
+
+    def default_output_dir() -> Path:
+        base_dir = Path("/home/lenhart.106/code/malca/output")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return base_dir / "runs" / timestamp / "results"
+
+    if not args.output:
+        out_dir = default_output_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        args.output = str(out_dir / "lc_events_results.csv")
+
+    metadata_by_path = None
+    if args.metadata_csv:
+        meta_df = pd.read_csv(args.metadata_csv)
+        if "path" not in meta_df.columns:
+            raise SystemExit("metadata-csv must include a 'path' column")
+        meta_df["path"] = meta_df["path"].astype(str)
+        metadata_by_path = meta_df.set_index("path").to_dict(orient="index")
 
     def log(message: str) -> None:
         if not quiet:
@@ -1913,6 +1934,10 @@ def main():
             path = futs[fut]
             try:
                 result = fut.result()
+                if metadata_by_path:
+                    meta = metadata_by_path.get(str(path))
+                    if meta:
+                        result.update(meta)
                 results.append(result)
                 if chunk_size and len(results) >= chunk_size:
                     write_chunk(results)

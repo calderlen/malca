@@ -5,7 +5,7 @@ These filters depend only on raw light curve data (dat2 files) and external cata
 Filters (ordered by execution speed for efficiency):
 1. filter_sparse_lightcurves - remove LCs with insufficient time span or cadence
 2. filter_multi_camera - remove single-camera detections
-3. filter_vsx_match - remove known variable stars from VSX
+3. filter_vsx_match - optionally remove known variable stars from VSX
 
 Input format:
     DataFrame with columns: asas_sn_id (or id/source_id), path (to directory containing dat2 files)
@@ -14,7 +14,7 @@ Input format:
 
     Filters compute required stats from dat2 files on-the-fly:
     - time_span_days, points_per_day (computed from JD column)
-    - vsx_match_sep_arcsec, vsx_class (computed via VSX crossmatch)
+    - sep_arcsec, class (attached via VSX crossmatch)
     - n_cameras (counted from camera# column)
 
 Note:
@@ -235,9 +235,9 @@ def log_rejections(
     if log_csv is None:
         return
 
-    # Try to find an ID column
+    # Prefer stable IDs over path (path can be a shared directory).
     id_col = None
-    for candidate in ["path", "asas_sn_id", "id", "source_id"]:
+    for candidate in ["source_id", "asas_sn_id", "id", "path"]:
         if candidate in df_before.columns:
             id_col = candidate
             break
@@ -323,12 +323,38 @@ def filter_sparse_lightcurves(
     return out
 
 
+def attach_vsx_info(
+    df: pd.DataFrame,
+    *,
+    vsx_crossmatch_csv: str | Path | None = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
+) -> pd.DataFrame:
+    """
+    Attach VSX crossmatch info (sep_arcsec/class) to the dataframe.
+
+    Uses the provided crossmatch CSV, or requires sep_arcsec/class columns.
+    """
+    if "sep_arcsec" in df.columns and "class" in df.columns:
+        return df
+    if vsx_crossmatch_csv is None:
+        raise ValueError("vsx_crossmatch_csv is required to attach VSX info.")
+
+    xmatch = pd.read_csv(vsx_crossmatch_csv, usecols=["asas_sn_id", "sep_arcsec", "class"])
+    xmatch["asas_sn_id"] = xmatch["asas_sn_id"].astype(str)
+    id_col = get_id_col(df)
+    df = df.copy()
+    df[id_col] = df[id_col].astype(str)
+    df = df.merge(xmatch, left_on=id_col, right_on="asas_sn_id", how="left", suffixes=("", "_vsx"))
+    if id_col != "asas_sn_id" and "asas_sn_id_vsx" in df.columns:
+        df = df.drop(columns=["asas_sn_id_vsx"], errors="ignore")
+    return df
+
+
 def filter_vsx_match(
     df: pd.DataFrame,
     *,
     max_sep_arcsec: float = 3.0,
     exclude_classes: list[str] | None = None,
-    vsx_crossmatch_csv: str | Path = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
+    vsx_crossmatch_csv: str | Path | None = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
     show_tqdm: bool = False,
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
@@ -342,16 +368,7 @@ def filter_vsx_match(
     Removes candidates within max_sep_arcsec of a VSX source.
     """
     n0 = len(df)
-
-    # If crossmatch CSV provided, merge it in
-    if vsx_crossmatch_csv is not None:
-        xmatch = pd.read_csv(vsx_crossmatch_csv, usecols=["asas_sn_id", "sep_arcsec", "class"])
-        xmatch["asas_sn_id"] = xmatch["asas_sn_id"].astype(str)
-        id_col = get_id_col(df)
-        df[id_col] = df[id_col].astype(str)
-        df = df.merge(xmatch, left_on=id_col, right_on="asas_sn_id", how="left", suffixes=("", "_vsx"))
-        if id_col != "asas_sn_id" and "asas_sn_id_vsx" in df.columns:
-            df = df.drop(columns=["asas_sn_id_vsx"], errors="ignore")
+    df = attach_vsx_info(df, vsx_crossmatch_csv=vsx_crossmatch_csv)
 
     # Check required columns exist
     if "sep_arcsec" not in df.columns or "class" not in df.columns:
@@ -441,6 +458,7 @@ def apply_pre_filters(
     vsx_max_sep_arcsec: float = 3.0,
     vsx_exclude_classes: list[str] | None = None,
     vsx_crossmatch_csv: str | Path = "input/vsx/asassn_x_vsx_matches_20250919_2252.csv",
+    vsx_mode: str = "tag",
     # Filter 2: sparse lightcurves
     apply_sparse: bool = True,
     min_time_span: float = 100.0,
@@ -468,6 +486,8 @@ def apply_pre_filters(
         Input dataframe with ID, path, and astrometry columns (ra_deg, dec_deg, pm_ra, pm_dec)
     apply_* : bool
         Whether to apply each filter
+    vsx_mode : str
+        "tag" to attach VSX metadata only, "filter" to remove VSX matches
     n_workers : int
         Number of parallel workers for computing stats (default 1 = sequential).
         Filters 2 and 3 (sparse, multi_camera) can benefit from parallelization.
@@ -514,6 +534,15 @@ def apply_pre_filters(
             precomputed_time = compute_time
             precomputed_cameras = compute_cameras
 
+    if vsx_mode not in {"tag", "filter"}:
+        raise ValueError(f"vsx_mode must be 'tag' or 'filter', got {vsx_mode!r}")
+
+    if apply_vsx:
+        df_filtered = attach_vsx_info(
+            df_filtered,
+            vsx_crossmatch_csv=vsx_crossmatch_csv,
+        )
+
     filters = []
 
     # Filter 1: Sparse lightcurves - cheap, reads dat2 files
@@ -536,11 +565,11 @@ def apply_pre_filters(
         }))
 
     # Filter 3: VSX crossmatch
-    if apply_vsx:
+    if apply_vsx and vsx_mode == "filter":
         filters.append(("vsx_match", filter_vsx_match, {
             "max_sep_arcsec": vsx_max_sep_arcsec,
             "exclude_classes": vsx_exclude_classes,
-            "vsx_crossmatch_csv": vsx_crossmatch_csv,
+            "vsx_crossmatch_csv": None,
             "show_tqdm": show_tqdm,
             "rejected_log_csv": rejected_log_csv,
         }))
