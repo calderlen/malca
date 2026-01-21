@@ -368,16 +368,20 @@ def main():
         if summary_file:
             with open(summary_file, "r") as f:
                 summary = json.load(f)
+                det_rate = summary.get("detection_rate_percent") or summary.get("detection_rate", 0.0) or 0.0
+                total_det = summary.get("total_detected", 0) or 0
+                sample_sz = summary.get("sample_size", 0) or 0
+
                 detection_stats[run_tag] = {
                     "label": label,
-                    "detection_rate": summary.get("detection_rate_percent", 0.0),
-                    "total_detected": summary.get("total_detected", 0),
-                    "sample_size": summary.get("sample_size", 0),
+                    "detection_rate": det_rate,
+                    "total_detected": total_det,
+                    "sample_size": sample_sz,
                 }
 
                 print(f"\n{label}:")
-                print(f"  Detection rate: {summary.get('detection_rate_percent', 0.0):.2f}%")
-                print(f"  Detected: {summary.get('total_detected', 0)} / {summary.get('sample_size', 0)}")
+                print(f"  Detection rate: {det_rate:.2f}%")
+                print(f"  Detected: {total_det} / {sample_sz}")
         else:
             print(f"\nWARNING: Missing detection_summary.json in {run_dir}")
     
