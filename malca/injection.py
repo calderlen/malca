@@ -1798,6 +1798,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
 
     # Compute and display quality metrics
     metrics = compute_quality_metrics(results_df)
+    output_tag = ""  # No suffix needed with timestamped directories
     metrics_path = results_dir / f"quality_metrics{output_tag}.txt"
     print_quality_summary(metrics, output_path=metrics_path)
 
