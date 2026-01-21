@@ -14,6 +14,8 @@ and characterizes sensitivity to different dip morphologies.
 from __future__ import annotations
 
 import argparse
+import json
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -1592,24 +1594,33 @@ def main() -> None:
         epilog="""
 Output structure (default --out-dir output/injection):
   output/injection/
-    results/
-      injection_results.csv      # Trial-by-trial results
-      injection_results_PROCESSED.txt  # Checkpoint
-    cubes/
-      efficiency_cube.npz        # 3D efficiency cube
-    plots/
-      mag_slices/                # Per-magnitude heatmaps
-      efficiency_marginalized_*.png
-      depth_at_*pct_efficiency.png
-      efficiency_3d_volume.html  # Interactive 3D (if plotly)
+    20250121_143052/             # Timestamped run directory
+      run_params.json            # Full parameter dump
+      results/
+        injection_results.csv      # Trial-by-trial results
+        injection_results_PROCESSED.txt  # Checkpoint
+      cubes/
+        efficiency_cube.npz        # 3D efficiency cube
+      plots/
+        mag_slices/                # Per-magnitude heatmaps
+        efficiency_marginalized_*.png
+        depth_at_*pct_efficiency.png
+        efficiency_3d_volume.html  # Interactive 3D (if plotly)
+    20250121_150318_custom_tag/  # Optional --run-tag appended
+      ...
+    latest -> 20250121_150318_custom_tag/  # Symlink to latest run
+
+Each run gets a unique timestamped directory. Use --run-tag to append a custom label.
 """,
     )
     parser.add_argument("--manifest", type=Path, default=Path("output/lc_manifest_all.parquet"),
                         help="Manifest parquet path (default: output/lc_manifest_all.parquet)")
     parser.add_argument("--out-dir", type=Path, default=Path("output/injection"),
                         help="Base output directory (default: output/injection)")
+    parser.add_argument("--run-tag", type=str, default=None,
+                        help="Optional tag to append to run directory name (e.g., 'deep_dips_mag18')")
     parser.add_argument("--out", type=Path, default=None,
-                        help="Override CSV output path (default: <out-dir>/results/injection_results.csv)")
+                        help="Override CSV output path (default: <out-dir>/<timestamp>/results/injection_results.csv)")
     parser.add_argument(
         "--control-sample-size",
         "--control-sample",
@@ -1693,21 +1704,43 @@ Output structure (default --out-dir output/injection):
     parser.add_argument("--mag-bins", type=int, default=10, help="Number of magnitude bins for cube.")
 
     args = parser.parse_args()
-    non_default_args = _get_non_default_args(args, parser)
-    output_suffix = _generate_output_suffix(non_default_args)
-    output_tag = f"_{output_suffix}" if output_suffix else ""
 
-    # Set up output paths with defaults
-    out_dir = Path(args.out_dir)
-    results_dir = out_dir / "results"
-    cubes_dir = out_dir / "cubes"
-    plots_dir = out_dir / f"plots{output_tag}"
+    # Set up output paths with timestamped run directory
+    base_out_dir = Path(args.out_dir)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{timestamp}_{args.run_tag}" if args.run_tag else timestamp
+
+    run_dir = base_out_dir / run_name
+
+    results_dir = run_dir / "results"
+    cubes_dir = run_dir / "cubes"
+    plots_dir = run_dir / "plots"
 
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_out = args.out if args.out else (results_dir / f"injection_results{output_tag}.csv")
-    cube_out = args.cube_out if args.cube_out else (cubes_dir / f"efficiency_cube{output_tag}.npz")
+    csv_out = args.out if args.out else (results_dir / "injection_results.csv")
+    cube_out = args.cube_out if args.cube_out else (cubes_dir / "efficiency_cube.npz")
     plot_dir = args.plot_dir if args.plot_dir else plots_dir
+
+    # Save run parameters to JSON
+    run_params_file = run_dir / "run_params.json"
+    run_params = vars(args).copy()
+    # Convert Path objects to strings for JSON serialization
+    for key, value in run_params.items():
+        if isinstance(value, Path):
+            run_params[key] = str(value)
+    with open(run_params_file, "w") as f:
+        json.dump(run_params, f, indent=2, default=str)
+
+    # Create/update 'latest' symlink
+    latest_link = base_out_dir / "latest"
+    if latest_link.exists() or latest_link.is_symlink():
+        latest_link.unlink()
+    try:
+        latest_link.symlink_to(run_name)
+    except Exception as e:
+        # Symlinks may fail on some filesystems, just warn
+        print(f"Warning: Could not create 'latest' symlink: {e}")
 
     manifest = pd.read_parquet(args.manifest)
     control_sample = select_control_sample(
@@ -1720,13 +1753,14 @@ Output structure (default --out-dir output/injection):
 
     detection_kwargs = _build_detection_kwargs(args)
 
-    print(f"Output directory: {out_dir}")
-
+    print(f"\nRun directory: {run_dir}")
+    print(f"  Run params: {run_params_file}")
     print(f"  Results CSV: {csv_out}")
     if not args.skip_cube:
         print(f"  Efficiency cube: {cube_out}")
     if not args.skip_plots:
         print(f"  Plots directory: {plot_dir}")
+    print(f"  Latest symlink: {latest_link} -> {run_name}\n")
 
 
     # Calculate Total Trials equivalent to previous grid based approach

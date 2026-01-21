@@ -119,7 +119,7 @@ def main():
     parser.add_argument("--p-points", type=int, default=12, help="Number of points in the logit-spaced p grid")
     parser.add_argument("--mag-points", type=int, default=12, help="Number of points in the magnitude grid")
     parser.add_argument("--run-min-points", type=int, default=2, help="Min triggered points in a run")
-    parser.add_argument("--run-allow-gap-points", type=int, default=1, help="Allow up to this many missing indices inside a run")
+    parser.add_argument("--run-allow-gap-points", type=int, default=5, help="Allow up to this many missing indices inside a run")
     parser.add_argument("--run-max-gap-days", type=float, default=None, help="Break runs if JD gap exceeds this")
     parser.add_argument("--run-min-duration-days", type=float, default=0.0, help="Require run duration >= this (default: 0.0 = disabled)")
     parser.add_argument("--no-event-prob", action="store_true", help="Skip LOO event responsibilities")
@@ -251,18 +251,91 @@ def main():
     filtered_file = Path(args.filtered_file).expanduser() if args.filtered_file else (prefilter_dir / f"lc_filtered_{mag_bin_tag}.parquet")
     stats_checkpoint_file = prefilter_dir / f"lc_stats_checkpoint_{mag_bin_tag}.parquet"
 
-    # Write a simple run log with the command and key paths.
-    run_log = out_dir / "run.log"
+    # Save run parameters to JSON for full reproducibility
+    import json
+    run_start_time = datetime.now()
+
+    run_params_file = out_dir / "run_params.json"
     try:
         orig_argv = getattr(sys, "orig_argv", None)
         cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
+
+        run_params = {
+            "timestamp": run_start_time.isoformat(),
+            "command": cmd,
+            "mag_bin": args.mag_bin,
+            # Pre-filter parameters
+            "min_time_span": args.min_time_span,
+            "min_points_per_day": args.min_points_per_day,
+            "min_cameras": args.min_cameras,
+            "skip_sparse": args.skip_sparse,
+            "skip_multi_camera": args.skip_multi_camera,
+            "skip_vsx": args.skip_vsx,
+            "vsx_max_sep": args.vsx_max_sep,
+            "vsx_mode": args.vsx_mode,
+            "vsx_crossmatch": str(args.vsx_crossmatch),
+            # Detection parameters
+            "trigger_mode": args.trigger_mode,
+            "logbf_threshold_dip": args.logbf_threshold_dip,
+            "logbf_threshold_jump": args.logbf_threshold_jump,
+            "significance_threshold": args.significance_threshold,
+            "p_points": args.p_points,
+            "p_min_dip": args.p_min_dip,
+            "p_max_dip": args.p_max_dip,
+            "p_min_jump": args.p_min_jump,
+            "p_max_jump": args.p_max_jump,
+            "mag_points": args.mag_points,
+            "mag_min_dip": args.mag_min_dip,
+            "mag_max_dip": args.mag_max_dip,
+            "mag_min_jump": args.mag_min_jump,
+            "mag_max_jump": args.mag_max_jump,
+            # Baseline parameters
+            "baseline_func": args.baseline_func,
+            "baseline_s0": args.baseline_s0,
+            "baseline_w0": args.baseline_w0,
+            "baseline_q": args.baseline_q,
+            "baseline_jitter": args.baseline_jitter,
+            "baseline_sigma_floor": args.baseline_sigma_floor,
+            # Run parameters
+            "run_min_points": args.run_min_points,
+            "run_allow_gap_points": args.run_allow_gap_points,
+            "run_max_gap_days": args.run_max_gap_days,
+            "run_min_duration_days": args.run_min_duration_days,
+            "no_event_prob": args.no_event_prob,
+            "no_sigma_eff": args.no_sigma_eff,
+            "allow_missing_sigma_eff": args.allow_missing_sigma_eff,
+            "min_mag_offset": args.min_mag_offset,
+            # System parameters
+            "workers": args.workers,
+            "batch_size": args.batch_size,
+            "output_format": args.output_format,
+            # File paths
+            "index_root": str(args.index_root),
+            "lc_root": str(args.lc_root),
+            "out_dir": str(out_dir),
+            "manifest_file": str(manifest_file),
+            "filtered_file": str(filtered_file),
+            "events_output": str(events_output),
+        }
+
+        with open(run_params_file, "w") as f:
+            json.dump(run_params, f, indent=2, default=str)
+
+    except Exception as e:
+        if args.verbose:
+            print(f"Warning: could not write run_params.json: {e}")
+
+    # Write a simple run log with the command and key paths.
+    run_log = out_dir / "run.log"
+    try:
         events_cmd_preview = shlex.join([sys.executable, "-m", "malca.events", *events_args, "--", "<paths_file>"])
         run_log.write_text(
             "\n".join([
-                f"timestamp: {datetime.now().isoformat()}",
+                f"timestamp: {run_start_time.isoformat()}",
                 f"command: {cmd}",
                 f"events_cmd: {events_cmd_preview}",
                 f"out_dir: {out_dir}",
+                f"run_params: {run_params_file}",
                 f"manifests_dir: {manifests_dir}",
                 f"prefilter_dir: {prefilter_dir}",
                 f"paths_dir: {paths_dir}",
@@ -443,6 +516,103 @@ def main():
                 f.write(f"{p}\n")
 
     log("\nAll batches completed.")
+
+    # Generate run summary with results statistics
+    run_end_time = datetime.now()
+    run_summary_file = out_dir / "run_summary.json"
+    try:
+        summary = {
+            "run_info": {
+                "start_time": run_start_time.isoformat(),
+                "end_time": run_end_time.isoformat(),
+                "duration_seconds": (run_end_time - run_start_time).total_seconds(),
+            },
+            "manifest_stats": {
+                "total_sources": len(df_manifest),
+                "filtered_sources": len(df_filtered),
+                "kept_fraction": len(df_filtered) / len(df_manifest) if len(df_manifest) > 0 else 0.0,
+            },
+        }
+
+        # Pre-filter rejection breakdown
+        rejected_log = prefilter_dir / f"rejected_pre_filter_{mag_bin_tag}.csv"
+        if rejected_log.exists():
+            try:
+                df_rejected = pd.read_csv(rejected_log)
+                if "reason" in df_rejected.columns:
+                    rejection_counts = df_rejected["reason"].value_counts().to_dict()
+                    summary["pre_filter_rejections"] = {
+                        "total_rejected": len(df_rejected),
+                        "by_reason": rejection_counts,
+                    }
+            except Exception as e:
+                if args.verbose:
+                    print(f"Warning: could not parse rejection log: {e}")
+
+        # Detection results statistics
+        results_files = []
+        if events_format == "csv":
+            if base_output.exists():
+                results_files = [base_output]
+        elif events_format == "parquet":
+            if base_output.exists():
+                results_files = [base_output]
+        elif events_format == "parquet_chunk":
+            chunk_dir = base_output.parent if base_output.suffix else base_output
+            results_files = sorted(chunk_dir.glob("chunk_*.parquet"))
+        elif events_format == "duckdb":
+            # DuckDB results aren't easily parsed here
+            pass
+
+        if results_files:
+            try:
+                if events_format == "csv":
+                    df_results = pd.read_csv(results_files[0])
+                else:  # parquet or parquet_chunk
+                    df_results = pd.concat([pd.read_parquet(f) for f in results_files], ignore_index=True)
+
+                detection_stats = {
+                    "total_detections": len(df_results),
+                    "unique_sources": df_results["path"].nunique() if "path" in df_results.columns else None,
+                }
+
+                # Count significant detections
+                if "dip_significant" in df_results.columns:
+                    detection_stats["dip_significant"] = int(df_results["dip_significant"].sum())
+                if "jump_significant" in df_results.columns:
+                    detection_stats["jump_significant"] = int(df_results["jump_significant"].sum())
+
+                # Event type counts
+                if "event_type" in df_results.columns:
+                    detection_stats["by_event_type"] = df_results["event_type"].value_counts().to_dict()
+
+                summary["detection_stats"] = detection_stats
+
+            except Exception as e:
+                if args.verbose:
+                    print(f"Warning: could not parse detection results: {e}")
+
+        # VSX statistics if available
+        if vsx_tags_file and vsx_tags_file.exists():
+            try:
+                df_vsx = pd.read_csv(vsx_tags_file)
+                summary["vsx_stats"] = {
+                    "sources_with_vsx_match": len(df_vsx),
+                    "vsx_classes": df_vsx["class"].value_counts().to_dict() if "class" in df_vsx.columns else None,
+                }
+            except Exception as e:
+                if args.verbose:
+                    print(f"Warning: could not parse VSX tags: {e}")
+
+        # Write summary
+        with open(run_summary_file, "w") as f:
+            json.dump(summary, f, indent=2, default=str)
+
+        log(f"\nRun summary saved to {run_summary_file}")
+
+    except Exception as e:
+        if args.verbose:
+            print(f"Warning: could not write run summary: {e}")
 
 
 if __name__ == "__main__":

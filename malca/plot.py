@@ -785,6 +785,12 @@ def main():
         description="Plot light curves with Bayesian event detection results"
     )
     parser.add_argument(
+        "--detect-run",
+        type=Path,
+        default=None,
+        help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads events from <detect-run>/results/ and writes plots to <detect-run>/plots/",
+    )
+    parser.add_argument(
         "--input",
         nargs="+",
         help="Path(s) to light curve file(s) (glob patterns supported)",
@@ -792,7 +798,7 @@ def main():
     parser.add_argument(
         "--events",
         type=Path,
-        help="Events/post-filter output (CSV/Parquet/DuckDB) with a path column.",
+        help="Events/post-filter output (CSV/Parquet/DuckDB) with a path column (overrides --detect-run).",
     )
     parser.add_argument(
         "--path-col",
@@ -818,8 +824,8 @@ def main():
     parser.add_argument(
         "--out-dir",
         type=Path,
-        required=True,
-        help="Output directory for plots",
+        default=None,
+        help="Output directory for plots (defaults to <detect-run>/plots/ if --detect-run is used)",
     )
     parser.add_argument(
         "--baseline",
@@ -893,7 +899,31 @@ def main():
     parser.add_argument("--show", action="store_true", help="Show plots interactively")
 
     args = parser.parse_args()
-    
+
+    # Handle --detect-run for events and output directory
+    if args.detect_run:
+        detect_run = args.detect_run.expanduser()
+
+        # Set events path if not explicitly provided
+        if not args.events:
+            results_dir = detect_run / "results"
+            # Look for filtered results first, then raw results
+            candidates = (list(results_dir.glob("*filtered.csv")) +
+                         list(results_dir.glob("*filtered.parquet")) +
+                         list(results_dir.glob("*events_results.csv")) +
+                         list(results_dir.glob("*events_results.parquet")))
+            if candidates:
+                args.events = candidates[0]
+                print(f"Using events from: {args.events}")
+
+        # Set out_dir if not explicitly provided
+        if not args.out_dir:
+            args.out_dir = detect_run / "plots"
+
+    # Validate that we have an output directory
+    if not args.out_dir:
+        raise ValueError("Must specify either --out-dir or --detect-run")
+
     baseline_func = BASELINE_FUNCTIONS[args.baseline]
     baseline_kwargs = {}
 
@@ -915,7 +945,7 @@ def main():
             baseline_kwargs.update(gp_kwargs)
         else:
             print("Warning: GP parameters were provided but baseline is not a GP baseline; ignoring.", flush=True)
-    
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -974,6 +1004,53 @@ def main():
         clean_max_error_absolute=args.clean_max_error_absolute,
         clean_max_error_sigma=args.clean_max_error_sigma,
     )
+
+    # Generate plot log with comprehensive statistics
+    if args.detect_run:
+        try:
+            import json
+            import sys
+            import shlex
+            from datetime import datetime
+
+            detect_run = args.detect_run.expanduser()
+            plot_log_file = detect_run / "plot_log.json"
+
+            orig_argv = getattr(sys, "orig_argv", None)
+            cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
+
+            plot_log = {
+                "timestamp": datetime.now().isoformat(),
+                "command": cmd,
+                "events_file": str(args.events) if args.events else None,
+                "output_dir": str(args.out_dir),
+                "plot_params": {
+                    "baseline": args.baseline,
+                    "logbf_threshold_dip": args.logbf_threshold_dip,
+                    "logbf_threshold_jump": args.logbf_threshold_jump,
+                    "skip_events": args.skip_events,
+                    "plot_fits": args.plot_fits,
+                    "format": args.format,
+                    "only_significant": args.only_significant,
+                    "jd_offset": args.jd_offset,
+                    "clean_max_error_absolute": args.clean_max_error_absolute,
+                    "clean_max_error_sigma": args.clean_max_error_sigma,
+                },
+                "results": {
+                    "total_plots": len(csv_paths),
+                    "max_plots_limit": args.max_plots,
+                },
+            }
+
+            # Add GP parameters if used
+            if gp_kwargs:
+                plot_log["plot_params"]["gp_params"] = gp_kwargs
+
+            with open(plot_log_file, "w") as f:
+                json.dump(plot_log, f, indent=2, default=str)
+
+        except Exception as e:
+            print(f"Warning: could not write plot log: {e}")
 
 
 if __name__ == "__main__":

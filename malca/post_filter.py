@@ -961,8 +961,10 @@ Example usage:
     )
 
     # I/O
-    parser.add_argument("--input", type=Path, required=True, help="Input CSV/Parquet from events.py")
-    parser.add_argument("--output", type=Path, required=True, help="Output CSV/Parquet path")
+    parser.add_argument("--detect-run", type=Path, default=None,
+                        help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads from <detect-run>/results/ and writes filtered results there.")
+    parser.add_argument("--input", type=Path, default=None, help="Input CSV/Parquet from events.py (overrides --detect-run)")
+    parser.add_argument("--output", type=Path, default=None, help="Output CSV/Parquet path (overrides default location)")
 
     # Filter toggles (all enabled by default except morphology)
     parser.add_argument("--skip-posterior-strength", action="store_true", help="Skip posterior strength filter")
@@ -1049,8 +1051,23 @@ Example usage:
 
     args = parser.parse_args()
 
+    # Determine input path
+    if args.input:
+        input_path = args.input.expanduser()
+    elif args.detect_run:
+        detect_run = args.detect_run.expanduser()
+        results_dir = detect_run / "results"
+        # Look for events results file in the detect run directory
+        candidates = list(results_dir.glob("*events_results.csv")) + list(results_dir.glob("*events_results.parquet"))
+        if not candidates:
+            raise FileNotFoundError(f"No events results file found in {results_dir}")
+        if len(candidates) > 1:
+            print(f"Warning: Multiple results files found, using: {candidates[0]}")
+        input_path = candidates[0]
+    else:
+        raise ValueError("Must specify either --input or --detect-run")
+
     # Load input
-    input_path = args.input.expanduser()
     if input_path.suffix.lower() in (".parquet", ".pq"):
         df = pd.read_parquet(input_path)
     else:
@@ -1058,13 +1075,30 @@ Example usage:
 
     print(f"Loaded {len(df)} rows from {input_path}")
 
+    # Determine output path
+    if args.output:
+        output_path = args.output.expanduser()
+    elif args.detect_run:
+        detect_run = args.detect_run.expanduser()
+        results_dir = detect_run / "results"
+        # Create filtered filename based on input filename
+        base_name = input_path.stem.replace("_results", "").replace("events", "")
+        if base_name:
+            filtered_name = f"{base_name}_events_results_filtered{input_path.suffix}"
+        else:
+            filtered_name = f"events_results_filtered{input_path.suffix}"
+        output_path = results_dir / filtered_name
+    else:
+        # Fallback: same directory as input
+        output_path = input_path.parent / f"{input_path.stem}_filtered{input_path.suffix}"
+
     # Determine reject log path
     if args.no_reject_log:
         reject_log = None
     elif args.reject_log:
         reject_log = args.reject_log.expanduser()
     else:
-        reject_log = args.output.parent / "rejected_post_filter.csv"
+        reject_log = output_path.parent / "rejected_post_filter.csv"
 
     # Apply filters
     df_filtered = apply_post_filters(
@@ -1114,8 +1148,77 @@ Example usage:
         rejected_log_csv=reject_log,
     )
 
+    # Generate filter log with comprehensive statistics
+    if args.detect_run:
+        try:
+            import json
+            import sys
+            import shlex
+            from datetime import datetime
+
+            detect_run = args.detect_run.expanduser()
+            filter_log_file = detect_run / "filter_log.json"
+
+            orig_argv = getattr(sys, "orig_argv", None)
+            cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
+
+            filter_log = {
+                "timestamp": datetime.now().isoformat(),
+                "command": cmd,
+                "input_file": str(input_path),
+                "output_file": str(output_path),
+                "filter_params": {
+                    "apply_posterior_strength": not args.skip_posterior_strength,
+                    "apply_event_probability": not args.skip_event_probability,
+                    "apply_run_robustness": not args.skip_run_robustness,
+                    "apply_morphology": args.apply_morphology,
+                    "apply_camera_median_validation": args.apply_camera_median_validation,
+                    "apply_periodicity_validation": args.apply_periodicity_validation,
+                    "apply_gaia_ruwe_validation": args.apply_gaia_ruwe_validation,
+                    "apply_periodic_catalog_validation": args.apply_periodic_catalog_validation,
+                    "min_bayes_factor": args.min_bayes_factor,
+                    "require_finite_local_bf": not args.allow_infinite_local_bf,
+                    "min_event_prob": args.min_event_prob,
+                    "min_run_count": args.min_run_count,
+                    "min_run_points": args.min_run_points,
+                    "min_run_cameras": args.min_run_cameras,
+                    "dip_morphology": args.dip_morphology if args.apply_morphology else None,
+                    "jump_morphology": args.jump_morphology if args.apply_morphology else None,
+                    "min_delta_bic": args.min_delta_bic if args.apply_morphology else None,
+                    "max_camera_median_spread": args.max_camera_median_spread if args.apply_camera_median_validation else None,
+                    "gaia_max_ruwe": args.gaia_max_ruwe if args.apply_gaia_ruwe_validation else None,
+                    "gaia_reject": args.gaia_reject if args.apply_gaia_ruwe_validation else None,
+                },
+                "results": {
+                    "input_rows": len(df),
+                    "output_rows": len(df_filtered),
+                    "kept_fraction": len(df_filtered) / len(df) if len(df) > 0 else 0.0,
+                    "rejected_rows": len(df) - len(df_filtered),
+                },
+            }
+
+            # Parse rejection log if available
+            if reject_log and reject_log.exists():
+                try:
+                    df_rejected = pd.read_csv(reject_log)
+                    if "filter" in df_rejected.columns:
+                        rejection_counts = df_rejected["filter"].value_counts().to_dict()
+                        filter_log["rejection_breakdown"] = rejection_counts
+                except Exception as e:
+                    if args.verbose:
+                        print(f"Warning: could not parse rejection log: {e}")
+
+            with open(filter_log_file, "w") as f:
+                json.dump(filter_log, f, indent=2, default=str)
+
+            if args.verbose:
+                print(f"Filter log saved to {filter_log_file}")
+
+        except Exception as e:
+            if args.verbose:
+                print(f"Warning: could not write filter log: {e}")
+
     # Save output
-    output_path = args.output.expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if output_path.suffix.lower() in (".parquet", ".pq"):

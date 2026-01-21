@@ -521,8 +521,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compute event scores for events.py results (dips or microlensing)."
     )
-    parser.add_argument("--events", type=Path, required=True, help="events.py results CSV/Parquet")
-    parser.add_argument("--output", type=Path, default=Path("/home/lenhart.106/code/malca/output/event_scores.csv"), help="Output CSV path")
+    parser.add_argument("--detect-run", type=Path, default=None,
+                        help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads from <detect-run>/results/ and writes scores to <detect-run>/scores/")
+    parser.add_argument("--events", type=Path, default=None, help="events.py results CSV/Parquet (overrides --detect-run)")
+    parser.add_argument("--output", type=Path, default=None, help="Output CSV path (overrides default location)")
     parser.add_argument(
         "--event-type",
         type=str,
@@ -538,7 +540,26 @@ def main() -> None:
     parser.add_argument("--min-delta-mag", type=float, default=0.05, help="Minimum amplitude (mag)")
     args = parser.parse_args()
 
-    events_path = args.events.expanduser()
+    # Determine input path
+    if args.events:
+        events_path = args.events.expanduser()
+    elif args.detect_run:
+        detect_run = args.detect_run.expanduser()
+        results_dir = detect_run / "results"
+        # Look for filtered results first, then raw results
+        candidates = (list(results_dir.glob("*filtered.csv")) +
+                     list(results_dir.glob("*filtered.parquet")) +
+                     list(results_dir.glob("*events_results.csv")) +
+                     list(results_dir.glob("*events_results.parquet")))
+        if not candidates:
+            raise FileNotFoundError(f"No events results file found in {results_dir}")
+        if len(candidates) > 1:
+            print(f"Warning: Multiple results files found, using: {candidates[0]}")
+        events_path = candidates[0]
+    else:
+        raise ValueError("Must specify either --events or --detect-run")
+
+    # Load events
     if events_path.suffix.lower() in (".parquet", ".pq"):
         df_events = pd.read_parquet(events_path)
     else:
@@ -560,13 +581,81 @@ def main() -> None:
         min_delta_mag=args.min_delta_mag,
     )
 
-    out_path = args.output.expanduser()
+    # Determine output path
+    if args.output:
+        out_path = args.output.expanduser()
+    elif args.detect_run:
+        detect_run = args.detect_run.expanduser()
+        scores_dir = detect_run / "scores"
+        scores_dir.mkdir(parents=True, exist_ok=True)
+        prefix = 'dipper' if args.event_type == 'dip' else 'microlens'
+        out_path = scores_dir / f"{prefix}_scores.csv"
+    else:
+        # Fallback: same directory as input
+        prefix = 'dipper' if args.event_type == 'dip' else 'microlens'
+        out_path = events_path.parent / f"{prefix}_scores.csv"
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df_scored.to_csv(out_path, index=False)
 
     prefix = 'dipper' if args.event_type == 'dip' else 'microlens'
     score_values = df_scored[f"{prefix}_score"].to_numpy()
     n_scored = int(np.isfinite(score_values).sum())
+
+    # Generate score log with comprehensive statistics
+    if args.detect_run:
+        try:
+            import json
+            import sys
+            import shlex
+            from datetime import datetime
+
+            detect_run = args.detect_run.expanduser()
+            score_log_file = detect_run / "score_log.json"
+
+            orig_argv = getattr(sys, "orig_argv", None)
+            cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
+
+            score_log = {
+                "timestamp": datetime.now().isoformat(),
+                "command": cmd,
+                "input_file": str(events_path),
+                "output_file": str(out_path),
+                "score_params": {
+                    "event_type": args.event_type,
+                    "only_significant": only_significant,
+                    "sigma_threshold": args.sigma_threshold,
+                    "edge_sigma": args.edge_sigma,
+                    "min_fwhm_days": args.min_fwhm_days,
+                    "min_delta_mag": args.min_delta_mag,
+                },
+                "results": {
+                    "input_rows": len(df_events),
+                    "output_rows": len(df_scored),
+                    "scored_rows": n_scored,
+                    "scored_fraction": n_scored / len(df_scored) if len(df_scored) > 0 else 0.0,
+                },
+            }
+
+            # Add score distribution statistics
+            if n_scored > 0:
+                finite_scores = score_values[np.isfinite(score_values)]
+                score_log["score_statistics"] = {
+                    "mean": float(np.mean(finite_scores)),
+                    "median": float(np.median(finite_scores)),
+                    "std": float(np.std(finite_scores)),
+                    "min": float(np.min(finite_scores)),
+                    "max": float(np.max(finite_scores)),
+                    "q25": float(np.percentile(finite_scores, 25)),
+                    "q75": float(np.percentile(finite_scores, 75)),
+                }
+
+            with open(score_log_file, "w") as f:
+                json.dump(score_log, f, indent=2, default=str)
+
+        except Exception as e:
+            print(f"Warning: could not write score log: {e}")
+
     print(f"Scored {n_scored}/{len(df_scored)} {args.event_type} candidates")
     print(f"Wrote {len(df_scored)} rows to {out_path}")
 

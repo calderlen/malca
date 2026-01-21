@@ -7,6 +7,8 @@ Usage:
     python -m malca manifest [options]    # Build source_id → path index
     python -m malca detect [options]      # Run event detection
     python -m malca validate [options]    # Validate on known objects
+    python -m malca injection [options]   # Run injection-recovery tests
+    python -m malca detection_rate [options]  # Measure detection rate
     python -m malca plot [options]        # Plot light curves
     python -m malca score [options]       # Score events
     python -m malca filter [options]      # Apply filters
@@ -49,7 +51,23 @@ def main():
         description="Run reproduction/validation on known candidates"
     )
     validate_parser.add_argument("--help-full", action="store_true", help="Show full help for validate command")
-    
+
+    # Injection command
+    injection_parser = subparsers.add_parser(
+        "injection",
+        help="Run injection-recovery tests",
+        description="Inject synthetic dips and measure detection efficiency"
+    )
+    injection_parser.add_argument("--help-full", action="store_true", help="Show full help for injection command")
+
+    # Detection rate command
+    detection_rate_parser = subparsers.add_parser(
+        "detection_rate",
+        help="Measure detection rate",
+        description="Measure detection rate on light curves without injection"
+    )
+    detection_rate_parser.add_argument("--help-full", action="store_true", help="Show full help for detection_rate command")
+
     # Validation command (results-based, no raw data needed)
     validation_parser = subparsers.add_parser(
         "validation",
@@ -117,7 +135,27 @@ def main():
             from tests import reproduction
             sys.argv = [sys.argv[0]] + remaining
             reproduction.main()
-    
+
+    elif args.command == "injection":
+        if hasattr(args, 'help_full') and args.help_full:
+            from malca import injection
+            sys.argv = [sys.argv[0], '--help']
+            injection.main()
+        else:
+            from malca import injection
+            sys.argv = [sys.argv[0]] + remaining
+            injection.main()
+
+    elif args.command == "detection_rate":
+        if hasattr(args, 'help_full') and args.help_full:
+            from malca import detection_rate
+            sys.argv = [sys.argv[0], '--help']
+            detection_rate.main()
+        else:
+            from malca import detection_rate
+            sys.argv = [sys.argv[0]] + remaining
+            detection_rate.main()
+
     elif args.command == "plot":
         if hasattr(args, 'help_full') and args.help_full:
             from malca import plot
