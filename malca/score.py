@@ -654,7 +654,8 @@ def main() -> None:
                 json.dump(score_log, f, indent=2, default=str)
 
         except Exception as e:
-            print(f"Warning: could not write score log: {e}")
+            if args.verbose:
+                print(f"Warning: could not write score log: {e}")
 
     print(f"Scored {n_scored}/{len(df_scored)} {args.event_type} candidates")
     print(f"Wrote {len(df_scored)} rows to {out_path}")

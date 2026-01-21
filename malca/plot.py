@@ -998,12 +998,12 @@ def main():
             logbf_threshold_dip=args.logbf_threshold_dip,
             logbf_threshold_jump=args.logbf_threshold_jump,
             skip_events=args.skip_events,
-        plot_fits=args.plot_fits,
-        jd_offset=args.jd_offset,
-        detection_results_csv=args.detection_results,
-        clean_max_error_absolute=args.clean_max_error_absolute,
-        clean_max_error_sigma=args.clean_max_error_sigma,
-    )
+            plot_fits=args.plot_fits,
+            jd_offset=args.jd_offset,
+            detection_results_csv=args.detection_results,
+            clean_max_error_absolute=args.clean_max_error_absolute,
+            clean_max_error_sigma=args.clean_max_error_sigma,
+        )
 
     # Generate plot log with comprehensive statistics
     if args.detect_run:
@@ -1050,7 +1050,8 @@ def main():
                 json.dump(plot_log, f, indent=2, default=str)
 
         except Exception as e:
-            print(f"Warning: could not write plot log: {e}")
+            if args.verbose:
+                print(f"Warning: could not write plot log: {e}")
 
 
 if __name__ == "__main__":

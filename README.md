@@ -235,6 +235,60 @@ graph TB
 
 See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 
+## Output Directory Structure
+
+When running the full pipeline with `--detect-run` or `--out-dir`, the following directory structure is created for complete provenance tracking:
+
+```
+output/runs/20250121_143052/          # Timestamp-based run directory
+├── run_params.json                   # Detection parameters (events_filtered.py)
+├── run_summary.json                  # Detection results stats (events_filtered.py)
+├── filter_log.json                   # Filtering parameters & stats (post_filter.py)
+├── score_log.json                    # Scoring parameters & stats (score.py)
+├── plot_log.json                     # Plotting parameters (plot.py)
+├── run.log                           # Simple text log with paths
+│
+├── manifests/                        # Manifest files
+│   └── lc_manifest_{mag_bin}.parquet
+│
+├── prefilter/                        # Pre-filtering results
+│   ├── lc_filtered_{mag_bin}.parquet
+│   ├── lc_stats_checkpoint_{mag_bin}.parquet
+│   ├── rejected_pre_filter_{mag_bin}.csv
+│   └── vsx_tags/
+│       └── vsx_tags_{mag_bin}.csv
+│
+├── paths/                            # Input paths
+│   └── filtered_paths_{mag_bin}.txt
+│
+├── results/                          # Detection results
+│   ├── lc_events_results.csv         # Raw detection output
+│   ├── lc_events_results_PROCESSED.txt  # Checkpoint log
+│   ├── lc_events_results_filtered.csv   # After post_filter.py
+│   └── rejected_post_filter.csv      # Post-filter rejections
+│
+├── scores/                           # Scoring results (score.py)
+│   └── dipper_scores.csv             # or microlens_scores.csv
+│
+└── plots/                            # Visualizations (plot.py)
+    ├── {source_id}_dips.png
+    ├── {source_id}_dips.png
+    └── ...
+```
+
+**Key Features:**
+- **JSON logs track full provenance**: Every parameter and result is logged for reproducibility
+- **Self-contained runs**: Each timestamped directory contains everything needed to reproduce the analysis
+- **Checkpoint support**: Detection runs can be interrupted and resumed using `*_PROCESSED.txt` files
+- **Rejection tracking**: Both pre-filter and post-filter rejections are logged with reasons
+
+**JSON Log Contents:**
+- `run_params.json`: All pre-filter and detection parameters (thresholds, workers, baseline settings)
+- `run_summary.json`: Manifest statistics, pre-filter rejection breakdown, detection results
+- `filter_log.json`: Filter toggles, thresholds, input/output counts, rejection breakdown
+- `score_log.json`: Scoring parameters, score distribution statistics
+- `plot_log.json`: Plotting parameters, GP settings, number of plots generated
+
 ---
 
 ### Running pieces manually
