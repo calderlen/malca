@@ -1683,10 +1683,10 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--mag-max-dip", type=float, default=None, help="Max magnitude for dip grid (overrides auto)")
     parser.add_argument("--mag-min-jump", type=float, default=None, help="Min magnitude for jump grid (overrides auto)")
     parser.add_argument("--mag-max-jump", type=float, default=None, help="Max magnitude for jump grid (overrides auto)")
-    parser.add_argument("--no-event-prob", action="store_true", default=True,
-                        help="Disable event probability computation (default: disabled for speed)")
+    parser.add_argument("--no-event-prob", action="store_true", default=False,
+                        help="Disable event probability computation (faster but incompatible with trigger_mode='posterior_prob')")
     parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
-                        help="Enable event probability computation (slower)")
+                        help="Enable event probability computation (default, required for trigger_mode='posterior_prob')")
     parser.add_argument("--no-sigma-eff", action="store_true")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true")
     parser.add_argument("--min-mag-offset", type=float, default=0.2,

@@ -355,12 +355,12 @@ def compute_detection_summary(results_df: pd.DataFrame) -> dict:
         n_detected = 0
 
     return {
-        "total_trials": total,
-        "successful_trials": successful,
-        "failed_trials": total - successful,
-        "detections": n_detected,
-        "detection_rate": detection_rate,
-        "detection_rate_percent": detection_rate * 100 if np.isfinite(detection_rate) else np.nan,
+        "total_trials": int(total),
+        "successful_trials": int(successful),
+        "failed_trials": int(total - successful),
+        "detections": int(n_detected),
+        "detection_rate": float(detection_rate) if np.isfinite(detection_rate) else None,
+        "detection_rate_percent": float(detection_rate * 100) if np.isfinite(detection_rate) else None,
     }
 
 
@@ -438,8 +438,10 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--baseline-q", type=float, default=0.7)
     parser.add_argument("--baseline-jitter", type=float, default=0.006)
     parser.add_argument("--baseline-sigma-floor", type=float, default=None)
-    parser.add_argument("--no-event-prob", action="store_true", default=True)
-    parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false")
+    parser.add_argument("--no-event-prob", action="store_true", default=False,
+                        help="Disable event probability computation (faster but incompatible with trigger_mode='posterior_prob')")
+    parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
+                        help="Enable event probability computation (default, required for trigger_mode='posterior_prob')")
     parser.add_argument("--no-sigma-eff", action="store_true")
     parser.add_argument("--allow-missing-sigma-eff", action="store_true")
     parser.add_argument("--min-mag-offset", type=float, default=0.2)
