@@ -32,13 +32,13 @@ python -m malca.injection --run-tag "2_baseline" \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
   --mag-points 25 \
-  --workers 40
+  --workers 50
 
 echo "  - Detection rate (false positive measurement)..."
 python -m malca.detection_rate --run-tag "2_baseline" \
   --sample-size 10000 \
   --mag-points 25 \
-  --workers 40
+  --workers 50
 
 # Test 2-2: Optimized (min-mag-offset=0.0)
 echo ""
@@ -49,14 +49,14 @@ python -m malca.injection --run-tag "2_optimized" \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
   --mag-points 25 \
-  --workers 40 \
+  --workers 50 \
   --min-mag-offset 0.0
 
 echo "  - Detection rate (false positive measurement)..."
 python -m malca.detection_rate --run-tag "2_optimized" \
   --sample-size 10000 \
   --mag-points 25 \
-  --workers 40 \
+  --workers 50 \
   --min-mag-offset 0.0
 
 echo ""
