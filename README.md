@@ -237,12 +237,14 @@ See [docs/architecture.md](docs/architecture.md) for detailed documentation.
 
 ## Output Directory Structure
 
-When running the full pipeline with `--detect-run` or `--out-dir`, the following directory structure is created for complete provenance tracking:
+### Integrated Pipeline (`--detect-run`)
+
+When running the full detection pipeline with `--detect-run`, the following directory structure is created for complete provenance tracking:
 
 ```
 output/runs/20250121_143052/          # Timestamp-based run directory
 ├── run_params.json                   # Detection parameters (events_filtered.py)
-├── run_summary.json                  # Detection results stats (events_filtered.py)
+├── run_summary.json                 # Detection results stats (events_filtered.py)
 ├── filter_log.json                   # Filtering parameters & stats (post_filter.py)
 ├── score_log.json                    # Scoring parameters & stats (score.py)
 ├── plot_log.json                     # Plotting parameters (plot.py)
@@ -288,6 +290,88 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 - `filter_log.json`: Filter toggles, thresholds, input/output counts, rejection breakdown
 - `score_log.json`: Scoring parameters, score distribution statistics
 - `plot_log.json`: Plotting parameters, GP settings, number of plots generated
+
+### Standalone Module Outputs
+
+#### Injection Testing (`python -m malca.injection`)
+
+```
+output/injection/                     # Default output directory
+├── results/
+│   ├── injection_results.csv         # Trial-by-trial injection results
+│   └── injection_results_PROCESSED.txt  # Checkpoint for resume
+│
+├── cubes/
+│   └── efficiency_cube.npz           # 3D efficiency cube (depth × duration × mag)
+│
+└── plots/
+    ├── mag_slices/                   # Per-magnitude 2D heatmaps
+    │   ├── mag_12.0_efficiency.png
+    │   ├── mag_13.0_efficiency.png
+    │   └── ...
+    ├── efficiency_marginalized_*.png  # Averaged over one axis
+    ├── depth_at_*pct_efficiency.png   # Threshold contour maps
+    └── efficiency_3d_volume.html      # Interactive 3D (if plotly installed)
+```
+
+#### Detection Rate (`python -m malca.detection_rate`)
+
+```
+output/detection_rate/                # Default base directory
+├── 20250121_143052/                  # Timestamped run directory
+│   ├── run_params.json                # Full parameter dump
+│   ├── results/
+│   │   ├── detection_rate_results.csv
+│   │   ├── detection_rate_results_PROCESSED.txt  # Checkpoint
+│   │   └── detection_summary.json     # Detection rate summary
+│   └── plots/
+│       ├── detection_rate_vs_mag.png
+│       ├── detection_duration_dist.png
+│       └── detection_depth_dist.png
+│
+├── 20250121_150318_custom_tag/       # Optional --run-tag appended
+│   └── ...
+│
+└── latest -> 20250121_150318_custom_tag/  # Symlink to latest run
+```
+
+#### Multi-Wavelength Characterization (`python -m malca.characterize`)
+
+```
+output/
+├── characterized.csv                 # Single output file with added columns:
+                                      #   - Gaia astrometry & photometry
+                                      #   - 3D dust extinction (A_v_3d, ebv_3d)
+                                      #   - YSO classification (yso_class)
+                                      #   - Galactic population (thin_disk/thick_disk)
+                                      #   - StarHorse ages/masses (if provided)
+                                      #   - Auxiliary crossmatches (BANYAN Σ, IPHAS, etc.)
+└── gaia_cache/                       # Gaia query cache (optional)
+    └── gaia_results_{hash}.parquet
+```
+
+#### Dipper Classification (`python -m malca.classify`)
+
+```
+output/
+└── classified.csv                    # Single output file with added columns:
+                                      #   - P_eb, P_cv, P_starspot, P_disk
+                                      #   - yso_class
+                                      #   - a_circ_au, transit_prob
+                                      #   - final_class (EB/CV/Starspot/Disk/YSO/Unknown)
+```
+
+#### Manifest Building (`python -m malca.manifest`)
+
+```
+output/
+└── lc_manifest_{mag_bin}.parquet     # Single parquet file with:
+                                      #   - asas_sn_id
+                                      #   - ra_deg, dec_deg
+                                      #   - lc_dir (directory path)
+                                      #   - dat_path (full .dat2 path)
+                                      #   - dat_exists (bool)
+```
 
 ---
 
