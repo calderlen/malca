@@ -14,11 +14,52 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Dict, List, Tuple
 import json
+import re
 
 # Import from malca
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from malca.injection import load_efficiency_cube, plot_detection_efficiency
+
+
+def find_latest_run_dir(base_dir: Path, tag: str) -> Path | None:
+    """
+    Find the latest run directory for a given tag.
+
+    Searches for directories matching patterns:
+    - {tag}/  (exact match)
+    - {timestamp}_{tag}/  (timestamped, e.g., 20260121_041628_1a_baseline)
+    - {tag}/latest/  (symlink)
+
+    Returns the latest by timestamp, or None if not found.
+    """
+    base_dir = Path(base_dir)
+    if not base_dir.exists():
+        return None
+
+    # Check for exact match first
+    exact = base_dir / tag
+    if exact.exists():
+        # Check for latest symlink inside
+        if (exact / "latest").exists():
+            return exact / "latest"
+        return exact
+
+    # Search for timestamped directories ending with tag
+    pattern = re.compile(r"^(\d{8}_\d{6})_" + re.escape(tag) + r"$")
+    matches = []
+    for d in base_dir.iterdir():
+        if d.is_dir():
+            m = pattern.match(d.name)
+            if m:
+                matches.append((m.group(1), d))
+
+    if not matches:
+        return None
+
+    # Sort by timestamp descending, return latest
+    matches.sort(key=lambda x: x[0], reverse=True)
+    return matches[0][1]
 
 
 def compare_efficiency_cubes(
@@ -182,16 +223,27 @@ def main():
     
     cubes_1a = {}
     for run_tag in phase1a_runs.keys():
-        run_dir = base_dir / run_tag / "latest" / "cubes"
-        if not run_dir.exists():
-            run_dir = base_dir / run_tag / "cubes"
-        
-        cube_file = run_dir / "efficiency_cube.npz"
-        if cube_file.exists():
+        run_dir = find_latest_run_dir(base_dir, run_tag)
+        if run_dir is None:
+            print(f"WARNING: No run directory found for {run_tag}")
+            continue
+
+        # Check for cubes in various locations
+        cube_file = None
+        for candidate in [
+            run_dir / "cubes" / "efficiency_cube.npz",
+            run_dir / "latest" / "cubes" / "efficiency_cube.npz",
+            run_dir / "efficiency_cube.npz",
+        ]:
+            if candidate.exists():
+                cube_file = candidate
+                break
+
+        if cube_file:
             cubes_1a[run_tag] = load_efficiency_cube(str(cube_file))
-            print(f"Loaded: {run_tag}")
+            print(f"Loaded: {run_tag} from {cube_file}")
         else:
-            print(f"WARNING: Missing {cube_file}")
+            print(f"WARNING: Missing efficiency_cube.npz in {run_dir}")
     
     if len(cubes_1a) > 1:
         compare_efficiency_cubes(
@@ -215,16 +267,26 @@ def main():
     
     cubes_1b = {}
     for run_tag in phase1b_runs.keys():
-        run_dir = base_dir / run_tag / "latest" / "cubes"
-        if not run_dir.exists():
-            run_dir = base_dir / run_tag / "cubes"
-            
-        cube_file = run_dir / "efficiency_cube.npz"
-        if cube_file.exists():
+        run_dir = find_latest_run_dir(base_dir, run_tag)
+        if run_dir is None:
+            print(f"WARNING: No run directory found for {run_tag}")
+            continue
+
+        cube_file = None
+        for candidate in [
+            run_dir / "cubes" / "efficiency_cube.npz",
+            run_dir / "latest" / "cubes" / "efficiency_cube.npz",
+            run_dir / "efficiency_cube.npz",
+        ]:
+            if candidate.exists():
+                cube_file = candidate
+                break
+
+        if cube_file:
             cubes_1b[run_tag] = load_efficiency_cube(str(cube_file))
-            print(f"Loaded: {run_tag}")
+            print(f"Loaded: {run_tag} from {cube_file}")
         else:
-            print(f"WARNING: Missing {cube_file}")
+            print(f"WARNING: Missing efficiency_cube.npz in {run_dir}")
     
     if len(cubes_1b) > 1:
         compare_efficiency_cubes(
@@ -247,16 +309,26 @@ def main():
     
     cubes_1c = {}
     for run_tag in phase1c_runs.keys():
-        run_dir = base_dir / run_tag / "latest" / "cubes"
-        if not run_dir.exists():
-            run_dir = base_dir / run_tag / "cubes"
-            
-        cube_file = run_dir / "efficiency_cube.npz"
-        if cube_file.exists():
+        run_dir = find_latest_run_dir(base_dir, run_tag)
+        if run_dir is None:
+            print(f"WARNING: No run directory found for {run_tag}")
+            continue
+
+        cube_file = None
+        for candidate in [
+            run_dir / "cubes" / "efficiency_cube.npz",
+            run_dir / "latest" / "cubes" / "efficiency_cube.npz",
+            run_dir / "efficiency_cube.npz",
+        ]:
+            if candidate.exists():
+                cube_file = candidate
+                break
+
+        if cube_file:
             cubes_1c[run_tag] = load_efficiency_cube(str(cube_file))
-            print(f"Loaded: {run_tag}")
+            print(f"Loaded: {run_tag} from {cube_file}")
         else:
-            print(f"WARNING: Missing {cube_file}")
+            print(f"WARNING: Missing efficiency_cube.npz in {run_dir}")
     
     if len(cubes_1c) > 1:
         compare_efficiency_cubes(
@@ -278,12 +350,22 @@ def main():
     
     detection_stats = {}
     for run_tag, label in all_runs.items():
-        run_dir = detection_rate_dir / run_tag / "latest"
-        if not run_dir.exists():
-            run_dir = detection_rate_dir / run_tag
-            
-        summary_file = run_dir / "detection_summary.json"
-        if summary_file.exists():
+        run_dir = find_latest_run_dir(detection_rate_dir, run_tag)
+        if run_dir is None:
+            print(f"\nWARNING: No detection_rate directory found for {run_tag}")
+            continue
+
+        summary_file = None
+        for candidate in [
+            run_dir / "detection_summary.json",
+            run_dir / "latest" / "detection_summary.json",
+            run_dir / "results" / "detection_summary.json",
+        ]:
+            if candidate.exists():
+                summary_file = candidate
+                break
+
+        if summary_file:
             with open(summary_file, "r") as f:
                 summary = json.load(f)
                 detection_stats[run_tag] = {
@@ -292,12 +374,12 @@ def main():
                     "total_detected": summary.get("total_detected", 0),
                     "sample_size": summary.get("sample_size", 0),
                 }
-                
+
                 print(f"\n{label}:")
                 print(f"  Detection rate: {summary.get('detection_rate_percent', 0.0):.2f}%")
                 print(f"  Detected: {summary.get('total_detected', 0)} / {summary.get('sample_size', 0)}")
         else:
-            print(f"\nWARNING: Missing {summary_file}")
+            print(f"\nWARNING: Missing detection_summary.json in {run_dir}")
     
     # Create comparison plot
     if detection_stats:

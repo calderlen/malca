@@ -1634,7 +1634,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--amp-min", type=float, default=0.05)
-    parser.add_argument("--amp-max", type=float, default=2.0)
+    parser.add_argument("--amp-max", type=float, default=3.0)
     parser.add_argument("--amp-steps", type=int, default=100)
     parser.add_argument("--dur-min", type=float, default=1.0)
     parser.add_argument("--dur-max", type=float, default=300.0)
