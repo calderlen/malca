@@ -1,0 +1,80 @@
+#!/bin/bash
+# Phase 1A: Diagnose Shallow Dip Bottleneck
+# Tests: baseline, no_mag_offset, low_logbf
+# Also runs detection_rate to measure false positive rates
+
+set -e
+cd "$(dirname "$0")/.."
+
+echo "==================================================================="
+echo "Phase 1A: Shallow Dip Bottleneck Diagnostic"
+echo "==================================================================="
+
+# Test 1A-1: Baseline (current configuration)
+echo ""
+echo "[1/3] Running baseline (current config)..."
+echo "  - Injection test..."
+python -m malca.injection --run-tag "1a_baseline" \
+  --amp-min 0.05 --amp-max 0.5 --amp-steps 40 \
+  --dur-min 50 --dur-max 200 --dur-steps 40 \
+  --n-injections-per-grid 30 \
+  --max-trials 48000 \
+  --workers 40
+
+echo "  - Detection rate (false positive measurement)..."
+python -m malca.detection_rate --run-tag "1a_baseline" \
+  --sample-size 10000 \
+  --workers 40
+
+# Test 1A-2: Remove min-mag-offset filter
+echo ""
+echo "[2/3] Running with min-mag-offset=0.0 (remove filter)..."
+echo "  - Injection test..."
+python -m malca.injection --run-tag "1a_no_mag_offset" \
+  --amp-min 0.05 --amp-max 0.5 --amp-steps 40 \
+  --dur-min 50 --dur-max 200 --dur-steps 40 \
+  --n-injections-per-grid 30 \
+  --max-trials 48000 \
+  --workers 40 \
+  --min-mag-offset 0.0
+
+echo "  - Detection rate (false positive measurement)..."
+python -m malca.detection_rate --run-tag "1a_no_mag_offset" \
+  --sample-size 10000 \
+  --workers 40 \
+  --min-mag-offset 0.0
+
+# Test 1A-3: Lower logbf threshold
+echo ""
+echo "[3/3] Running with lower LogBF threshold (3.0)..."
+echo "  - Injection test..."
+python -m malca.injection --run-tag "1a_low_logbf" \
+  --amp-min 0.05 --amp-max 0.5 --amp-steps 40 \
+  --dur-min 50 --dur-max 200 --dur-steps 40 \
+  --n-injections-per-grid 30 \
+  --max-trials 48000 \
+  --workers 40 \
+  --logbf-threshold-dip 3.0
+
+echo "  - Detection rate (false positive measurement)..."
+python -m malca.detection_rate --run-tag "1a_low_logbf" \
+  --sample-size 10000 \
+  --workers 40 \
+  --logbf-threshold-dip 3.0
+
+echo ""
+echo "==================================================================="
+echo "Phase 1A Complete!"
+echo "Results in:"
+echo "  Injection (completeness):"
+echo "    - output/injection/1a_baseline/"
+echo "    - output/injection/1a_no_mag_offset/"
+echo "    - output/injection/1a_low_logbf/"
+echo ""
+echo "  Detection rate (contamination):"
+echo "    - output/detection_rate/1a_baseline/"
+echo "    - output/detection_rate/1a_no_mag_offset/"
+echo "    - output/detection_rate/1a_low_logbf/"
+echo ""
+echo "Next: Compare completeness vs contamination trade-offs"
+echo "==================================================================="
