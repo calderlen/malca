@@ -533,7 +533,8 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     print(f"Successful trials:  {summary['successful_trials']}")
     print(f"Failed trials:      {summary['failed_trials']}")
     print(f"Detections:         {summary['detections']}")
-    print(f"Detection rate:     {summary['detection_rate_percent']:.2f}%")
+    rate_str = f"{summary['detection_rate_percent']:.2f}%" if summary['detection_rate_percent'] is not None else "N/A"
+    print(f"Detection rate:     {rate_str}")
     print("="*60)
     print(f"\nResults saved to: {csv_out}")
     print(f"Summary saved to: {summary_out}")
