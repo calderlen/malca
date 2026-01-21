@@ -13,12 +13,11 @@ echo "==================================================================="
 # Test 1A-1: Baseline (current configuration)
 echo ""
 echo "[1/3] Running baseline (current config)..."
-echo "  - Injection test..."
+echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1a_baseline" \
-  --amp-min 0.05 --amp-max 0.5 --amp-steps 40 \
-  --dur-min 50 --dur-max 200 --dur-steps 40 \
-  --n-injections-per-grid 30 \
-  --max-trials 48000 \
+  --amp-min 0.05 --amp-max 0.5 --amp-steps 100 \
+  --dur-min 50 --dur-max 200 --dur-steps 100 \
+  --n-injections-per-grid 100 \
   --workers 40
 
 echo "  - Detection rate (false positive measurement)..."
@@ -29,12 +28,11 @@ python -m malca.detection_rate --run-tag "1a_baseline" \
 # Test 1A-2: Remove min-mag-offset filter
 echo ""
 echo "[2/3] Running with min-mag-offset=0.0 (remove filter)..."
-echo "  - Injection test..."
+echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1a_no_mag_offset" \
-  --amp-min 0.05 --amp-max 0.5 --amp-steps 40 \
-  --dur-min 50 --dur-max 200 --dur-steps 40 \
-  --n-injections-per-grid 30 \
-  --max-trials 48000 \
+  --amp-min 0.05 --amp-max 0.5 --amp-steps 100 \
+  --dur-min 50 --dur-max 200 --dur-steps 100 \
+  --n-injections-per-grid 100 \
   --workers 40 \
   --min-mag-offset 0.0
 
@@ -47,12 +45,11 @@ python -m malca.detection_rate --run-tag "1a_no_mag_offset" \
 # Test 1A-3: Lower logbf threshold
 echo ""
 echo "[3/3] Running with lower LogBF threshold (3.0)..."
-echo "  - Injection test..."
+echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1a_low_logbf" \
-  --amp-min 0.05 --amp-max 0.5 --amp-steps 40 \
-  --dur-min 50 --dur-max 200 --dur-steps 40 \
-  --n-injections-per-grid 30 \
-  --max-trials 48000 \
+  --amp-min 0.05 --amp-max 0.5 --amp-steps 100 \
+  --dur-min 50 --dur-max 200 --dur-steps 100 \
+  --n-injections-per-grid 100 \
   --workers 40 \
   --logbf-threshold-dip 3.0
 

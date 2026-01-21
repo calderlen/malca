@@ -13,12 +13,11 @@ echo "==================================================================="
 # Test 1B-1: Baseline (current configuration)
 echo ""
 echo "[1/4] Running baseline (current config)..."
-echo "  - Injection test..."
+echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1b_baseline" \
-  --amp-min 0.2 --amp-max 0.8 --amp-steps 30 \
-  --dur-min 1 --dur-max 100 --dur-steps 50 \
-  --n-injections-per-grid 30 \
-  --max-trials 45000 \
+  --amp-min 0.2 --amp-max 0.8 --amp-steps 100 \
+  --dur-min 1 --dur-max 100 --dur-steps 100 \
+  --n-injections-per-grid 100 \
   --workers 40
 
 echo "  - Detection rate (false positive measurement)..."
@@ -29,12 +28,11 @@ python -m malca.detection_rate --run-tag "1b_baseline" \
 # Test 1B-2: Shorter GP timescale (~100 days instead of ~2000)
 echo ""
 echo "[2/4] Running with shorter GP timescale (~100 days)..."
-echo "  - Injection test..."
+echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1b_short_gp" \
-  --amp-min 0.2 --amp-max 0.8 --amp-steps 30 \
-  --dur-min 1 --dur-max 100 --dur-steps 50 \
-  --n-injections-per-grid 30 \
-  --max-trials 45000 \
+  --amp-min 0.2 --amp-max 0.8 --amp-steps 100 \
+  --dur-min 1 --dur-max 100 --dur-steps 100 \
+  --n-injections-per-grid 100 \
   --workers 40 \
   --baseline-s0 0.002 --baseline-w0 0.0314
 
@@ -47,12 +45,11 @@ python -m malca.detection_rate --run-tag "1b_short_gp" \
 # Test 1B-3: Use trend baseline (no GP absorption)
 echo ""
 echo "[3/4] Running with trend baseline (no GP)..."
-echo "  - Injection test..."
+echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1b_trend_baseline" \
-  --amp-min 0.2 --amp-max 0.8 --amp-steps 30 \
-  --dur-min 1 --dur-max 100 --dur-steps 50 \
-  --n-injections-per-grid 30 \
-  --max-trials 45000 \
+  --amp-min 0.2 --amp-max 0.8 --amp-steps 100 \
+  --dur-min 1 --dur-max 100 --dur-steps 100 \
+  --n-injections-per-grid 100 \
   --workers 40 \
   --baseline-func trend
 
@@ -65,12 +62,11 @@ python -m malca.detection_rate --run-tag "1b_trend_baseline" \
 # Test 1B-4: Use masked GP
 echo ""
 echo "[4/4] Running with masked GP..."
-echo "  - Injection test..."
+echo "  - Injection test (100×100 grid, 100 inj/cell = 1M trials)..."
 python -m malca.injection --run-tag "1b_masked_gp" \
-  --amp-min 0.2 --amp-max 0.8 --amp-steps 30 \
-  --dur-min 1 --dur-max 100 --dur-steps 50 \
-  --n-injections-per-grid 30 \
-  --max-trials 45000 \
+  --amp-min 0.2 --amp-max 0.8 --amp-steps 100 \
+  --dur-min 1 --dur-max 100 --dur-steps 100 \
+  --n-injections-per-grid 100 \
   --workers 40 \
   --baseline-func gp_masked
 
