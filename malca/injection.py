@@ -1735,7 +1735,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
     parser.add_argument("--p-max-dip", type=float, default=None)
     parser.add_argument("--p-min-jump", type=float, default=None)
     parser.add_argument("--p-max-jump", type=float, default=None)
-    parser.add_argument("--run-min-points", type=int, default=3)
+    parser.add_argument("--run-min-points", type=int, default=2)
     parser.add_argument("--run-allow-gap-points", type=int, default=1)
     parser.add_argument("--run-max-gap-days", type=float, default=None)
     parser.add_argument("--run-min-duration-days", type=float, default=0.0)
@@ -1762,8 +1762,11 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
                         help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False).")
     parser.add_argument("--min-mag-offset", type=float, default=0.2,
                         help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)")
-    parser.add_argument("--measure-pre-injection", action="store_true",
-                        help="Measure detection rate on pre-injection light curves to assess contamination.")
+    parser.add_argument("--measure-pre-injection", action="store_true", default=True,
+                        help="Measure detection rate on pre-injection light curves (default: enabled)")
+    parser.add_argument("--no-measure-pre-injection", dest="measure_pre_injection", action="store_false",
+                        help="Disable pre-injection detection rate measurement")
+
 
     # Post-processing options
     parser.add_argument("--skip-cube", action="store_true", help="Skip computing efficiency cube.")

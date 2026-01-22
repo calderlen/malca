@@ -19,7 +19,8 @@ python -m malca.injection --run-tag "1b_baseline" \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
   --mag-points 25 \
-  --workers 40
+  --workers 40 \
+  --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
 python -m malca.detection_rate --run-tag "1b_baseline" \
@@ -37,7 +38,8 @@ python -m malca.injection --run-tag "1b_short_gp" \
   --n-injections-per-grid 100 \
   --mag-points 25 \
   --workers 40 \
-  --baseline-s0 0.002 --baseline-w0 0.0314
+  --baseline-s0 0.002 --baseline-w0 0.0314 \
+  --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
 python -m malca.detection_rate --run-tag "1b_short_gp" \
@@ -56,7 +58,8 @@ python -m malca.injection --run-tag "1b_trend_baseline" \
   --n-injections-per-grid 100 \
   --mag-points 25 \
   --workers 40 \
-  --baseline-func trend
+  --baseline-func trend \
+  --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
 python -m malca.detection_rate --run-tag "1b_trend_baseline" \
@@ -75,7 +78,8 @@ python -m malca.injection --run-tag "1b_masked_gp" \
   --n-injections-per-grid 100 \
   --mag-points 25 \
   --workers 40 \
-  --baseline-func gp_masked
+  --baseline-func gp_masked \
+  --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
 python -m malca.detection_rate --run-tag "1b_masked_gp" \

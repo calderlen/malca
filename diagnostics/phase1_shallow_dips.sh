@@ -19,7 +19,8 @@ python -m malca.injection --run-tag "1a_baseline" \
   --dur-min 1 --dur-max 300 --dur-steps 100 \
   --n-injections-per-grid 100 \
   --mag-points 25 \
-  --workers 40
+  --workers 40 \
+  --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
 python -m malca.detection_rate --run-tag "1a_baseline" \
@@ -37,7 +38,8 @@ python -m malca.injection --run-tag "1a_no_mag_offset" \
   --n-injections-per-grid 100 \
   --mag-points 25 \
   --workers 40 \
-  --min-mag-offset 0.0
+  --min-mag-offset 0.0 \
+  --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
 python -m malca.detection_rate --run-tag "1a_no_mag_offset" \
@@ -56,7 +58,8 @@ python -m malca.injection --run-tag "1a_low_logbf" \
   --n-injections-per-grid 100 \
   --mag-points 25 \
   --workers 40 \
-  --logbf-threshold-dip 3.0
+  --logbf-threshold-dip 3.0 \
+  --measure-pre-injection
 
 echo "  - Detection rate (false positive measurement)..."
 python -m malca.detection_rate --run-tag "1a_low_logbf" \
