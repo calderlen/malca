@@ -5,20 +5,20 @@ median validation also reads per-camera stats from .raw2 files via path.
 
 Filters:
 7. filter_posterior_strength - require strong Bayes factors
-8. filter_event_probability - require high event probabilities
-9. filter_run_robustness - require sufficient run count and points
-10. filter_morphology - require specific morphology with good BIC
+8. filter_run_robustness - require sufficient run count and points
+9. filter_morphology - require specific morphology with good BIC
+10. filter_score - require minimum dipper_score (log10 event score)
 11. validate_camera_medians - require camera median agreement from .raw2
 
 Required input columns (from events.py):
     dip_bayes_factor, jump_bayes_factor,
     dip_max_log_bf_local, jump_max_log_bf_local,
-    dip_max_event_prob, jump_max_event_prob,
     dip_run_count, jump_run_count,
     dip_max_run_points, jump_max_run_points,
     dip_max_run_cameras, jump_max_run_cameras,
     dip_best_morph, jump_best_morph,
     dip_best_delta_bic, jump_best_delta_bic,
+    dipper_score (for score filter),
     path (for logging and camera median validation)
 """
 
@@ -97,42 +97,6 @@ def filter_posterior_strength(
 
     return out
 
-
-# =============================================================================
-# Filter 8: Event probability
-# ============================================================================
-
-def filter_event_probability(
-    df: pd.DataFrame,
-    *,
-    min_event_prob: float = 0.5,
-    show_tqdm: bool = False,
-    verbose: bool = False,
-    rejected_log_csv: str | Path | None = None,
-) -> pd.DataFrame:
-    """
-    Keep light curves with dip_max_event_prob or jump_max_event_prob > threshold.
-    """
-    n0 = len(df)
-    pbar = tqdm(total=2, desc="filter_event_probability", leave=False) if show_tqdm else None
-
-    mask = (df["dip_max_event_prob"].fillna(0) > min_event_prob) | \
-           (df["jump_max_event_prob"].fillna(0) > min_event_prob)
-
-    out = df.loc[mask].reset_index(drop=True)
-
-    if pbar:
-        pbar.update(1)
-
-    if show_tqdm and verbose:
-        tqdm.write(f"[filter_event_probability] kept {len(out)}/{n0}")
-    log_rejections(df, out, "filter_event_probability", rejected_log_csv)
-
-    if pbar:
-        pbar.update(1)
-        pbar.close()
-
-    return out
 
 
 # =============================================================================
@@ -231,6 +195,47 @@ def filter_morphology(
     if pbar:
         pbar.update(1)
         pbar.close()
+
+    return out
+
+
+# =============================================================================
+# Filter 10: Event score
+# =============================================================================
+
+def filter_score(
+    df: pd.DataFrame,
+    *,
+    min_score: float = -3.0,
+    show_tqdm: bool = False,
+    verbose: bool = False,
+    rejected_log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Require dipper_score >= min_score.
+
+    The dipper_score is the log10 event score computed during detection
+    (higher = more significant events). Candidates with -inf score
+    (no valid events detected) are always rejected.
+
+    Parameters
+    ----------
+    min_score : float
+        Minimum log10 event score to keep (default: -3.0).
+    """
+    n0 = len(df)
+
+    if "dipper_score" not in df.columns:
+        if verbose:
+            tqdm.write("[filter_score] WARNING: 'dipper_score' column missing, skipping filter")
+        return df.copy()
+
+    mask = df["dipper_score"].fillna(-np.inf) >= min_score
+    out = df.loc[mask].reset_index(drop=True)
+
+    if show_tqdm and verbose:
+        tqdm.write(f"[filter_score] kept {len(out)}/{n0}")
+    log_rejections(df, out, "filter_score", rejected_log_csv)
 
     return out
 
@@ -765,9 +770,6 @@ def apply_post_filters(
     apply_posterior_strength: bool = True,
     min_bayes_factor: float = 10.0,
     require_finite_local_bf: bool = True,
-    # Filter 8: event probability
-    apply_event_probability: bool = True,
-    min_event_prob: float = 0.5,
     # Filter 9: run robustness
     apply_run_robustness: bool = True,
     min_run_count: int = 1,
@@ -778,6 +780,9 @@ def apply_post_filters(
     dip_morphology: str = "gaussian",
     jump_morphology: str = "paczynski",
     min_delta_bic: float = 10.0,
+    # Filter 11: event score
+    apply_score: bool = False,
+    min_score: float = 3.0,
     # Validation: camera medians
     apply_camera_median_validation: bool = False,
     max_camera_median_spread: float = 0.3,
@@ -802,7 +807,6 @@ def apply_post_filters(
     # General
     show_tqdm: bool = True,
     verbose: bool = False,
-    rejected_log_csv: str | Path | None = "rejected_post_filter.csv",
 ) -> pd.DataFrame:
     """
     Apply post-filters after running events.py.
@@ -827,13 +831,12 @@ def apply_post_filters(
         Show progress bars
     verbose : bool
         Print per-filter summaries and totals
-    rejected_log_csv : str | Path | None
-        Path to log rejected candidates
-
     Returns
     -------
     pd.DataFrame
-        Filtered dataframe
+        Full dataframe with added columns:
+        - failed_<filter_name>: bool, True if row failed that filter
+        - failed_any: bool, True if row failed any filter
     """
     df_filtered = df.copy()
     n_start = len(df_filtered)
@@ -846,15 +849,6 @@ def apply_post_filters(
             "require_finite_local_bf": require_finite_local_bf,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-            "rejected_log_csv": rejected_log_csv,
-        }))
-
-    if apply_event_probability:
-        filters.append(("event_probability", filter_event_probability, {
-            "min_event_prob": min_event_prob,
-            "show_tqdm": show_tqdm,
-            "verbose": verbose,
-            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_run_robustness:
@@ -864,7 +858,6 @@ def apply_post_filters(
             "min_run_cameras": min_run_cameras,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_morphology:
@@ -874,7 +867,13 @@ def apply_post_filters(
             "min_delta_bic": min_delta_bic,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-            "rejected_log_csv": rejected_log_csv,
+        }))
+
+    if apply_score:
+        filters.append(("score", filter_score, {
+            "min_score": min_score,
+            "show_tqdm": show_tqdm,
+            "verbose": verbose,
         }))
 
     if apply_camera_median_validation:
@@ -885,7 +884,6 @@ def apply_post_filters(
             "allow_missing_raw": allow_missing_raw,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_periodicity_validation:
@@ -895,7 +893,6 @@ def apply_post_filters(
             "exclude_alias_periods": periodicity_exclude_aliases,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_gaia_ruwe_validation:
@@ -905,7 +902,6 @@ def apply_post_filters(
             "flag_only": gaia_flag_only,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-            "rejected_log_csv": rejected_log_csv,
         }))
 
     if apply_periodic_catalog_validation:
@@ -915,29 +911,38 @@ def apply_post_filters(
             "flag_only": periodic_catalog_flag_only,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-            "rejected_log_csv": rejected_log_csv,
         }))
 
-    # Apply filters sequentially
+    # Apply filters and tag failures (all rows kept)
     total_steps = len(filters)
     if total_steps > 0:
         with tqdm(total=total_steps, desc="apply_post_filters", leave=True, disable=not show_tqdm) as pbar:
             for label, func, kwargs in filters:
-                n_before = len(df_filtered)
                 start = perf_counter()
-                df_filtered = func(df_filtered, **kwargs)
+                # Run filter on full dataframe to identify which rows pass
+                df_passed = func(df_filtered, **kwargs)
                 elapsed = perf_counter() - start
-                n_after = len(df_filtered)
 
+                # Determine which rows failed by comparing paths
+                passed_paths = set(df_passed["path"].astype(str))
+                failed_mask = ~df_filtered["path"].astype(str).isin(passed_paths)
+                df_filtered[f"failed_{label}"] = failed_mask
+
+                n_failed = int(failed_mask.sum())
                 if verbose:
-                    pbar.set_postfix_str(f"{label}: {n_before} → {n_after} ({elapsed:.2f}s)")
+                    pbar.set_postfix_str(f"{label}: {n_failed}/{n_start} failed ({elapsed:.2f}s)")
                 else:
                     pbar.set_postfix_str("")
                 pbar.update(1)
 
-    n_end = len(df_filtered)
+    # Add summary column
+    failed_cols = [c for c in df_filtered.columns if c.startswith("failed_")]
+    if failed_cols:
+        df_filtered["failed_any"] = df_filtered[failed_cols].any(axis=1)
+
     if show_tqdm and verbose:
-        tqdm.write(f"\n[apply_post_filters] Total: {n_start} → {n_end} ({n_end/n_start*100:.1f}% kept)")
+        n_failed_any = int(df_filtered["failed_any"].sum()) if "failed_any" in df_filtered.columns else 0
+        tqdm.write(f"\n[apply_post_filters] {n_failed_any}/{n_start} failed at least one filter")
 
     return df_filtered.reset_index(drop=True)
 
@@ -968,7 +973,6 @@ Example usage:
 
     # Filter toggles (all enabled by default except morphology)
     parser.add_argument("--skip-posterior-strength", action="store_true", help="Skip posterior strength filter")
-    parser.add_argument("--skip-event-probability", action="store_true", help="Skip event probability filter")
     parser.add_argument("--skip-run-robustness", action="store_true", help="Skip run robustness filter")
     parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter (off by default)")
     parser.add_argument("--apply-camera-median-validation", action="store_true",
@@ -979,10 +983,6 @@ Example usage:
                         help="Minimum Bayes factor for posterior strength filter (default: 10)")
     parser.add_argument("--allow-infinite-local-bf", action="store_true",
                         help="Allow infinite local BF (default: require finite)")
-
-    # Event probability parameters
-    parser.add_argument("--min-event-prob", type=float, default=0.5,
-                        help="Minimum event probability (default: 0.5)")
 
     # Run robustness parameters
     parser.add_argument("--min-run-count", type=int, default=1,
@@ -1001,6 +1001,12 @@ Example usage:
                         help="Required morphology for jumps (default: paczynski)")
     parser.add_argument("--min-delta-bic", type=float, default=10.0,
                         help="Minimum delta BIC for morphology filter (default: 10)")
+
+    # Score filter parameters
+    parser.add_argument("--apply-score-filter", action="store_true",
+                        help="Apply event score filter (off by default)")
+    parser.add_argument("--min-score", type=float, default=-3.0,
+                        help="Minimum log10 event score (dipper_score) to keep (default: -3.0)")
 
     # Camera median validation parameters
     parser.add_argument("--max-camera-median-spread", type=float, default=0.3,
@@ -1045,9 +1051,6 @@ Example usage:
     # General options
     parser.add_argument("--no-tqdm", action="store_true", help="Disable progress bars")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print per-filter summaries (default: off)")
-    parser.add_argument("--no-reject-log", action="store_true", help="Disable rejection logging")
-    parser.add_argument("--reject-log", type=Path, default=None,
-                        help="Path to rejection log CSV (default: rejected_post_filter.csv)")
 
     args = parser.parse_args()
 
@@ -1092,28 +1095,17 @@ Example usage:
         # Fallback: same directory as input
         output_path = input_path.parent / f"{input_path.stem}_filtered{input_path.suffix}"
 
-    # Determine reject log path
-    if args.no_reject_log:
-        reject_log = None
-    elif args.reject_log:
-        reject_log = args.reject_log.expanduser()
-    else:
-        reject_log = output_path.parent / "rejected_post_filter.csv"
-
     # Apply filters
     df_filtered = apply_post_filters(
         df,
         # Filter toggles
         apply_posterior_strength=not args.skip_posterior_strength,
-        apply_event_probability=not args.skip_event_probability,
         apply_run_robustness=not args.skip_run_robustness,
         apply_morphology=args.apply_morphology,
         apply_camera_median_validation=args.apply_camera_median_validation,
         # Posterior strength
         min_bayes_factor=args.min_bayes_factor,
         require_finite_local_bf=not args.allow_infinite_local_bf,
-        # Event probability
-        min_event_prob=args.min_event_prob,
         # Run robustness
         min_run_count=args.min_run_count,
         min_run_points=args.min_run_points,
@@ -1122,6 +1114,9 @@ Example usage:
         dip_morphology=args.dip_morphology,
         jump_morphology=args.jump_morphology,
         min_delta_bic=args.min_delta_bic,
+        # Score
+        apply_score=args.apply_score_filter,
+        min_score=args.min_score,
         # Camera median validation
         max_camera_median_spread=args.max_camera_median_spread,
         mag_bin=args.mag_bin,
@@ -1145,7 +1140,6 @@ Example usage:
         # General
         show_tqdm=not args.no_tqdm,
         verbose=args.verbose,
-        rejected_log_csv=reject_log,
     )
 
     # Generate filter log with comprehensive statistics
@@ -1169,44 +1163,37 @@ Example usage:
                 "output_file": str(output_path),
                 "filter_params": {
                     "apply_posterior_strength": not args.skip_posterior_strength,
-                    "apply_event_probability": not args.skip_event_probability,
                     "apply_run_robustness": not args.skip_run_robustness,
                     "apply_morphology": args.apply_morphology,
+                    "apply_score": args.apply_score_filter,
                     "apply_camera_median_validation": args.apply_camera_median_validation,
                     "apply_periodicity_validation": args.apply_periodicity_validation,
                     "apply_gaia_ruwe_validation": args.apply_gaia_ruwe_validation,
                     "apply_periodic_catalog_validation": args.apply_periodic_catalog_validation,
                     "min_bayes_factor": args.min_bayes_factor,
                     "require_finite_local_bf": not args.allow_infinite_local_bf,
-                    "min_event_prob": args.min_event_prob,
                     "min_run_count": args.min_run_count,
                     "min_run_points": args.min_run_points,
                     "min_run_cameras": args.min_run_cameras,
                     "dip_morphology": args.dip_morphology if args.apply_morphology else None,
                     "jump_morphology": args.jump_morphology if args.apply_morphology else None,
                     "min_delta_bic": args.min_delta_bic if args.apply_morphology else None,
+                    "min_score": args.min_score if args.apply_score_filter else None,
                     "max_camera_median_spread": args.max_camera_median_spread if args.apply_camera_median_validation else None,
                     "gaia_max_ruwe": args.gaia_max_ruwe if args.apply_gaia_ruwe_validation else None,
                     "gaia_reject": args.gaia_reject if args.apply_gaia_ruwe_validation else None,
                 },
                 "results": {
-                    "input_rows": len(df),
-                    "output_rows": len(df_filtered),
-                    "kept_fraction": len(df_filtered) / len(df) if len(df) > 0 else 0.0,
-                    "rejected_rows": len(df) - len(df_filtered),
+                    "total_rows": len(df_filtered),
+                    "passed_all": int((~df_filtered.get("failed_any", pd.Series(False))).sum()),
+                    "failed_any": int(df_filtered.get("failed_any", pd.Series(False)).sum()),
+                    "per_filter_failures": {
+                        col: int(df_filtered[col].sum())
+                        for col in df_filtered.columns
+                        if col.startswith("failed_") and col != "failed_any"
+                    },
                 },
             }
-
-            # Parse rejection log if available
-            if reject_log and reject_log.exists():
-                try:
-                    df_rejected = pd.read_csv(reject_log)
-                    if "filter" in df_rejected.columns:
-                        rejection_counts = df_rejected["filter"].value_counts().to_dict()
-                        filter_log["rejection_breakdown"] = rejection_counts
-                except Exception as e:
-                    if args.verbose:
-                        print(f"Warning: could not parse rejection log: {e}")
 
             with open(filter_log_file, "w") as f:
                 json.dump(filter_log, f, indent=2, default=str)
@@ -1226,8 +1213,18 @@ Example usage:
     else:
         df_filtered.to_csv(output_path, index=False)
 
-    print(f"\nWrote {len(df_filtered)} filtered rows to {output_path}")
-    print(f"Kept {len(df_filtered)}/{len(df)} ({len(df_filtered)/len(df)*100:.1f}%)")
+    n_failed = int(df_filtered["failed_any"].sum()) if "failed_any" in df_filtered.columns else 0
+    n_passed = len(df_filtered) - n_failed
+    print(f"\nWrote {len(df_filtered)} rows to {output_path}")
+    print(f"Passed all filters: {n_passed}/{len(df_filtered)} ({n_passed/len(df_filtered)*100:.1f}%)")
+
+    # Print per-filter failure counts
+    failed_cols = [c for c in df_filtered.columns if c.startswith("failed_") and c != "failed_any"]
+    if failed_cols:
+        print("\nPer-filter failures:")
+        for col in failed_cols:
+            n = int(df_filtered[col].sum())
+            print(f"  {col}: {n}/{len(df_filtered)} ({n/len(df_filtered)*100:.1f}%)")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ Usage:
     python -m malca detection_rate [options]  # Measure detection rate
     python -m malca plot [options]        # Plot light curves
     python -m malca filter [options]      # Apply filters
+    python -m malca postprocess [options] # Plot passing candidates
 """
 
 import sys
@@ -82,6 +83,14 @@ def main():
         description="Generate light curve plots with event overlays"
     )
     plot_parser.add_argument("--help-full", action="store_true", help="Show full help for plot command")
+
+    # Postprocess command
+    postprocess_parser = subparsers.add_parser(
+        "postprocess",
+        help="Plot passing candidates from post-filter output",
+        description="Plot light curves that pass all post-filters into a timestamped directory"
+    )
+    postprocess_parser.add_argument("--help-full", action="store_true", help="Show full help for postprocess command")
 
     # Filter command (pre/post)
     filter_parser = subparsers.add_parser(
@@ -156,6 +165,16 @@ def main():
             from malca import plot
             sys.argv = [sys.argv[0]] + remaining
             plot.main()
+
+    elif args.command == "postprocess":
+        if hasattr(args, 'help_full') and args.help_full:
+            from malca import postprocess
+            sys.argv = [sys.argv[0], '--help']
+            postprocess.main()
+        else:
+            from malca import postprocess
+            sys.argv = [sys.argv[0]] + remaining
+            postprocess.main()
 
     elif args.command == "filter":
         if hasattr(args, 'help_full') and args.help_full:

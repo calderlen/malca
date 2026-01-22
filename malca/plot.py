@@ -329,6 +329,7 @@ def plot_bayes_results(
     detection_results_csv=None,
     clean_max_error_absolute=1.0,
     clean_max_error_sigma=5.0,
+    annotations: dict[str, str] | None = None,
 ):
     """Plot a light curve with Bayesian detection results and run fits."""
                       
@@ -753,8 +754,16 @@ def plot_bayes_results(
             title_parts.append(f"Jumps: {total_jumps} runs (g:{g_jump.get('n_runs', 0)}, V:{v_jump.get('n_runs', 0)})")
     fig.suptitle(" – ".join(title_parts), fontsize=14)
 
-    
-                  
+    if annotations:
+        ann_parts = [f"{k}: {v}" for k, v in annotations.items() if v is not None]
+        ann_text = "  |  ".join(ann_parts)
+        fig.text(
+            0.5, 0.01, ann_text,
+            ha="center", va="bottom", fontsize=8,
+            fontfamily="monospace", color="0.3",
+            bbox=dict(boxstyle="round,pad=0.3", fc="0.95", ec="0.8", alpha=0.9),
+        )
+
     if out_path:
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)

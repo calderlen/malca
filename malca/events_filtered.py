@@ -107,6 +107,11 @@ def main():
     parser.add_argument("--vsx-mode", type=str, default="filter", choices=["tag", "filter"],
                         help="VSX handling: tag adds sep_arcsec/class columns, filter removes matches (default: filter)")
     parser.add_argument("--vsx-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="Path to pre-crossmatched VSX CSV (with asas_sn_id, sep_arcsec, class)")
+    parser.add_argument("--pass-all-prefilters", action="store_true",
+                        help="Pass all light curves to events.py regardless of pre-filter results (tags are still added)")
+    parser.add_argument("--enforce-filters", type=str, default=None,
+                        help="Comma-separated list of pre-filters to enforce (e.g., 'sparse,multi_camera'). "
+                             "Only rows failing these filters are excluded. Default: enforce all enabled filters.")
     parser.add_argument("--workers", type=int, default=10, help="Workers for parallel processing")
     parser.add_argument("--stats-chunk-size", type=int, default=5000, help="Rows per checkpoint save during stats computation")
     parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call")
@@ -397,6 +402,21 @@ def main():
             stats_checkpoint=str(stats_checkpoint_file),
             stats_chunk_size=args.stats_chunk_size,
         )
+
+        # Exclude rows based on pre-filter results
+        if not args.pass_all_prefilters:
+            failed_cols = [c for c in df_filtered.columns if c.startswith("failed_") and c != "failed_any"]
+
+            if args.enforce_filters:
+                # Only enforce specified filters
+                enforce_set = {f"failed_{f.strip()}" for f in args.enforce_filters.split(",")}
+                enforce_cols = [c for c in failed_cols if c in enforce_set]
+            else:
+                enforce_cols = failed_cols
+
+            if enforce_cols:
+                exclude_mask = df_filtered[enforce_cols].any(axis=1)
+                df_filtered = df_filtered[~exclude_mask].reset_index(drop=True)
 
         log(f"\nKept {len(df_filtered)}/{len(df_manifest)} sources after pre-filtering")
         log(f"Saving filtered manifest to {filtered_file}")

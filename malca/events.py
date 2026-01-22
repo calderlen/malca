@@ -1736,19 +1736,16 @@ def main():
             return
         nonlocal total_written, total_dip_sig, total_jump_sig, total_any_sig, writer
         
-        # Apply signal amplitude filter if requested
+        # Tag signal amplitude failures if requested
         if args.min_mag_offset is not None and args.min_mag_offset > 0:
-            from malca.filter import filter_signal_amplitude
             df_chunk = pd.DataFrame(chunk_results)
-            n_before = len(df_chunk)
-            df_chunk = filter_signal_amplitude(
-                df_chunk,
-                min_mag_offset=args.min_mag_offset,
-                show_tqdm=False,
-            )
-            n_after = len(df_chunk)
-            if n_before > n_after:
-                log(f"Signal amplitude filter: kept {n_after}/{n_before} candidates")
+            dip_diff = np.abs(df_chunk["dip_best_mag_event"] - df_chunk["baseline_mag"])
+            jump_diff = np.abs(df_chunk["jump_best_mag_event"] - df_chunk["baseline_mag"])
+            passed = (dip_diff > args.min_mag_offset) | (jump_diff > args.min_mag_offset)
+            df_chunk["failed_signal_amplitude"] = ~passed
+            n_failed = int((~passed).sum())
+            if n_failed > 0:
+                log(f"Signal amplitude filter: {n_failed}/{len(df_chunk)} failed")
             chunk_results = df_chunk.to_dict('records')
         
         if writer is not None:

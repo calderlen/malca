@@ -504,7 +504,9 @@ def apply_pre_filters(
     Returns
     -------
     pd.DataFrame
-        Filtered dataframe
+        Full dataframe with added columns:
+        - failed_<filter_name>: bool, True if row failed that filter
+        - failed_any: bool, True if row failed any filter
     """
     df_filtered = df.copy()
     n_start = len(df_filtered)
@@ -574,22 +576,33 @@ def apply_pre_filters(
             "rejected_log_csv": rejected_log_csv,
         }))
 
-    # Apply filters sequentially
+    # Apply filters and tag failures (all rows kept)
     total_steps = len(filters)
     if total_steps > 0:
         with tqdm(total=total_steps, desc="apply_pre_filters", leave=True, disable=not show_tqdm) as pbar:
             for label, func, kwargs in filters:
-                n_before = len(df_filtered)
                 start = perf_counter()
-                df_filtered = func(df_filtered, **kwargs)
+                # Run filter to identify which rows pass
+                kwargs_clean = {k: v for k, v in kwargs.items() if k != "rejected_log_csv"}
+                df_passed = func(df_filtered, **kwargs_clean)
                 elapsed = perf_counter() - start
-                n_after = len(df_filtered)
 
-                pbar.set_postfix_str(f"{label}: {n_before} → {n_after} ({elapsed:.2f}s)")
+                # Determine which rows failed by comparing paths
+                passed_paths = set(df_passed["path"].astype(str))
+                failed_mask = ~df_filtered["path"].astype(str).isin(passed_paths)
+                df_filtered[f"failed_{label}"] = failed_mask
+
+                n_failed = int(failed_mask.sum())
+                pbar.set_postfix_str(f"{label}: {n_failed}/{n_start} failed ({elapsed:.2f}s)")
                 pbar.update(1)
 
-    n_end = len(df_filtered)
+    # Add summary column
+    failed_cols = [c for c in df_filtered.columns if c.startswith("failed_")]
+    if failed_cols:
+        df_filtered["failed_any"] = df_filtered[failed_cols].any(axis=1)
+
     if show_tqdm:
-        tqdm.write(f"\n[apply_pre_filters] Total: {n_start} → {n_end} ({n_end/n_start*100:.1f}% kept)")
+        n_failed_any = int(df_filtered["failed_any"].sum()) if "failed_any" in df_filtered.columns else 0
+        tqdm.write(f"\n[apply_pre_filters] {n_failed_any}/{n_start} failed at least one filter")
 
     return df_filtered.reset_index(drop=True)
