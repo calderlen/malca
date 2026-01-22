@@ -237,6 +237,135 @@ def lomb_scargle_summary(jd, mag, err):
     except Exception:
         return {"ls_best_period_days": np.nan, "ls_peak_power": np.nan, "ls_fap": np.nan}
 
+
+def bootstrap_lomb_scargle(
+    jd: np.ndarray,
+    mag: np.ndarray,
+    err: np.ndarray,
+    *,
+    n_bootstrap: int = 1000,
+    min_frequency: float = 1.0 / 365.25,
+    max_frequency: float = 10.0,
+    exclude_alias_periods: bool = True,
+    alias_tolerance: float = 0.1,
+) -> dict:
+    """
+    Bootstrap Lomb-Scargle periodogram with significance testing.
+
+    More robust than simple FAP - uses bootstrap shuffling to determine
+    empirical significance of the peak power.
+
+    Parameters
+    ----------
+    jd : array
+        Julian dates
+    mag : array
+        Magnitudes
+    err : array
+        Magnitude errors
+    n_bootstrap : int
+        Number of bootstrap iterations (default 1000)
+    min_frequency : float
+        Minimum frequency to search (default 1/365.25 = 1 year period)
+    max_frequency : float
+        Maximum frequency to search (default 10 = 0.1 day period)
+    exclude_alias_periods : bool
+        Flag if best period is near known aliases
+    alias_tolerance : float
+        Tolerance for alias matching in days (default 0.1)
+
+    Returns
+    -------
+    dict with keys:
+        - ls_power: float, peak power
+        - ls_period_days: float, best period
+        - ls_bootstrap_sig: float, bootstrap significance (fraction of shuffles with higher power)
+        - ls_is_alias: bool, True if near known alias period
+        - ls_is_significant: bool, True if bootstrap_sig < 0.01 and not alias
+    """
+    if LombScargle is None:
+        return {
+            "ls_power": np.nan,
+            "ls_period_days": np.nan,
+            "ls_bootstrap_sig": np.nan,
+            "ls_is_alias": False,
+            "ls_is_significant": False,
+        }
+
+    jd = np.asarray(jd, float)
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+
+    mask = np.isfinite(jd) & np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    if mask.sum() < 50:
+        return {
+            "ls_power": np.nan,
+            "ls_period_days": np.nan,
+            "ls_bootstrap_sig": np.nan,
+            "ls_is_alias": False,
+            "ls_is_significant": False,
+        }
+
+    jd = jd[mask]
+    mag = mag[mask]
+    err = err[mask]
+
+    # Known alias periods (sidereal day, half-day, lunar month, year, half-year)
+    alias_periods = [1.0, 0.5, 29.53, 365.25, 182.625]
+
+    try:
+        ls = LombScargle(jd, mag, err)
+        freq, power_spec = ls.autopower(minimum_frequency=min_frequency, maximum_frequency=max_frequency)
+
+        if power_spec.size == 0:
+            return {
+                "ls_power": np.nan,
+                "ls_period_days": np.nan,
+                "ls_bootstrap_sig": np.nan,
+                "ls_is_alias": False,
+                "ls_is_significant": False,
+            }
+
+        max_idx = int(np.argmax(power_spec))
+        ls_power = float(power_spec[max_idx])
+        best_period = float(1.0 / freq[max_idx]) if freq[max_idx] > 0 else np.nan
+
+        # Bootstrap significance
+        bootstrap_powers = np.empty(n_bootstrap)
+        rng = np.random.default_rng()
+        for i in range(n_bootstrap):
+            shuffled_mag = rng.permutation(mag)
+            ls_boot = LombScargle(jd, shuffled_mag, err)
+            _, power_boot = ls_boot.autopower(minimum_frequency=min_frequency, maximum_frequency=max_frequency)
+            bootstrap_powers[i] = np.max(power_boot) if power_boot.size > 0 else 0.0
+
+        bootstrap_sig = float(np.sum(bootstrap_powers >= ls_power) / n_bootstrap)
+
+        # Check for alias periods
+        is_alias = False
+        if exclude_alias_periods and np.isfinite(best_period):
+            is_alias = any(abs(best_period - ap) < alias_tolerance for ap in alias_periods)
+
+        # Significant if bootstrap sig < 1% and not an alias
+        is_significant = (bootstrap_sig < 0.01) and (not is_alias)
+
+        return {
+            "ls_power": ls_power,
+            "ls_period_days": best_period,
+            "ls_bootstrap_sig": bootstrap_sig,
+            "ls_is_alias": is_alias,
+            "ls_is_significant": is_significant,
+        }
+
+    except Exception:
+        return {
+            "ls_power": np.nan,
+            "ls_period_days": np.nan,
+            "ls_bootstrap_sig": np.nan,
+            "ls_is_alias": False,
+            "ls_is_significant": False,
+        }
+
 def linear_trend(x, y):
     # returns slope, intercept, r^2; robust to NaNs
     mask = np.isfinite(x) & np.isfinite(y)

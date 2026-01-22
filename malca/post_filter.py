@@ -442,11 +442,9 @@ def validate_periodicity(
     """
     from pathlib import Path
     from malca.utils import read_lc_dat2
-    from astropy.timeseries import LombScargle
+    from malca.stats import bootstrap_lomb_scargle
 
     n0 = len(df)
-
-    alias_periods = [1.0, 0.5, 29.53, 365.25, 182.625] if exclude_alias_periods else []
 
     powers = []
     periods = []
@@ -469,43 +467,25 @@ def validate_periodicity(
         mag = df_lc["mag"].values
         err = df_lc["error"].values
 
-        if len(jd) < 50:
-            powers.append(0.0)
-            periods.append(np.nan)
-            bootstrap_significances.append(np.nan)
-            is_alias.append(False)
-            keep_flags.append(True)
-            continue
+        # Use bootstrap_lomb_scargle from stats.py
+        ls_result = bootstrap_lomb_scargle(
+            jd, mag, err,
+            n_bootstrap=n_bootstrap,
+            exclude_alias_periods=exclude_alias_periods,
+        )
 
-        ls = LombScargle(jd, mag, err)
-        freq, power_spec = ls.autopower(minimum_frequency=1.0/365.25, maximum_frequency=10.0)
+        powers.append(ls_result["ls_power"])
+        periods.append(ls_result["ls_period_days"])
+        bootstrap_significances.append(ls_result["ls_bootstrap_sig"])
+        is_alias.append(ls_result["ls_is_alias"])
 
-        max_idx = np.argmax(power_spec)
-        lsp_power = float(power_spec[max_idx])
-        best_period = float(1.0 / freq[max_idx])
-
-        bootstrap_powers = []
-        for _ in range(n_bootstrap):
-            shuffled_mag = np.random.permutation(mag)
-            ls_boot = LombScargle(jd, shuffled_mag, err)
-            freq_boot, power_boot = ls_boot.autopower(minimum_frequency=1.0/365.25, maximum_frequency=10.0)
-            bootstrap_powers.append(np.max(power_boot))
-
-        bootstrap_powers = np.array(bootstrap_powers)
-        bootstrap_sig = float(np.sum(bootstrap_powers >= lsp_power) / n_bootstrap)
-
-        alias_flag = any(abs(best_period - ap) < 0.1 for ap in alias_periods)
-
+        # Keep if NOT significantly periodic (or is an alias)
         keep = True
-        if not alias_flag:
-            if bootstrap_sig < significance_level:
+        if not ls_result["ls_is_alias"]:
+            if ls_result["ls_bootstrap_sig"] < significance_level:
                 keep = False
-
-        powers.append(lsp_power)
-        periods.append(best_period)
-        bootstrap_significances.append(bootstrap_sig)
-        is_alias.append(alias_flag)
         keep_flags.append(keep)
+
     df_out = df.copy()
     df_out["lsp_power"] = powers
     df_out["lsp_period"] = periods
@@ -781,8 +761,8 @@ def apply_post_filters(
     jump_morphology: str = "paczynski",
     min_delta_bic: float = 10.0,
     # Filter 11: event score
-    apply_score: bool = False,
-    min_score: float = 3.0,
+    apply_score: bool = True,
+    min_score: float = 0.0,
     # Validation: camera medians
     apply_camera_median_validation: bool = False,
     max_camera_median_spread: float = 0.3,
@@ -795,14 +775,14 @@ def apply_post_filters(
     periodicity_significance: float = 0.01,
     periodicity_exclude_aliases: bool = True,
     # Validation: Gaia RUWE
-    apply_gaia_ruwe_validation: bool = False,
+    apply_gaia_ruwe_validation: bool = True,
     gaia_catalog_path: Path | None = None,
     gaia_max_ruwe: float = 1.4,
     gaia_flag_only: bool = True,
     # Validation: periodic catalog
-    apply_periodic_catalog_validation: bool = False,
+    apply_periodic_catalog_validation: bool = True,
     periodic_catalog_path: Path | None = None,
-    periodic_catalog_max_sep: float = 3.0,
+    periodic_catalog_max_sep: float = 1.0,
     periodic_catalog_flag_only: bool = True,
     # General
     show_tqdm: bool = True,

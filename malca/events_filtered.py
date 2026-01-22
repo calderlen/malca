@@ -7,9 +7,14 @@ Workflow:
 2. Apply pre-filters (sparse, periodic, multi-camera)
 3. Construct file paths for kept sources
 4. Pass to events.py
+5. [Optional] Apply post-filters (posterior strength, run robustness, etc.)
+6. [Optional] Generate postprocess plots for passing candidates
+7. [Optional] Run classification (EB/CV/starspot rejection, YSO classification)
+8. [Optional] Enrich passing candidates with comprehensive light curve stats
 
 Usage:
     python -m malca.events_filtered --mag-bin 13_13.5 [events.py args...]
+    python -m malca.events_filtered --mag-bin 13_13.5 --run-post-filter --run-classify --run-enrich
 """
 from __future__ import annotations
 
@@ -24,6 +29,10 @@ import tempfile
 
 from malca.manifest import build_manifest_dataframe
 from malca.pre_filter import apply_pre_filters
+from malca.post_filter import apply_post_filters
+from malca.postprocess import run_postprocess
+from malca.classify import compute_all_classifications
+from malca.stats import compute_stats
 
 
 def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -152,6 +161,34 @@ def main():
                         help="Directory for all outputs (default: output/runs/<timestamp>)")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk"], help="Output format")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows")
+
+    # Step 5: Post-filter args
+    parser.add_argument("--run-post-filter", action="store_true",
+                        help="Run post_filter after events.py completes")
+    parser.add_argument("--min-bayes-factor", type=float, default=10.0,
+                        help="Min Bayes factor for post-filter (default: 10.0)")
+    parser.add_argument("--post-filter-min-run-cameras", type=int, default=2,
+                        help="Min cameras for run robustness filter (default: 2)")
+    parser.add_argument("--post-filter-min-run-points", type=int, default=2,
+                        help="Min points per run for robustness filter (default: 2)")
+
+    # Step 6: Postprocess args
+    parser.add_argument("--run-postprocess", action="store_true",
+                        help="Run postprocess (generate plots) after post_filter")
+    parser.add_argument("--max-plots", type=int, default=None,
+                        help="Limit number of plots generated (default: no limit)")
+    parser.add_argument("--plot-format", type=str, default="png", choices=["png", "pdf"],
+                        help="Output format for plots (default: png)")
+
+    # Step 7: Classify args
+    parser.add_argument("--run-classify", action="store_true",
+                        help="Run classification (EB/CV/starspot rejection, YSO) after post_filter")
+
+    # Step 8: Enrich args
+    parser.add_argument("--run-enrich", action="store_true",
+                        help="Enrich passing candidates with comprehensive light curve stats")
+    parser.add_argument("--enrich-compute-ls", action="store_true",
+                        help="Include Lomb-Scargle periodogram in enrichment (expensive)")
 
     parser.add_argument("-o", "--overwrite", action="store_true",
                         help="Overwrite checkpoint log and existing output if present (start fresh).")
@@ -621,7 +658,7 @@ def main():
                 if args.verbose:
                     print(f"Warning: could not parse VSX tags: {e}")
 
-        # Write summary
+        # Write summary (will be updated again if post-filter/postprocess run)
         with open(run_summary_file, "w") as f:
             json.dump(summary, f, indent=2, default=str)
 
@@ -630,6 +667,235 @@ def main():
     except Exception as e:
         if args.verbose:
             print(f"Warning: could not write run summary: {e}")
+
+    # Step 5: Apply post-filters (optional)
+    if args.run_post_filter and results_files:
+        log("\n=== Step 5: Applying post-filters ===")
+        try:
+            # Load events results
+            if events_format == "csv":
+                df_events = pd.read_csv(results_files[0])
+            else:
+                df_events = pd.concat([pd.read_parquet(f) for f in results_files], ignore_index=True)
+
+            # Apply post-filters
+            df_post_filtered = apply_post_filters(
+                df_events,
+                apply_posterior_strength=True,
+                min_bayes_factor=args.min_bayes_factor,
+                apply_run_robustness=True,
+                min_run_cameras=args.post_filter_min_run_cameras,
+                min_run_points=args.post_filter_min_run_points,
+                show_tqdm=args.verbose,
+                verbose=args.verbose,
+            )
+
+            # Save filtered results
+            post_filter_output = results_dir / "lc_events_filtered.csv"
+            df_post_filtered.to_csv(post_filter_output, index=False)
+            log(f"Post-filtered results saved to {post_filter_output}")
+
+            # Update summary with post-filter stats
+            n_passed = int((~df_post_filtered["failed_any"]).sum()) if "failed_any" in df_post_filtered.columns else len(df_post_filtered)
+            n_failed = int(df_post_filtered["failed_any"].sum()) if "failed_any" in df_post_filtered.columns else 0
+            summary["post_filter_stats"] = {
+                "total_input": len(df_events),
+                "passed": n_passed,
+                "failed": n_failed,
+                "pass_rate": n_passed / len(df_events) if len(df_events) > 0 else 0.0,
+            }
+
+            # Overwrite summary with updated stats
+            with open(run_summary_file, "w") as f:
+                json.dump(summary, f, indent=2, default=str)
+
+            log(f"Post-filter: {n_passed}/{len(df_events)} passed")
+
+        except Exception as e:
+            print(f"Error in post-filter step: {e}")
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+
+    # Step 6: Generate postprocess plots (optional)
+    if args.run_postprocess:
+        if not args.run_post_filter:
+            print("Warning: --run-postprocess requires --run-post-filter. Skipping postprocess.")
+        else:
+            log("\n=== Step 6: Generating postprocess plots ===")
+            try:
+                post_filter_output = results_dir / "lc_events_filtered.csv"
+                if post_filter_output.exists():
+                    df_post_filtered = pd.read_csv(post_filter_output)
+                    
+                    postprocess_dir = out_dir / "plots"
+                    postprocess_dir.mkdir(parents=True, exist_ok=True)
+
+                    postprocess_summary = run_postprocess(
+                        df_post_filtered,
+                        out_dir=postprocess_dir,
+                        baseline=args.baseline_func,
+                        logbf_threshold_dip=args.logbf_threshold_dip,
+                        logbf_threshold_jump=args.logbf_threshold_jump,
+                        plot_format=args.plot_format,
+                        max_plots=args.max_plots,
+                        show_tqdm=args.verbose,
+                    )
+
+                    # Update summary with postprocess stats
+                    summary["postprocess_stats"] = postprocess_summary
+
+                    # Overwrite summary with updated stats
+                    with open(run_summary_file, "w") as f:
+                        json.dump(summary, f, indent=2, default=str)
+
+                    log(f"Postprocess: {postprocess_summary.get('plotted', 0)} plots generated in {postprocess_dir}")
+                else:
+                    print(f"Warning: post-filter output not found at {post_filter_output}")
+
+            except Exception as e:
+                print(f"Error in postprocess step: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+
+    # Step 7: Run classification (optional)
+    if args.run_classify:
+        if not args.run_post_filter:
+            print("Warning: --run-classify requires --run-post-filter. Skipping classification.")
+        else:
+            log("\n=== Step 7: Running classification ===")
+            try:
+                post_filter_output = results_dir / "lc_events_filtered.csv"
+                if post_filter_output.exists():
+                    df_post_filtered = pd.read_csv(post_filter_output)
+                    
+                    # Run classification on passing candidates
+                    df_passed = df_post_filtered[~df_post_filtered["failed_any"]].copy() if "failed_any" in df_post_filtered.columns else df_post_filtered.copy()
+                    
+                    if len(df_passed) > 0:
+                        df_classified = compute_all_classifications(df_passed)
+                        
+                        # Save classified results
+                        classify_output = results_dir / "lc_events_classified.csv"
+                        df_classified.to_csv(classify_output, index=False)
+                        log(f"Classification results saved to {classify_output}")
+                        
+                        # Update summary with classification stats
+                        class_counts = df_classified["final_class"].value_counts().to_dict() if "final_class" in df_classified.columns else {}
+                        summary["classification_stats"] = {
+                            "total_classified": len(df_classified),
+                            "by_class": class_counts,
+                        }
+                        
+                        # Overwrite summary with updated stats
+                        with open(run_summary_file, "w") as f:
+                            json.dump(summary, f, indent=2, default=str)
+                        
+                        log(f"Classification: {len(df_classified)} candidates classified")
+                    else:
+                        log("No passing candidates to classify.")
+                else:
+                    print(f"Warning: post-filter output not found at {post_filter_output}")
+
+            except Exception as e:
+                print(f"Error in classification step: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+
+    # Step 8: Enrich with compute_stats (optional)
+    if args.run_enrich:
+        if not args.run_post_filter:
+            print("Warning: --run-enrich requires --run-post-filter. Skipping enrichment.")
+        else:
+            log("\n=== Step 8: Enriching with light curve stats ===")
+            try:
+                # Load final results (classified if available, otherwise post-filtered)
+                classify_output = results_dir / "lc_events_classified.csv"
+                post_filter_output = results_dir / "lc_events_filtered.csv"
+                
+                if classify_output.exists():
+                    df_to_enrich = pd.read_csv(classify_output)
+                    source_file = classify_output
+                elif post_filter_output.exists():
+                    df_to_enrich = pd.read_csv(post_filter_output)
+                    source_file = post_filter_output
+                else:
+                    print(f"Warning: No post-filter or classified output found")
+                    df_to_enrich = None
+                
+                if df_to_enrich is not None:
+                    # Filter to passing candidates only
+                    if "failed_any" in df_to_enrich.columns:
+                        df_passed = df_to_enrich[~df_to_enrich["failed_any"]].copy()
+                    else:
+                        df_passed = df_to_enrich.copy()
+                    
+                    if len(df_passed) > 0:
+                        log(f"Enriching {len(df_passed)} candidates with compute_stats...")
+                        
+                        enriched_rows = []
+                        from tqdm.auto import tqdm
+                        
+                        for idx, row in tqdm(df_passed.iterrows(), total=len(df_passed), 
+                                            desc="compute_stats", disable=not args.verbose):
+                            lc_path = Path(row["path"])
+                            if not lc_path.exists():
+                                enriched_rows.append(row.to_dict())
+                                continue
+                            
+                            try:
+                                # Extract asassn_id from path
+                                asassn_id = lc_path.stem.split("-")[0]
+                                dir_path = str(lc_path.parent)
+                                
+                                # Run compute_stats
+                                _, stats_dict = compute_stats(
+                                    asassn_id, 
+                                    dir_path,
+                                    use_only_good=True,
+                                    compute_ls=args.enrich_compute_ls,
+                                )
+                                
+                                # Merge stats into row
+                                merged = row.to_dict()
+                                for k, v in stats_dict.items():
+                                    if k not in merged:  # Don't overwrite existing columns
+                                        merged[f"stats_{k}"] = v
+                                enriched_rows.append(merged)
+                                
+                            except Exception as e:
+                                if args.verbose:
+                                    print(f"Warning: compute_stats failed for {lc_path}: {e}")
+                                enriched_rows.append(row.to_dict())
+                        
+                        df_enriched = pd.DataFrame(enriched_rows)
+                        
+                        # Save enriched results
+                        enrich_output = results_dir / "lc_events_enriched.csv"
+                        df_enriched.to_csv(enrich_output, index=False)
+                        log(f"Enriched results saved to {enrich_output}")
+                        
+                        # Update summary
+                        n_stats_cols = len([c for c in df_enriched.columns if c.startswith("stats_")])
+                        summary["enrichment_stats"] = {
+                            "total_enriched": len(df_enriched),
+                            "stats_columns_added": n_stats_cols,
+                        }
+                        
+                        with open(run_summary_file, "w") as f:
+                            json.dump(summary, f, indent=2, default=str)
+                        
+                        log(f"Enrichment: {len(df_enriched)} candidates, {n_stats_cols} stats columns added")
+                    else:
+                        log("No passing candidates to enrich.")
+
+            except Exception as e:
+                print(f"Error in enrichment step: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
 
 
 if __name__ == "__main__":
