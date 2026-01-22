@@ -145,7 +145,7 @@ def main():
     parser.add_argument("--output", type=str, default=None, help="Output path for results (default: <out_dir>/lc_events_results.csv)")
     parser.add_argument("--out-dir", type=str, default=None,
                         help="Directory for all outputs (default: output/runs/<timestamp>)")
-    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format")
+    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk"], help="Output format")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows")
 
     parser.add_argument("-o", "--overwrite", action="store_true",
@@ -450,7 +450,7 @@ def main():
 
     # Resume logic: skip paths already recorded in events checkpoint log if present
     base_output = events_output or (results_dir / "lc_events_results.csv")
-    suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None, "duckdb": ".duckdb"}
+    suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None}
     ext = suffix_map.get(events_format)
     if ext and base_output.suffix.lower() != ext:
         base_output = base_output.with_suffix(ext)
@@ -560,9 +560,6 @@ def main():
         elif events_format == "parquet_chunk":
             chunk_dir = base_output.parent if base_output.suffix else base_output
             results_files = sorted(chunk_dir.glob("chunk_*.parquet"))
-        elif events_format == "duckdb":
-            # DuckDB results aren't easily parsed here
-            pass
 
         if results_files:
             try:

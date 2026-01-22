@@ -158,3 +158,11 @@ Single Eclipse Binaries      6     13
 
 
 - need to add stellar flare filters
+
+
+
+
+- ZTF paper
+    - the most well-known main-sequence dipper is Boyajian's star
+    - "For the analysis of our 81 newly identified main-sequence dipper stars, we downloaded the most recent ZTF gr-band ZTF 22 photometry directly from IRSA. To remove any spurious photometry, we applied the standard photometric quality criteria (i.e., chi > 4, |sharp| < 0.25, and catflags = 0) recommended by the ZSDS as discussed in detail in Section 3.4. We provide Table 2 in Apendix A that contains the associated coordinates, magnitudes, distance, time of dip, and number of dips in the ZTF light curves"
+    - their injection results do not match their results. most of their recovered dippers are <0.5 transit depth fraction and between 1 month and 1 year dimming events.

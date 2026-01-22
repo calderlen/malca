@@ -15,14 +15,14 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
-from scipy.special import logsumexp, erf
+from scipy.special import logsumexp
 from scipy.optimize import curve_fit
 from tqdm import tqdm
 import warnings
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
-except ImportError:  # optional; only needed for parquet/duckdb outputs
+except ImportError:  # optional; only needed for parquet outputs
     pa = None
     pq = None
 
@@ -30,13 +30,14 @@ warnings.filterwarnings("ignore", message=".*Covariance of the parameters could 
 warnings.filterwarnings("ignore", message=".*overflow encountered in.*")
 warnings.filterwarnings("ignore", message=".*invalid value encountered in.*", category=RuntimeWarning)
 
-from malca.utils import read_lc_dat2, read_lc_csv, clean_lc, gaussian
+from malca.utils import read_lc_dat2, read_lc_csv, clean_lc, gaussian, paczynski_kernel, fred, skew_gaussian
 from malca.baseline import (
     per_camera_gp_baseline,
     per_camera_gp_baseline_masked,
     per_camera_trend_baseline,
 )
 from malca.score import compute_event_score
+from malca.stats import log_gaussian, robust_median_dt_days, bic
 
 from numba import njit
 
@@ -51,70 +52,6 @@ DEFAULT_BASELINE_KWARGS = dict(
     sigma_floor=None,
     add_sigma_eff_col=True,
 )
-
-def paczynski(t, amp, t0, tE, baseline):
-    """
-    paczynski kernel + baseline term
-    """
-    tE = np.maximum(np.abs(tE), 1e-5)
-    return baseline + amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
-
-
-def fred(t, amp, t0, tau, baseline):
-    """
-    Fast Rise Exponential Decay (FRED) kernel + baseline term.
-    """
-    tau = np.maximum(np.abs(tau), 1e-5)
-    dt = t - t0
-    # Mask out values before t0
-    decay = np.where(dt >= 0, np.exp(-dt / tau), 0.0)
-    return baseline + amp * decay
-
-
-def skew_gaussian(t, amp, t0, sigma, baseline, alpha):
-    """
-    Skew-normal distribution kernel + baseline term.
-
-    Parameters
-    ----------
-    t : array-like
-        Time values
-    amp : float
-        Amplitude of the dip (positive for dimming)
-    t0 : float
-        Center time of the event
-    sigma : float
-        Width parameter (like standard deviation)
-    baseline : float
-        Baseline magnitude
-    alpha : float
-        Skewness parameter. alpha=0 is symmetric Gaussian.
-        alpha>0 skews right (slower egress), alpha<0 skews left (slower ingress).
-
-    Returns
-    -------
-    array-like
-        Model magnitudes
-    """
-    sigma = np.maximum(np.abs(sigma), 1e-5)
-    z = (t - t0) / sigma
-    # Skew-normal: gaussian * (1 + erf(alpha * z / sqrt(2)))
-    # Normalized so peak amplitude matches 'amp' approximately
-    skew_factor = 1 + erf(alpha * z / np.sqrt(2))
-    return baseline + amp * np.exp(-0.5 * z**2) * skew_factor
-
-
-def log_gaussian(x, mu, sigma):
-    """
-    ln p = -1/2 * ((x-mu)/sigma)^2 - ln(sigma) - 1/2 ln(2pi)
-    """
-    x = np.asarray(x, float)
-    mu = np.asarray(mu, float)
-    sigma = np.asarray(sigma, float)
-    sigma = np.clip(sigma, 1e-12, np.inf)
-    z = (x - mu) / sigma
-    return -0.5 * z**2 - np.log(sigma) - 0.5 * np.log(2.0 * np.pi)
-
 
 def logit_spaced_grid(p_min=1e-4, p_max=1.0 - 1e-4, n=12):
     """
@@ -166,33 +103,6 @@ def default_mag_grid(baseline_mag: float, mags: np.ndarray, kind: str, n=12):
         stop = start + (0.1 if kind == "dip" else -0.1)
 
     return np.linspace(start, stop, int(n))
-
-
-def robust_median_dt_days(jd: np.ndarray) -> float:
-    """
-    
-    """
-    jd = np.asarray(jd, float)
-    if jd.size < 2:
-        return np.nan
-    dt = np.diff(jd)
-    dt = dt[np.isfinite(dt) & (dt > 0)]
-    if dt.size == 0:
-        return np.nan
-    return float(np.nanmedian(dt))
-
-
-
-def bic(resid, err, n_params):
-    """
-    bayesian information criterion = chi2 + k * ln(n)
-    """
-    err = np.clip(err, 1e-9, np.inf)
-    chi2 = np.nansum((resid / err) ** 2)
-    n_points = len(resid)
-    if n_points == 0:
-        return np.inf
-    return chi2 + n_params * np.log(n_points)
 
 
 def compute_symmetry_score(
@@ -360,11 +270,11 @@ def classify_run_morphology(jd, mag, err, run_idx, kind="dip"):
             amp_p_guess = -abs(amp_guess)
 
             popt_p, _ = curve_fit(
-                paczynski, t_seg, y_seg,
+                paczynski_kernel, t_seg, y_seg,
                 p0=[amp_p_guess, t0_guess, sigma_guess, baseline_guess],
                 sigma=e_seg, maxfev=2000
             )
-            resid_p = y_seg - paczynski(t_seg, *popt_p)
+            resid_p = y_seg - paczynski_kernel(t_seg, *popt_p)
             bic_p = bic(resid_p, e_seg, 4)
 
             is_valid_p = (popt_p[0] < 0)
@@ -1114,6 +1024,8 @@ def bayesian_event_significance(
 
         p_grid=p_grid,
         mag_grid=mag_grid,
+
+        df_base=df_base,
     )
 
 
@@ -1203,7 +1115,7 @@ def run_bayesian_significance(
         compute_event_prob=compute_event_prob,
     )
 
-    return dict(dip=dip, jump=jump)
+    return dict(dip=dip, jump=jump, df_base=df_base)
 
 
 
@@ -1400,7 +1312,13 @@ def process_one(
     dipper_n_dips = 0
     dipper_n_valid_dips = 0
     if bool(dip["significant"]):
-        score, events = compute_event_score(df, event_type='dip')
+        # Use GP baseline for scoring (compute residuals)
+        df_base = res.get("df_base")
+        if df_base is not None and "baseline" in df_base.columns:
+            baseline_mags = df_base["baseline"].to_numpy()
+        else:
+            baseline_mags = None
+        score, events = compute_event_score(df, event_type='dip', baseline_mags=baseline_mags)
         dipper_score = float(score)
         dipper_n_dips = int(len(events))
         dipper_n_valid_dips = int(sum(1 for e in events if e.valid))
@@ -1515,7 +1433,7 @@ def main():
     parser.add_argument("--output", type=str, default=None, help="Output path for results (suffix adjusted per format).")
     parser.add_argument("--metadata-csv", type=str, default=None,
                         help="Optional CSV with 'path' and extra metadata columns to attach to results.")
-    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk", "duckdb"], help="Output format for results.")
+    parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk"], help="Output format for results.")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output (default: quiet).")
@@ -1558,7 +1476,7 @@ def main():
     def ensure_suffix(path: Path | None, fmt: str) -> Path | None:
         if path is None:
             return None
-        suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None, "duckdb": ".duckdb"}
+        suffix_map = {"csv": ".csv", "parquet": ".parquet", "parquet_chunk": None}
         ext = suffix_map.get(fmt)
         if ext and path.suffix.lower() != ext:
             return path.with_suffix(ext)
@@ -1582,11 +1500,6 @@ def main():
                 dataset = ds.dataset(path, format="parquet")
                 table = dataset.to_table(columns=["path"])
                 df_existing = table.to_pandas()
-            elif fmt == "duckdb":
-                import duckdb
-                con = duckdb.connect(str(path), read_only=True)
-                df_existing = con.execute("SELECT path FROM results").df()
-                con.close()
             else:
                 return set()
             if "path" in df_existing.columns:
@@ -1786,35 +1699,6 @@ def main():
         def close(self):
             return
 
-    class DuckDBWriter:
-        def __init__(self, path: Path):
-            import duckdb
-            self.path = Path(path)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.con = duckdb.connect(str(self.path))
-            self.initialized = False
-
-        def write_chunk(self, chunk_results):
-            if not chunk_results:
-                return
-            df_chunk = pd.DataFrame(chunk_results)
-            if df_chunk.empty:
-                return
-            self.con.execute("BEGIN")
-            self.con.register("tmp_chunk", df_chunk)
-            if not self.initialized:
-                self.con.execute("CREATE TABLE IF NOT EXISTS results AS SELECT * FROM tmp_chunk LIMIT 0")
-                self.initialized = True
-            self.con.execute("INSERT INTO results SELECT * FROM tmp_chunk")
-            self.con.execute("COMMIT")
-
-        def close(self):
-            if hasattr(self, "con") and self.con:
-                try:
-                    self.con.close()
-                except Exception:
-                    pass
-
     def make_writer(path: Path | None, fmt: str):
         if path is None:
             return None
@@ -1824,11 +1708,6 @@ def main():
             return ParquetChunkWriter(path)
         elif fmt == "parquet_chunk":
             return ParquetDatasetWriter(path)
-        elif fmt == "duckdb":
-            try:
-                return DuckDBWriter(path)
-            except ImportError as e:
-                raise SystemExit(f"duckdb output selected but duckdb is not installed: {e}")
         else:
             raise ValueError(f"Unknown output format: {fmt}")
 

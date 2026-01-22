@@ -10,7 +10,6 @@ Usage:
     python -m malca injection [options]   # Run injection-recovery tests
     python -m malca detection_rate [options]  # Measure detection rate
     python -m malca plot [options]        # Plot light curves
-    python -m malca score [options]       # Score events
     python -m malca filter [options]      # Apply filters
 """
 
@@ -83,15 +82,7 @@ def main():
         description="Generate light curve plots with event overlays"
     )
     plot_parser.add_argument("--help-full", action="store_true", help="Show full help for plot command")
-    
-    # Score command
-    score_parser = subparsers.add_parser(
-        "score",
-        help="Score detected events",
-        description="Compute event quality scores for dips or microlensing"
-    )
-    score_parser.add_argument("--help-full", action="store_true", help="Show full help for score command")
-    
+
     # Filter command (pre/post)
     filter_parser = subparsers.add_parser(
         "filter",
@@ -165,17 +156,7 @@ def main():
             from malca import plot
             sys.argv = [sys.argv[0]] + remaining
             plot.main()
-    
-    elif args.command == "score":
-        if hasattr(args, 'help_full') and args.help_full:
-            from malca import score
-            sys.argv = [sys.argv[0], '--help']
-            score.main()
-        else:
-            from malca import score
-            sys.argv = [sys.argv[0]] + remaining
-            score.main()
-    
+
     elif args.command == "filter":
         if hasattr(args, 'help_full') and args.help_full:
             from malca import post_filter

@@ -21,6 +21,98 @@ def gaussian(t, amp, t0, sigma, baseline):
     return baseline + amp * np.exp(-0.5 * ((t - t0) / sigma) ** 2)
 
 
+def paczynski_kernel(t, amp, t0, tE, baseline):
+    """
+    Simple Paczyński kernel approximation + baseline term.
+
+    Fast approximation for curve fitting. For full physical microlensing
+    model with magnification, see malca.score.paczynski().
+
+    Parameters
+    ----------
+    t : array-like
+        Time values
+    amp : float
+        Amplitude
+    t0 : float
+        Time of peak
+    tE : float
+        Einstein crossing time (characteristic timescale)
+    baseline : float
+        Baseline magnitude
+
+    Returns
+    -------
+    array-like
+        Model magnitudes
+    """
+    tE = np.maximum(np.abs(tE), 1e-5)
+    return baseline + amp / np.sqrt(1.0 + ((t - t0) / tE) ** 2)
+
+
+def fred(t, amp, t0, tau, baseline):
+    """
+    Fast Rise Exponential Decay (FRED) kernel + baseline term.
+
+    Parameters
+    ----------
+    t : array-like
+        Time values
+    amp : float
+        Amplitude
+    t0 : float
+        Time of peak (start of decay)
+    tau : float
+        Decay timescale
+    baseline : float
+        Baseline magnitude
+
+    Returns
+    -------
+    array-like
+        Model magnitudes
+    """
+    tau = np.maximum(np.abs(tau), 1e-5)
+    dt = t - t0
+    # Mask out values before t0
+    decay = np.where(dt >= 0, np.exp(-dt / tau), 0.0)
+    return baseline + amp * decay
+
+
+def skew_gaussian(t, amp, t0, sigma, baseline, alpha):
+    """
+    Skew-normal distribution kernel + baseline term.
+
+    Parameters
+    ----------
+    t : array-like
+        Time values
+    amp : float
+        Amplitude of the dip (positive for dimming)
+    t0 : float
+        Center time of the event
+    sigma : float
+        Width parameter (like standard deviation)
+    baseline : float
+        Baseline magnitude
+    alpha : float
+        Skewness parameter. alpha=0 is symmetric Gaussian.
+        alpha>0 skews right (slower egress), alpha<0 skews left (slower ingress).
+
+    Returns
+    -------
+    array-like
+        Model magnitudes
+    """
+    from scipy.special import erf
+    sigma = np.maximum(np.abs(sigma), 1e-5)
+    z = (t - t0) / sigma
+    # Skew-normal: gaussian * (1 + erf(alpha * z / sqrt(2)))
+    # Normalized so peak amplitude matches 'amp' approximately
+    skew_factor = 1 + erf(alpha * z / np.sqrt(2))
+    return baseline + amp * np.exp(-0.5 * z**2) * skew_factor
+
+
 def get_id_col(df: pd.DataFrame) -> str:
     """Find the ID column in a dataframe."""
     for candidate in ["asas_sn_id", "id", "source_id", "path"]:

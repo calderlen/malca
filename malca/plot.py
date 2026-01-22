@@ -13,11 +13,8 @@ from matplotlib.lines import Line2D
 import time
 from typing import Sequence
 
-from malca.events import (
-    run_bayesian_significance,
-    gaussian,
-    paczynski,
-)
+from malca.events import run_bayesian_significance
+from malca.utils import gaussian, paczynski_kernel
 from malca.utils import clean_lc, read_lc_dat2
 from malca.baseline import (
     per_camera_gp_baseline,
@@ -173,14 +170,6 @@ def load_events_paths(
 
     if suffix == ".parquet":
         df = pd.read_parquet(events_path)
-    elif suffix == ".duckdb":
-        try:
-            import duckdb
-        except ImportError as exc:
-            raise SystemExit(f"duckdb output specified but duckdb is not installed: {exc}") from exc
-        con = duckdb.connect(str(events_path), read_only=True)
-        df = con.execute("SELECT * FROM results").df()
-        con.close()
     else:
         df = pd.read_csv(events_path)
 
@@ -566,7 +555,7 @@ def plot_bayes_results(
                         amp = params.get("amp", -0.1)
                         baseline = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * tE, jd_end + 3 * tE, 100)
-                        mag_fit = paczynski(t_fit, amp, t0, tE, baseline)
+                        mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
                         ax_main.plot(
                             t_fit_plot,
@@ -625,7 +614,7 @@ def plot_bayes_results(
                         amp = params.get("amp", -0.1)
                         baseline = params.get("baseline", band_df["mag"].median())
                         t_fit = np.linspace(jd_start - 3 * tE, jd_end + 3 * tE, 100)
-                        mag_fit = paczynski(t_fit, amp, t0, tE, baseline)
+                        mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline)
                         t_fit_plot = t_fit - (jd_offset if median_jd > 2000000 else 8000.0)
                         ax_main.plot(
                             t_fit_plot,

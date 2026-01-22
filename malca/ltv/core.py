@@ -603,36 +603,6 @@ class ParquetDatasetWriter:
         return
 
 
-class DuckDBWriter:
-    def __init__(self, path: Path):
-        import duckdb
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = duckdb.connect(str(self.path))
-        self.initialized = False
-
-    def write_chunk(self, chunk_results):
-        if not chunk_results:
-            return
-        df_chunk = pd.DataFrame(chunk_results)
-        if df_chunk.empty:
-            return
-        self.con.execute("BEGIN")
-        self.con.register("tmp_chunk", df_chunk)
-        if not self.initialized:
-            self.con.execute("CREATE TABLE IF NOT EXISTS results AS SELECT * FROM tmp_chunk LIMIT 0")
-            self.initialized = True
-        self.con.execute("INSERT INTO results SELECT * FROM tmp_chunk")
-        self.con.execute("COMMIT")
-
-    def close(self):
-        if hasattr(self, "con") and self.con:
-            try:
-                self.con.close()
-            except Exception:
-                pass
-
-
 def make_writer(path: Path | None, fmt: str):
     if path is None:
         return None
@@ -642,8 +612,6 @@ def make_writer(path: Path | None, fmt: str):
         return ParquetChunkWriter(path)
     elif fmt == "parquet_chunk":
         return ParquetDatasetWriter(path)
-    elif fmt == "duckdb":
-        return DuckDBWriter(path)
     else:
         raise ValueError(f"Unknown output format: {fmt}")
 

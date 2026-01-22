@@ -14,11 +14,8 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 from malca.plot import read_skypatrol_csv, JD_OFFSET
-from malca.events import (
-    run_bayesian_significance,
-    gaussian,
-    paczynski,
-)
+from malca.events import run_bayesian_significance
+from malca.utils import gaussian, paczynski_kernel
 from malca.baseline import (
     per_camera_gp_baseline,
     global_mean_baseline,
@@ -250,7 +247,7 @@ def plot_bayes_results(
                     
                                                
                     t_fit = np.linspace(jd_start - 3*tE, jd_end + 3*tE, 100)
-                    mag_fit = paczynski(t_fit, amp, t0, tE, baseline)
+                    mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline)
                     
                     t_fit_plot = t_fit - (JD_OFFSET if median_jd > 2000000 else 8000.0)
                     ax_main.plot(
@@ -305,7 +302,7 @@ def plot_bayes_results(
                     baseline = params.get("baseline", band_df["mag"].median())
                     
                     t_fit = np.linspace(jd_start - 3*tE, jd_end + 3*tE, 100)
-                    mag_fit = paczynski(t_fit, amp, t0, tE, baseline)
+                    mag_fit = paczynski_kernel(t_fit, amp, t0, tE, baseline)
                     
                     t_fit_plot = t_fit - (JD_OFFSET if median_jd > 2000000 else 8000.0)
                     ax_main.plot(

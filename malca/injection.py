@@ -375,6 +375,7 @@ def _simulate_trial(
     detection_kwargs: dict,
     detection_method: str,
     min_mag_offset: float,
+    measure_pre_injection: bool,
     seed: int,
 ) -> dict:
     rng = np.random.default_rng(seed + int(trial_index))
@@ -455,6 +456,25 @@ def _simulate_trial(
         t_center = rng.uniform(t_min + duration, t_max - duration)
         skewness = rng.uniform(skew_range[0], skew_range[1])
         
+        # Measure pre-injection detection rate if requested
+        pre_injection_result = {}
+        if measure_pre_injection:
+            if detection_method == "bayes":
+                pre_inj = _default_detection_func(
+                    df,
+                    detection_kwargs,
+                    min_mag_offset=min_mag_offset,
+                )
+            else:
+                pre_inj = _legacy_detection_func(
+                    df,
+                    method=detection_method,
+                    detection_kwargs=detection_kwargs,
+                    min_mag_offset=min_mag_offset,
+                )
+            # Prefix all keys with pre_injection_
+            pre_injection_result = {f"pre_injection_{k}": v for k, v in pre_inj.items()}
+        
         df_injected = inject_dip(df, t_center, duration, amplitude, skewness, mag_err_poly)
         if detection_method == "bayes":
             detection_result = _default_detection_func(
@@ -483,6 +503,7 @@ def _simulate_trial(
             median_mag=median_mag,
             asas_sn_id=asas_sn_id,
             **detection_result,
+            **pre_injection_result,
         )
     except Exception as exc:
         return dict(
@@ -505,6 +526,7 @@ def _init_worker(
     detection_kwargs: dict,
     detection_method: str,
     min_mag_offset: float,
+    measure_pre_injection: bool,
     seed: int,
 ) -> None:
     _GLOBAL["control_ids"] = control_ids
@@ -516,6 +538,7 @@ def _init_worker(
     _GLOBAL["detection_kwargs"] = detection_kwargs
     _GLOBAL["detection_method"] = detection_method
     _GLOBAL["min_mag_offset"] = min_mag_offset
+    _GLOBAL["measure_pre_injection"] = measure_pre_injection
     _GLOBAL["seed"] = seed
 
 
@@ -534,6 +557,7 @@ def _process_trial_batch(trial_indices: list[int]) -> list[dict]:
                 detection_kwargs=_GLOBAL["detection_kwargs"],
                 detection_method=str(_GLOBAL["detection_method"]),
                 min_mag_offset=float(_GLOBAL["min_mag_offset"]),
+                measure_pre_injection=bool(_GLOBAL["measure_pre_injection"]),
                 seed=int(_GLOBAL["seed"]),
             )
         )
@@ -589,6 +613,7 @@ def run_injection_recovery(
     detection_kwargs: dict,
     detection_method: str = "bayes",
     min_mag_offset: float = 0.0,
+    measure_pre_injection: bool = False,
     total_trials: int = 10000,
     amplitude_range: tuple[float, float] = (0.05, 2.0),
     duration_range: tuple[float, float] = (1.0, 300.0),
@@ -708,6 +733,7 @@ def run_injection_recovery(
                 detection_kwargs=detection_kwargs,
                 detection_method=detection_method,
                 min_mag_offset=min_mag_offset,
+                measure_pre_injection=measure_pre_injection,
                 seed=seed,
             )
             results.append(res)
@@ -738,6 +764,7 @@ def run_injection_recovery(
             detection_kwargs,
             detection_method,
             min_mag_offset,
+            measure_pre_injection,
             seed,
         ),
     ) as ex:
@@ -803,8 +830,24 @@ def compute_quality_metrics(results_df: pd.DataFrame) -> dict:
             detection_rate = results_df.loc[successful_mask, detected_col].sum() / successful
         else:
             detection_rate = np.nan
+        
+        # Pre-injection detection rate if available
+        pre_inj_col = "pre_injection_detected"
+        if pre_inj_col in results_df.columns:
+            pre_inj_rate = results_df.loc[successful_mask, pre_inj_col].sum() / successful
+            pre_injection_detection_rate = float(pre_inj_rate) if np.isfinite(pre_inj_rate) else None
+            # Net completeness = post-injection rate - pre-injection rate
+            if np.isfinite(detection_rate) and np.isfinite(pre_inj_rate):
+                net_completeness = float(detection_rate - pre_inj_rate)
+            else:
+                net_completeness = None
+        else:
+            pre_injection_detection_rate = None
+            net_completeness = None
     else:
         detection_rate = np.nan
+        pre_injection_detection_rate = None
+        net_completeness = None
     
     # Error breakdown
     error_breakdown = {}
@@ -821,6 +864,8 @@ def compute_quality_metrics(results_df: pd.DataFrame) -> dict:
         "failed_trials": int(failed),
         "failure_rate": float(failed / total) if total > 0 else 0.0,
         "detection_rate": float(detection_rate) if np.isfinite(detection_rate) else None,
+        "pre_injection_detection_rate": pre_injection_detection_rate,
+        "net_completeness": net_completeness,
         "error_breakdown": error_breakdown,
         "error_percentages": error_percentages,
     }
@@ -833,26 +878,50 @@ def print_quality_summary(metrics: dict, output_path: Path | None = None) -> Non
     """
     lines = []
     lines.append("")
-    lines.append("=" * 60)
+    lines.append("="*60)
     lines.append("INJECTION-RECOVERY QUALITY METRICS")
-    lines.append("=" * 60)
-    lines.append(f"Total trials:      {metrics['total_trials']:,}")
-    lines.append(f"Successful trials: {metrics['successful_trials']:,} ({100 * (1 - metrics['failure_rate']):.1f}%)")
-    lines.append(f"Failed trials:     {metrics['failed_trials']:,} ({100 * metrics['failure_rate']:.1f}%)")
+    lines.append("="*60)
     
-    if metrics['detection_rate'] is not None:
-        lines.append(f"Detection rate:    {100 * metrics['detection_rate']:.1f}% (of successful trials)")
+    total = metrics.get("total_trials", 0)
+    successful = metrics.get("successful_trials", 0)
+    failed = metrics.get("failed_trials", 0)
+    detection_rate = metrics.get("detection_rate")
+    pre_inj_rate = metrics.get("pre_injection_detection_rate")
+    net_compl = metrics.get("net_completeness")
     
-    if metrics['error_breakdown']:
-        lines.append("")
+    success_pct = (successful / total * 100) if total > 0 else 0.0
+    fail_pct = (failed / total * 100) if total > 0 else 0.0
+    
+    lines.append(f"Total trials:      {total:,}")
+    lines.append(f"Successful trials: {successful:,} ({success_pct:.1f}%)")
+    lines.append(f"Failed trials:     {failed:,} ({fail_pct:.1f}%)")
+    
+    if detection_rate is not None:
+        det_pct = detection_rate * 100
+        lines.append(f"Detection rate:    {det_pct:.1f}% (of successful trials)")
+    else:
+        lines.append("Detection rate:    N/A")
+    
+    # Show pre-injection and net completeness if available
+    if pre_inj_rate is not None:
+        pre_pct = pre_inj_rate * 100
+        lines.append(f"Pre-injection rate: {pre_pct:.1f}%")
+    if net_compl is not None:
+        net_pct = net_compl * 100
+        lines.append(f"Net completeness:  {net_pct:.1f}%")
+    
+    lines.append("")
+    
+    error_breakdown = metrics.get("error_breakdown", {})
+    error_percentages = metrics.get("error_percentages", {})
+    if error_breakdown:
         lines.append("Error breakdown:")
         # Sort by count descending
-        sorted_errors = sorted(metrics['error_breakdown'].items(), key=lambda x: -x[1])
+        sorted_errors = sorted(error_breakdown.items(), key=lambda x: -x[1])
         for error_type, count in sorted_errors:
-            pct = metrics['error_percentages'].get(error_type, 0)
+            pct = error_percentages.get(error_type, 0)
             lines.append(f"  {error_type}: {count:,} ({pct:.1f}%)")
     else:
-        lines.append("")
         lines.append("No errors recorded.")
     
     lines.append("=" * 60)
@@ -1057,7 +1126,7 @@ def plot_detection_efficiency(
     plt.tight_layout()
 
     if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
         print(f"Saved to {output_path}")
     elif show:
         plt.show()
@@ -1238,7 +1307,7 @@ def plot_efficiency_threshold_contour(
     plt.tight_layout()
 
     if output_path:
-        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
         print(f"Saved: {output_path}")
     elif show:
         plt.show()
@@ -1687,10 +1756,14 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
                         help="Disable event probability computation (faster but incompatible with trigger_mode='posterior_prob')")
     parser.add_argument("--compute-event-prob", dest="no_event_prob", action="store_false",
                         help="Enable event probability computation (default, required for trigger_mode='posterior_prob')")
-    parser.add_argument("--no-sigma-eff", action="store_true")
-    parser.add_argument("--allow-missing-sigma-eff", action="store_true")
+    parser.add_argument("--no-sigma-eff", action="store_true",
+                        help="Do not replace errors with sigma_eff from baseline.")
+    parser.add_argument("--allow-missing-sigma-eff", action="store_true",
+                        help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False).")
     parser.add_argument("--min-mag-offset", type=float, default=0.2,
-                        help="Require |event_mag - baseline_mag| > threshold (default: 0.2)")
+                        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)")
+    parser.add_argument("--measure-pre-injection", action="store_true",
+                        help="Measure detection rate on pre-injection light curves to assess contamination.")
 
     # Post-processing options
     parser.add_argument("--skip-cube", action="store_true", help="Skip computing efficiency cube.")
@@ -1772,6 +1845,7 @@ Each run gets a unique timestamped directory. Use --run-tag to append a custom l
         detection_kwargs=detection_kwargs,
         detection_method=args.detection_method,
         min_mag_offset=args.min_mag_offset,
+        measure_pre_injection=args.measure_pre_injection,
         total_trials=total_trials,
         amplitude_range=(args.amp_min, args.amp_max),
         duration_range=(args.dur_min, args.dur_max),

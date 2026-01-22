@@ -37,9 +37,6 @@ python -m malca validation --results output/results.csv
 # Plot light curves
 python -m malca plot --input /path/to/lc123.dat2 --out-dir output/plots
 
-# Score detected events
-python -m malca score --events output/results.csv --output output/scores.csv
-
 # Apply quality filters
 python -m malca filter --input output/results.csv --output output/filtered.csv
 
@@ -124,7 +121,7 @@ graph TB
         UTILS[utils.py<br/>LC I/O, cleaning]
         BASE[baseline.py<br/>GP/trend fitting]
         STATS_LIB[stats.py<br/>Statistics]
-        SCORE_LIB[score.py<br/>Event score utils]
+        SCORE_LIB[score.py<br/>Event scoring]
     end
 
     subgraph "Data Management"
@@ -161,12 +158,9 @@ graph TB
     end
 
     subgraph "Post-Detection"
-        SCORE_CLI[score.py<br/>Standalone scoring]
         CHAR[characterize.py<br/>Multi-wavelength]
         CLASSIFY[classify.py<br/>Dipper classification]
 
-        CAND -.-> SCORE_CLI
-        SCORE_CLI --> SCORE_OUT[(Scores)]
         CAND -.-> CHAR
         CHAR --> CHAR_OUT[(Characterized)]
         CHAR_OUT -.-> CLASSIFY
@@ -212,7 +206,6 @@ graph TB
         CLI -.-> REPRO
         CLI -.-> VALID
         CLI -.-> PLOT
-        CLI -.-> SCORE_CLI
         CLI -.-> POSTFILT
     end
     
@@ -248,7 +241,6 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 ├── run_params.json                   # Detection parameters (events_filtered.py)
 ├── run_summary.json                 # Detection results stats (events_filtered.py)
 ├── filter_log.json                   # Filtering parameters & stats (post_filter.py)
-├── score_log.json                    # Scoring parameters & stats (score.py)
 ├── plot_log.json                     # Plotting parameters (plot.py)
 ├── run.log                           # Simple text log with paths
 │
@@ -266,13 +258,10 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 │   └── filtered_paths_{mag_bin}.txt
 │
 ├── results/                          # Detection results
-│   ├── lc_events_results.csv         # Raw detection output
+│   ├── lc_events_results.csv         # Raw detection output (includes dipper_score)
 │   ├── lc_events_results_PROCESSED.txt  # Checkpoint log
 │   ├── lc_events_results_filtered.csv   # After post_filter.py
 │   └── rejected_post_filter.csv      # Post-filter rejections
-│
-├── scores/                           # Scoring results (score.py)
-│   └── dipper_scores.csv             # or microlens_scores.csv
 │
 └── plots/                            # Visualizations (plot.py)
     ├── {source_id}_dips.png
@@ -290,8 +279,9 @@ output/runs/20250121_143052/          # Timestamp-based run directory
 - `run_params.json`: All pre-filter and detection parameters (thresholds, workers, baseline settings)
 - `run_summary.json`: Manifest statistics, pre-filter rejection breakdown, detection results
 - `filter_log.json`: Filter toggles, thresholds, input/output counts, rejection breakdown
-- `score_log.json`: Scoring parameters, score distribution statistics
 - `plot_log.json`: Plotting parameters, GP settings, number of plots generated
+
+**Note:** Event scores (dipper_score, dipper_n_dips, dipper_n_valid_dips) are automatically computed during detection for significant events and included in the results CSV.
 
 ### Standalone Module Outputs
 
@@ -439,16 +429,9 @@ output/
   # All files from events.py results
   python -m malca.plot --events /home/lenhart.106/code/malca/output/lc_events_results_13_13.5_filtered.csv --out-dir /home/lenhart.106/code/malca/output/plots
   ```
+  **Note:** Event scores are computed automatically during detection and included in the results CSV (dipper_score, dipper_n_dips, dipper_n_valid_dips columns).
 - Batch plot Bayesian results (SkyPatrol CSVs, filtered by events output):
   `python -m malca.plot_results_bayes /path/to/*-light-curves.csv --results-csv /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --out-dir /home/lenhart.106/code/malca/output/plots`
-- Event scoring (dips or microlensing):
-  ```bash
-  # Score dip events (default)
-  python -m malca.score --events /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --output /home/lenhart.106/code/malca/output/dipper_scores.csv --event-type dip
-
-  # Score microlensing events (Paczyński curves)
-  python -m malca.score --events /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --output /home/lenhart.106/code/malca/output/microlens_scores.csv --event-type microlensing
-  ```
 - Injection-recovery testing (validate pipeline completeness/contamination):
   ```bash
   # Full run: uses default manifest (output/lc_manifest_all.parquet)
@@ -566,7 +549,6 @@ pip install -e ".[multiwavelength]"
 - `malca.events`: `python -m malca.events --input /path/to/lc*_cal/*.dat2 --output /home/lenhart.106/code/malca/output/results.csv --workers 10`
 - `malca.post_filter`: `python -m malca.post_filter --input /home/lenhart.106/code/malca/output/results.csv --output /home/lenhart.106/code/malca/output/results_filtered.csv`
 - `malca.plot`: `python -m malca.plot --input /path/to/lc123.dat2 --out-dir /home/lenhart.106/code/malca/output/plots --format png`
-- `malca.score`: `python -m malca.score --events /home/lenhart.106/code/malca/output/results.csv --output /home/lenhart.106/code/malca/output/dipper_scores.csv --event-type dip`
 - `malca.injection`: `python -m malca.injection --workers 10` (uses `output/lc_manifest_all.parquet`, outputs to `output/injection/`)
 - `malca.ltv.core`: `python -m malca.ltv.core --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
 - `malca.stats`: `python -m malca.stats /path/to/lc123.dat2`

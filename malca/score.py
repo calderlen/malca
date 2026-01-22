@@ -3,7 +3,7 @@ Event scoring metric for ASAS-SN light curves (dips and microlensing).
 
 Implements a heuristic event score:
 
-    S = (1 / (ln(N + 1) * N)) * sum_i (delta_i / (2 * FWHM_i) * Ndet_i * (1 / chi2_i))
+    S = (1 / (ln(N + 1) * N)) * sum_i ((delta_i / 2) * FWHM_i * Ndet_i * (1 / chi2_i))
 
 where each event i is measured from the light curve. Supports:
     - Dips (symmetric Gaussian-like decreases in brightness)
@@ -11,17 +11,13 @@ where each event i is measured from the light curve. Supports:
 
 The reported score is log10(S).
 
-This module provides:
-    - compute_event_score(df_lc, ..., event_type='dip'|'microlensing')
-    - score_lightcurve_path(path, ..., event_type=...)
-    - CLI for batch scoring
+This module provides compute_event_score() which is called automatically during
+event detection in events.py on significant detections.
 """
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -30,7 +26,6 @@ from scipy.optimize import curve_fit
 
 from malca.utils import gaussian
 from malca.stats import robust_sigma
-from malca.utils import read_lc_dat2
 
 
 @dataclass
@@ -47,7 +42,10 @@ class EventStats:
 
 def paczynski(t: np.ndarray, A0: float, t0: float, tE: float, baseline: float) -> np.ndarray:
     """
-    Paczyński microlensing light curve in magnitudes.
+    Full physical Paczyński microlensing light curve in magnitudes.
+
+    This is the complete physical model with proper magnification calculation.
+    For a fast approximation suitable for curve fitting, see events.paczynski_kernel().
 
     Parameters
     ----------
@@ -282,6 +280,7 @@ def compute_event_score(
     edge_sigma: float = 0.5,
     min_fwhm_days: float = 1.5,
     min_delta_mag: float = 0.05,
+    baseline_mags: np.ndarray | None = None,
 ) -> tuple[float, list[EventStats]]:
     """
     Compute event score for a single light curve DataFrame in log10 space.
@@ -302,6 +301,9 @@ def compute_event_score(
         Minimum FWHM to consider event valid
     min_delta_mag : float
         Minimum amplitude to consider event valid
+    baseline_mags : array, optional
+        Baseline magnitudes from GP or other model. If provided, scoring will
+        be done on residuals (mag - baseline_mags). If None, uses simple median baseline.
 
     Returns
     -------
@@ -325,8 +327,27 @@ def compute_event_score(
     mag = df["mag"].to_numpy(float)
     err = df["error"].to_numpy(float)
 
-    baseline = float(np.nanmedian(mag))
-    sigma = float(robust_sigma(mag))
+    # Use provided baseline or compute simple median
+    if baseline_mags is not None:
+        baseline_mags = np.asarray(baseline_mags, float)
+        if len(baseline_mags) != len(mag):
+            # Fall back to median if sizes don't match
+            baseline_mags = None
+
+    if baseline_mags is not None:
+        # Work on residuals: deviations from GP baseline
+        # For residuals, the "baseline" level is 0
+        residuals = mag - baseline_mags
+        baseline = 0.0
+        sigma = float(robust_sigma(residuals))
+        # Use residuals as our working magnitudes
+        mag_work = residuals
+    else:
+        # Original behavior: simple median baseline
+        baseline = float(np.nanmedian(mag))
+        sigma = float(robust_sigma(mag))
+        mag_work = mag
+
     if not np.isfinite(sigma) or sigma <= 0:
         return -np.inf, []
 
@@ -334,12 +355,12 @@ def compute_event_score(
     if event_type == 'dip':
         # Dips: magnitude increases (fainter)
         magnitude_dips = True
-        event_mask = mag >= (baseline + sigma_threshold * sigma)
+        event_mask = mag_work >= (baseline + sigma_threshold * sigma)
         edge_level = baseline + edge_sigma * sigma
     elif event_type == 'microlensing':
         # Microlensing: magnitude decreases (brighter)
         magnitude_dips = False
-        event_mask = mag <= (baseline - sigma_threshold * sigma)
+        event_mask = mag_work <= (baseline - sigma_threshold * sigma)
         edge_level = baseline - edge_sigma * sigma
     else:
         raise ValueError(f"Unknown event_type: {event_type}")
@@ -354,21 +375,21 @@ def compute_event_score(
 
         # Find peak
         if magnitude_dips:  # Dip: maximum magnitude
-            peak_idx = int(start + np.nanargmax(mag[seg]))
-            delta = float(mag[peak_idx] - baseline)
+            peak_idx = int(start + np.nanargmax(mag_work[seg]))
+            delta = float(mag_work[peak_idx] - baseline)
         else:  # Microlensing: minimum magnitude
-            peak_idx = int(start + np.nanargmin(mag[seg]))
-            delta = float(baseline - mag[peak_idx])
+            peak_idx = int(start + np.nanargmin(mag_work[seg]))
+            delta = float(baseline - mag_work[peak_idx])
 
         if not np.isfinite(delta) or delta <= 0:
             continue
 
         # Expand edges until back within edge_sigma
         left = peak_idx
-        while left > 0 and ((mag[left] > edge_level) if magnitude_dips else (mag[left] < edge_level)):
+        while left > 0 and ((mag_work[left] > edge_level) if magnitude_dips else (mag_work[left] < edge_level)):
             left -= 1
         right = peak_idx
-        while right < len(mag) - 1 and ((mag[right] > edge_level) if magnitude_dips else (mag[right] < edge_level)):
+        while right < len(mag_work) - 1 and ((mag_work[right] > edge_level) if magnitude_dips else (mag_work[right] < edge_level)):
             right += 1
 
         window = slice(left, right + 1)
@@ -377,7 +398,7 @@ def compute_event_score(
             continue
 
         # Compute FWHM
-        fwhm = _half_max_width(jd, mag, peak_idx, baseline, delta, magnitude_dips)
+        fwhm = _half_max_width(jd, mag_work, peak_idx, baseline, delta, magnitude_dips)
         if fwhm <= 0:
             fwhm = float(jd[right] - jd[left]) if right > left else 0.0
 
@@ -386,7 +407,7 @@ def compute_event_score(
             # Fit Gaussian
             amp = float(delta if magnitude_dips else -delta)
             fwhm_fit, chi2 = _fit_gaussian(
-                jd[window], mag[window], err[window],
+                jd[window], mag_work[window], err[window],
                 jd[peak_idx], baseline, amp,
                 fwhm / 2.3548 if fwhm > 0 else 0.0
             )
@@ -394,7 +415,7 @@ def compute_event_score(
             # Fit Paczyński curve
             tE_guess = fwhm / 2.4 if fwhm > 0 else 10.0
             fwhm_fit, chi2 = _fit_paczynski(
-                jd[window], mag[window], err[window],
+                jd[window], mag_work[window], err[window],
                 jd[peak_idx], baseline, delta, tE_guess
             )
 
@@ -426,7 +447,7 @@ def compute_event_score(
     for evt in events:
         if not evt.valid:
             continue
-        terms.append((evt.delta / (2.0 * evt.fwhm_days)) * evt.n_det * (1.0 / evt.chi2))
+        terms.append((evt.delta / 2.0) * evt.fwhm_days * evt.n_det * (1.0 / evt.chi2))
 
     if N <= 0 or not terms:
         return -np.inf, events
@@ -437,229 +458,3 @@ def compute_event_score(
     return float(np.log10(score)), events
 
 
-def _load_lightcurve_path(path: Path) -> pd.DataFrame:
-    """Load light curve from .dat2 file."""
-    path = Path(path)
-    if path.suffix != ".dat2":
-        return pd.DataFrame()
-    dfg, dfv = read_lc_dat2(path.stem, str(path.parent))
-    return pd.concat([dfg, dfv], ignore_index=True) if not (dfg.empty and dfv.empty) else pd.DataFrame()
-
-
-def score_lightcurve_path(path: Path, **kwargs) -> tuple[float, list[EventStats]]:
-    """Score a single light curve file."""
-    df = _load_lightcurve_path(path)
-    return compute_event_score(df, **kwargs)
-
-
-def attach_event_scores(
-    df_results: pd.DataFrame,
-    *,
-    event_type: Literal['dip', 'microlensing'] = 'dip',
-    only_significant: bool = True,
-    sigma_threshold: float = 1.0,
-    edge_sigma: float = 0.5,
-    min_fwhm_days: float = 1.5,
-    min_delta_mag: float = 0.05,
-) -> pd.DataFrame:
-    """
-    Attach event scores to an events.py results DataFrame.
-
-    Expects a 'path' column that points to the .dat2 light curve.
-
-    Parameters
-    ----------
-    df_results : DataFrame
-        Results from events.py
-    event_type : {'dip', 'microlensing'}
-        Type of events to score
-    only_significant : bool
-        Only score rows where dip_significant=True
-    sigma_threshold : float
-        Detection threshold (robust sigma)
-    edge_sigma : float
-        Edge detection threshold
-    min_fwhm_days : float
-        Minimum FWHM for valid events
-    min_delta_mag : float
-        Minimum amplitude for valid events
-
-    Returns
-    -------
-    df_scored : DataFrame
-        Input DataFrame with added columns:
-        - dipper_score or microlens_score: Log10 event score (-inf if no valid events)
-        - dipper_n_events or microlens_n_events: Number of detected events
-        - dipper_n_valid_events or microlens_n_valid_events: Number of events passing quality cuts
-    """
-    df = df_results.copy()
-    scores = []
-
-    for _, row in df.iterrows():
-        if only_significant and not bool(row.get("dip_significant", False)):
-            scores.append((-np.inf, 0, 0))
-            continue
-        path = Path(str(row.get("path", "")))
-        score, events = score_lightcurve_path(
-            path,
-            event_type=event_type,
-            sigma_threshold=sigma_threshold,
-            edge_sigma=edge_sigma,
-            min_fwhm_days=min_fwhm_days,
-            min_delta_mag=min_delta_mag,
-        )
-        scores.append((score, len(events), int(sum(1 for e in events if e.valid))))
-
-    prefix = 'dipper' if event_type == 'dip' else 'microlens'
-    df[f"{prefix}_score"] = [s[0] for s in scores]
-    df[f"{prefix}_n_events"] = [s[1] for s in scores]
-    df[f"{prefix}_n_valid_events"] = [s[2] for s in scores]
-    return df
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Compute event scores for events.py results (dips or microlensing)."
-    )
-    parser.add_argument("--detect-run", type=Path, default=None,
-                        help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads from <detect-run>/results/ and writes scores to <detect-run>/scores/")
-    parser.add_argument("--events", type=Path, default=None, help="events.py results CSV/Parquet (overrides --detect-run)")
-    parser.add_argument("--output", type=Path, default=None, help="Output CSV path (overrides default location)")
-    parser.add_argument(
-        "--event-type",
-        type=str,
-        choices=['dip', 'microlensing'],
-        default='dip',
-        help="Type of events to score (default: dip)"
-    )
-    parser.add_argument("--only-significant", action="store_true", help="Score only dip_significant rows (default)")
-    parser.add_argument("--include-all", action="store_true", help="Score all rows (overrides --only-significant)")
-    parser.add_argument("--sigma-threshold", type=float, default=1.0, help="Detection threshold (robust sigma)")
-    parser.add_argument("--edge-sigma", type=float, default=0.5, help="Edge detection threshold")
-    parser.add_argument("--min-fwhm-days", type=float, default=1.5, help="Minimum FWHM (days)")
-    parser.add_argument("--min-delta-mag", type=float, default=0.05, help="Minimum amplitude (mag)")
-    args = parser.parse_args()
-
-    # Determine input path
-    if args.events:
-        events_path = args.events.expanduser()
-    elif args.detect_run:
-        detect_run = args.detect_run.expanduser()
-        results_dir = detect_run / "results"
-        # Look for filtered results first, then raw results
-        candidates = (list(results_dir.glob("*filtered.csv")) +
-                     list(results_dir.glob("*filtered.parquet")) +
-                     list(results_dir.glob("*events_results.csv")) +
-                     list(results_dir.glob("*events_results.parquet")))
-        if not candidates:
-            raise FileNotFoundError(f"No events results file found in {results_dir}")
-        if len(candidates) > 1:
-            print(f"Warning: Multiple results files found, using: {candidates[0]}")
-        events_path = candidates[0]
-    else:
-        raise ValueError("Must specify either --events or --detect-run")
-
-    # Load events
-    if events_path.suffix.lower() in (".parquet", ".pq"):
-        df_events = pd.read_parquet(events_path)
-    else:
-        df_events = pd.read_csv(events_path)
-
-    only_significant = True
-    if args.include_all:
-        only_significant = False
-    elif args.only_significant:
-        only_significant = True
-
-    df_scored = attach_event_scores(
-        df_events,
-        event_type=args.event_type,
-        only_significant=only_significant,
-        sigma_threshold=args.sigma_threshold,
-        edge_sigma=args.edge_sigma,
-        min_fwhm_days=args.min_fwhm_days,
-        min_delta_mag=args.min_delta_mag,
-    )
-
-    # Determine output path
-    if args.output:
-        out_path = args.output.expanduser()
-    elif args.detect_run:
-        detect_run = args.detect_run.expanduser()
-        scores_dir = detect_run / "scores"
-        scores_dir.mkdir(parents=True, exist_ok=True)
-        prefix = 'dipper' if args.event_type == 'dip' else 'microlens'
-        out_path = scores_dir / f"{prefix}_scores.csv"
-    else:
-        # Fallback: same directory as input
-        prefix = 'dipper' if args.event_type == 'dip' else 'microlens'
-        out_path = events_path.parent / f"{prefix}_scores.csv"
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df_scored.to_csv(out_path, index=False)
-
-    prefix = 'dipper' if args.event_type == 'dip' else 'microlens'
-    score_values = df_scored[f"{prefix}_score"].to_numpy()
-    n_scored = int(np.isfinite(score_values).sum())
-
-    # Generate score log with comprehensive statistics
-    if args.detect_run:
-        try:
-            import json
-            import sys
-            import shlex
-            from datetime import datetime
-
-            detect_run = args.detect_run.expanduser()
-            score_log_file = detect_run / "score_log.json"
-
-            orig_argv = getattr(sys, "orig_argv", None)
-            cmd = shlex.join(orig_argv) if orig_argv else shlex.join([sys.executable] + sys.argv)
-
-            score_log = {
-                "timestamp": datetime.now().isoformat(),
-                "command": cmd,
-                "input_file": str(events_path),
-                "output_file": str(out_path),
-                "score_params": {
-                    "event_type": args.event_type,
-                    "only_significant": only_significant,
-                    "sigma_threshold": args.sigma_threshold,
-                    "edge_sigma": args.edge_sigma,
-                    "min_fwhm_days": args.min_fwhm_days,
-                    "min_delta_mag": args.min_delta_mag,
-                },
-                "results": {
-                    "input_rows": len(df_events),
-                    "output_rows": len(df_scored),
-                    "scored_rows": n_scored,
-                    "scored_fraction": n_scored / len(df_scored) if len(df_scored) > 0 else 0.0,
-                },
-            }
-
-            # Add score distribution statistics
-            if n_scored > 0:
-                finite_scores = score_values[np.isfinite(score_values)]
-                score_log["score_statistics"] = {
-                    "mean": float(np.mean(finite_scores)),
-                    "median": float(np.median(finite_scores)),
-                    "std": float(np.std(finite_scores)),
-                    "min": float(np.min(finite_scores)),
-                    "max": float(np.max(finite_scores)),
-                    "q25": float(np.percentile(finite_scores, 25)),
-                    "q75": float(np.percentile(finite_scores, 75)),
-                }
-
-            with open(score_log_file, "w") as f:
-                json.dump(score_log, f, indent=2, default=str)
-
-        except Exception as e:
-            if args.verbose:
-                print(f"Warning: could not write score log: {e}")
-
-    print(f"Scored {n_scored}/{len(df_scored)} {args.event_type} candidates")
-    print(f"Wrote {len(df_scored)} rows to {out_path}")
-
-
-if __name__ == "__main__":
-    main()

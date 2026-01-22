@@ -3,7 +3,8 @@ Outputs:
 - Core timing/cadence stats (including 3-day exposure metrics and largest gaps)
 - Photometric stats (weighted/unweighted/clipped/MAD/IQR/percentiles)
 - Quality & error stats (SNR dist, fractions by good/saturated)
-- Variability diagnostics (reduced chisq, von Neumann ratio, lag-1 autocorr, trend slope)
+- Variability diagnostics (reduced chisq, von Neumann ratio, lag-1 autocorr, trend slope, Stetson I/J/K)
+- Optional Lomb-Scargle periodogram summary stats
 - Nightly/seasonal coverage & duty cycle
 - Per-camera / per-field / per-band usage + offsets and scatter
 """
@@ -14,6 +15,11 @@ import numpy as np
 import pandas as pd
 
 from malca.utils import read_lc_dat2, read_lc_csv
+
+try:
+    from astropy.timeseries import LombScargle
+except Exception:
+    LombScargle = None
 
 # helpers
 def weighted_mean(x, w):
@@ -36,6 +42,90 @@ def robust_sigma(x):
         return np.nan
     # 1.4826 * MAD (median absolute deviation)
     return 1.4826 * np.median(np.abs(x - np.median(x)))
+
+def log_gaussian(x, mu, sigma):
+    """
+    Log probability of Gaussian distribution.
+
+    ln p = -1/2 * ((x-mu)/sigma)^2 - ln(sigma) - 1/2 ln(2pi)
+
+    Parameters
+    ----------
+    x : array-like
+        Values
+    mu : array-like
+        Mean(s)
+    sigma : array-like
+        Standard deviation(s)
+
+    Returns
+    -------
+    log_prob : array
+        Log probabilities
+    """
+    x = np.asarray(x, float)
+    mu = np.asarray(mu, float)
+    sigma = np.asarray(sigma, float)
+    sigma = np.clip(sigma, 1e-12, np.inf)
+    z = (x - mu) / sigma
+    return -0.5 * z**2 - np.log(sigma) - 0.5 * np.log(2.0 * np.pi)
+
+def robust_median_dt_days(jd: np.ndarray) -> float:
+    """
+    Compute robust median time difference from a time series.
+
+    Parameters
+    ----------
+    jd : array
+        Time values (Julian dates)
+
+    Returns
+    -------
+    median_dt : float
+        Median time difference in days
+    """
+    jd = np.asarray(jd, float)
+    jd = jd[np.isfinite(jd)]
+    if jd.size < 2:
+        return np.nan
+    dt = np.diff(np.sort(jd))
+    dt = dt[dt > 0]
+    return float(np.median(dt)) if dt.size > 0 else np.nan
+
+def bic(resid, err, n_params):
+    """
+    Bayesian Information Criterion for model selection.
+
+    BIC = n * ln(sigma^2) + k * ln(n)
+
+    where sigma^2 is the variance of residuals, k is the number of parameters,
+    and n is the number of data points.
+
+    Parameters
+    ----------
+    resid : array-like
+        Residuals (observed - model)
+    err : array-like
+        Uncertainties
+    n_params : int
+        Number of model parameters
+
+    Returns
+    -------
+    bic_value : float
+        BIC value (lower is better)
+    """
+    resid = np.asarray(resid, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(resid) & np.isfinite(err) & (err > 0)
+    if mask.sum() < n_params + 1:
+        return np.nan
+    resid = resid[mask]
+    err = err[mask]
+    n = len(resid)
+    chi2 = np.sum((resid / err) ** 2)
+    sigma2 = chi2 / n
+    return float(n * np.log(sigma2) + n_params * np.log(n))
 
 def pct(x, q):
     return float(np.nanpercentile(x, q)) if len(x) else np.nan
@@ -70,6 +160,83 @@ def lag1_autocorr(x):
     den = np.sqrt(np.sum(x0**2) * np.sum(x1**2))
     return float(np.sum(x0 * x1) / den) if den > 0 else np.nan
 
+def stetson_indices(mag, err):
+    mag = np.asarray(mag, float)
+    err = np.asarray(err, float)
+    mask = np.isfinite(mag) & np.isfinite(err) & (err > 0)
+    if mask.sum() < 2:
+        return {"stetson_I": np.nan, "stetson_J": np.nan, "stetson_K": np.nan}
+
+    m = mag[mask]
+    e = err[mask]
+    n = len(m)
+
+    w = 1.0 / np.square(e)
+    mu, _ = weighted_mean(m, w)
+    if not np.isfinite(mu):
+        mu = float(np.nanmedian(m))
+
+    d = np.sqrt(n / (n - 1.0)) * (m - mu) / e
+    if d.size < 2:
+        return {"stetson_I": np.nan, "stetson_J": np.nan, "stetson_K": np.nan}
+
+    P = d[:-1] * d[1:]
+    stetson_I = float(np.sum(P))
+    stetson_J = float(np.mean(np.sign(P) * np.sqrt(np.abs(P)))) if P.size else np.nan
+
+    denom = np.sqrt(np.mean(d**2)) if d.size else np.nan
+    if not np.isfinite(denom) or denom <= 0:
+        stetson_K = np.nan
+    else:
+        stetson_K = float((1.0 / 0.798) * np.mean(np.abs(d)) / denom)
+
+    return {"stetson_I": stetson_I, "stetson_J": stetson_J, "stetson_K": stetson_K}
+
+def lomb_scargle_summary(jd, mag, err):
+    if LombScargle is None:
+        return {"ls_best_period_days": np.nan, "ls_peak_power": np.nan, "ls_fap": np.nan}
+
+    t = np.asarray(jd, float)
+    y = np.asarray(mag, float)
+    dy = np.asarray(err, float)
+    mask = np.isfinite(t) & np.isfinite(y)
+    if dy.size == y.size:
+        mask &= np.isfinite(dy) & (dy > 0)
+    if mask.sum() < 5:
+        return {"ls_best_period_days": np.nan, "ls_peak_power": np.nan, "ls_fap": np.nan}
+
+    t = t[mask]
+    y = y[mask]
+    dy = dy[mask] if dy.size == mask.size else None
+
+    if not np.isfinite(t).all():
+        return {"ls_best_period_days": np.nan, "ls_peak_power": np.nan, "ls_fap": np.nan}
+
+    if np.nanmax(t) == np.nanmin(t):
+        return {"ls_best_period_days": np.nan, "ls_peak_power": np.nan, "ls_fap": np.nan}
+
+    t = t - np.nanmin(t)
+    try:
+        ls = LombScargle(t, y, dy) if dy is not None else LombScargle(t, y)
+        freq, power = ls.autopower()
+        if power.size == 0:
+            return {"ls_best_period_days": np.nan, "ls_peak_power": np.nan, "ls_fap": np.nan}
+        idx = int(np.nanargmax(power))
+        best_freq = float(freq[idx])
+        best_period = np.nan if best_freq <= 0 or not np.isfinite(best_freq) else 1.0 / best_freq
+        peak_power = float(power[idx]) if np.isfinite(power[idx]) else np.nan
+        try:
+            fap = float(ls.false_alarm_probability(peak_power)) if np.isfinite(peak_power) else np.nan
+        except Exception:
+            fap = np.nan
+        return {
+            "ls_best_period_days": best_period,
+            "ls_peak_power": peak_power,
+            "ls_fap": fap,
+        }
+    except Exception:
+        return {"ls_best_period_days": np.nan, "ls_peak_power": np.nan, "ls_fap": np.nan}
+
 def linear_trend(x, y):
     # returns slope, intercept, r^2; robust to NaNs
     mask = np.isfinite(x) & np.isfinite(y)
@@ -82,7 +249,7 @@ def linear_trend(x, y):
     r2 = 1 - ss_res/ss_tot if ss_tot > 0 else np.nan
     return float(p[0]), float(p[1]), float(r2)
 
-def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=True):
+def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=True, compute_ls=False):
 
     df_g, df_v = read_lc_csv(asassn_id, path)
     if df_g.empty and df_v.empty:
@@ -228,6 +395,12 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
     ac1    = float(lag1_autocorr(mag))
     slope_d_per_day, intercept, r2 = linear_trend(df["t_days"].values, mag)
     slope_d_per_year = slope_d_per_day * 365.25 if np.isfinite(slope_d_per_day) else np.nan
+    stetson = stetson_indices(mag, merr)
+    ls_stats = lomb_scargle_summary(df["JD"].values, mag, merr) if compute_ls else {
+        "ls_best_period_days": np.nan,
+        "ls_peak_power": np.nan,
+        "ls_fap": np.nan,
+    }
 
     # per camera/field/band usage + offsets and scatter
     global_med = median_mag
@@ -301,6 +474,12 @@ def compute_stats(asassn_id, path, use_only_good=True, drop_dupes=True, use_g=Tr
         ("variability_reduced_chi2_vs_constant", rchisq),
         ("variability_von_neumann_ratio", vnr),
         ("variability_lag1_autocorr", ac1),
+        ("variability_stetson_I", stetson["stetson_I"]),
+        ("variability_stetson_J", stetson["stetson_J"]),
+        ("variability_stetson_K", stetson["stetson_K"]),
+        ("variability_lomb_scargle_best_period_days", ls_stats["ls_best_period_days"]),
+        ("variability_lomb_scargle_peak_power", ls_stats["ls_peak_power"]),
+        ("variability_lomb_scargle_fap", ls_stats["ls_fap"]),
         ("trend_slope_mag_per_day", slope_d_per_day),
         ("trend_slope_mag_per_year", slope_d_per_year),
         ("trend_r2", r2),
@@ -347,6 +526,9 @@ def print_summary(summary, max_rows=10):
 
     print("\n=== VARIABILITY / TREND ===")
     print(f"reduced χ² vs constant={summary['variability_reduced_chi2_vs_constant']:.3f}  | von Neumann={summary['variability_von_neumann_ratio']:.3f}  | lag-1 ρ={summary['variability_lag1_autocorr']:.3f}")
+    print(f"Stetson I/J/K={summary['variability_stetson_I']:.3f} / {summary['variability_stetson_J']:.3f} / {summary['variability_stetson_K']:.3f}")
+    if "variability_lomb_scargle_best_period_days" in summary:
+        print(f"Lomb-Scargle: best_period_days={summary['variability_lomb_scargle_best_period_days']:.6f}  peak_power={summary['variability_lomb_scargle_peak_power']:.6f}  fap={summary['variability_lomb_scargle_fap']:.3e}")
     print(f"trend slope={summary['trend_slope_mag_per_day']:.6e} mag/day ({summary['trend_slope_mag_per_year']:.6e} mag/yr),  R²={summary['trend_r2']:.3f}")
 
     print("\n=== BY CAMERA (top) ===")
@@ -395,13 +577,15 @@ def main():
     ap.add_argument("--include-all", action="store_true", help="do NOT filter by good_bad==1 & saturated==0")
     ap.add_argument("--keep-dupes",   action="store_true", help="keep duplicate JD rows instead of dropping")
     ap.add_argument("--has-header",   action="store_true", help="file has a header row")
+    ap.add_argument("--lomb-scargle", action="store_true", help="compute Lomb-Scargle periodogram summary stats")
     args = ap.parse_args()
 
     df = load_dat(args.path, has_header=args.has_header)
     df2, summary = compute_stats(
         df,
         use_only_good=not args.include_all,
-        drop_dupes=not args.keep_dupes
+        drop_dupes=not args.keep_dupes,
+        compute_ls=args.lomb_scargle,
     )
     print_summary(summary)
 

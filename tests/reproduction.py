@@ -70,6 +70,57 @@ brayden_candidates: list[dict[str, object]] = [
 ]
 
 
+def _parse_tzanidakis_candidates() -> list[dict[str, object]]:
+    """
+    Parse Tzanidakis+2025 candidates from the fixed-width .sty file.
+    Returns a list of candidate dictionaries with gaia_id (Gaia DR3 source_id).
+    """
+    input_path = Path(__file__).parent.parent / "input" / "Tzanidakis+2025.sty"
+    if not input_path.exists():
+        return []
+    
+    # Column specifications based on byte positions in the file header
+    colspecs = [
+        (0, 19),    # source_id (Gaia DR3)
+        (20, 28),   # RAdeg
+        (29, 37),   # DEdeg
+        (38, 43),   # GMAG0
+        (44, 49),   # BP-RP0
+        (50, 54),   # dist50
+        (55, 64),   # t0dip (MJD)
+        (65, 66),   # Ndips
+    ]
+    names = ["gaia_id", "ra", "dec", "gmag", "bp_rp", "distance_kpc", "t0_dip_mjd", "n_dips"]
+    
+    # Read fixed-width format, skipping header lines
+    df = pd.read_fwf(input_path, colspecs=colspecs, names=names, skiprows=19)
+    
+    # Convert to list of dicts with additional metadata
+    candidates = []
+    for _, row in df.iterrows():
+        gaia_id = str(int(row["gaia_id"]))
+        candidates.append({
+            "source": f"Gaia-{gaia_id}",
+            "gaia_id": gaia_id,
+            "source_id": gaia_id,  # Use gaia_id as source_id
+            "category": "Tzanidakis2025_Dippers",
+            "ra": float(row["ra"]),
+            "dec": float(row["dec"]),
+            "gmag": float(row["gmag"]),
+            "bp_rp": float(row["bp_rp"]),
+            "distance_kpc": float(row["distance_kpc"]),
+            "t0_dip_mjd": float(row["t0_dip_mjd"]),
+            "n_dips": int(row["n_dips"]),
+            "search_method": "Literature",
+            "expected_detected": True,
+        })
+    
+    return candidates
+
+
+tzanidakis_candidates: list[dict[str, object]] = _parse_tzanidakis_candidates()
+
+
 def load_manifest_df(manifest_path: Path | str) -> pd.DataFrame:
     path = Path(manifest_path).expanduser()
     suffix = path.suffix.lower()
@@ -298,10 +349,16 @@ def coerce_candidate_records(data) -> list[dict[str, object]]:
 def resolve_candidates(spec: str | None):
     if spec is None:
         return list(brayden_candidates)
-
-    env = globals()
-    if spec in env:
-        return coerce_candidate_records(env[spec])
+    
+    spec_lower = spec.lower().strip()
+    if spec_lower in {"brayden", "brayden_candidates"}:
+        return list(brayden_candidates)
+    if spec_lower in {"tzanidakis", "tzanidakis_candidates", "tzanidakis2025"}:
+        return list(tzanidakis_candidates)
+    
+    path = Path(spec).expanduser()
+    if not path.exists():
+        print(f"WARNING: candidates path does not exist: {path}")
 
     cand_path = Path(spec)
     if cand_path.exists():
@@ -1321,6 +1378,7 @@ def build_reproduction_report(
 
 __all__ = [
     "brayden_candidates",
+    "tzanidakis_candidates",
     "build_reproduction_report",
 ]
 
