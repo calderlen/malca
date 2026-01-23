@@ -572,12 +572,55 @@ def query_nearby_bright_stars_batch(
 
 def bright_star_distance_curve(mag: np.ndarray) -> np.ndarray:
     """
-    Quadratic curve defining minimum acceptable distance from bright stars.
-    Stars above this curve are kept.
+    Empirical curve defining minimum acceptable distance from bright stars.
+
+    Paper formula (PK25 / continued search):
+      R > 0.2 * exp(12.5 - g) + 70, capped at 3600 arcsec.
     """
-    a = 56.25
-    dist = a * np.maximum(0, (8.0 - mag)) ** 2
-    return np.clip(dist, 0, 3600)
+    mag = np.asarray(mag, dtype=float)
+    dist = 0.2 * np.exp(12.5 - mag) + 70.0
+    return np.clip(dist, 0.0, 3600.0)
+
+
+def filter_vg_overlap(
+    df: pd.DataFrame,
+    *,
+    min_overlap_days: float = 30.0,
+    min_overlap_fraction: float = 0.1,
+    has_v_col: str = "vg_has_v",
+    overlap_days_col: str = "vg_overlap_days",
+    overlap_frac_col: str = "vg_overlap_fraction",
+    verbose: bool = False,
+    log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Remove candidates with insufficient V/g temporal overlap.
+
+    Keeps sources with:
+      - no V-band data (no overlap requirement), OR
+      - overlap_days >= min_overlap_days AND overlap_fraction >= min_overlap_fraction
+    """
+    n0 = len(df)
+
+    if has_v_col not in df.columns or overlap_days_col not in df.columns or overlap_frac_col not in df.columns:
+        if verbose:
+            print("Warning: V/g overlap columns not found, skipping filter")
+        return df
+
+    has_v = df[has_v_col].fillna(False).astype(bool).values
+    overlap_days = df[overlap_days_col].astype(float).values
+    overlap_frac = df[overlap_frac_col].astype(float).values
+
+    ok_overlap = (overlap_days >= min_overlap_days) & (overlap_frac >= min_overlap_fraction)
+    mask = (~has_v) | ok_overlap
+
+    df_out = df[mask].reset_index(drop=True)
+
+    if verbose:
+        print(f"[filter_vg_overlap] {n0} → {len(df_out)} (removed {n0 - len(df_out)})")
+
+    log_rejections(df, df_out, "filter_vg_overlap", log_csv)
+    return df_out
 
 
 def filter_bright_star_artifacts(
@@ -806,6 +849,11 @@ def apply_all_filters(
             verbose=verbose,
             log_csv=log_csv,
         )
+        df = filter_vg_overlap(
+            df,
+            verbose=verbose,
+            log_csv=log_csv,
+        )
         df = filter_transient_contamination(
             df,
             max_single_jump_fraction=max_single_jump_fraction,
@@ -858,4 +906,3 @@ def apply_all_filters(
         print(f"\n[apply_all_filters] TOTAL: {n0} → {len(df)} ({len(df)/n0*100:.2f}% remaining)")
     
     return df
-

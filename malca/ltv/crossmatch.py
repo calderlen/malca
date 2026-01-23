@@ -278,6 +278,76 @@ def _batch_tap_crossmatch(
     return pd.concat(results, ignore_index=True)
 
 
+def crossmatch_tap_catalog(
+    df: pd.DataFrame,
+    *,
+    tap_service: str,
+    catalog_table: str,
+    select_cols: str,
+    ra_column: str = "ra_deg",
+    dec_column: str = "dec_deg",
+    ra_col: str = "RAJ2000",
+    dec_col: str = "DEJ2000",
+    match_radius_arcsec: float = 3.0,
+    chunk_size: int = 1000,
+    n_workers: int = 4,
+    col_prefix: str | None = None,
+    verbose: bool = False,
+) -> pd.DataFrame:
+    """
+    Generic TAP crossmatch helper.
+
+    Use this for VizieR/TAP catalogs (ATLAS, ZTF, WISE, etc.) once you have
+    the TAP service URL and table name.
+    """
+    if ra_column not in df.columns or dec_column not in df.columns:
+        if verbose:
+            print("Warning: RA/Dec columns not found for TAP crossmatch")
+        return df
+
+    coords_df = pd.DataFrame({
+        "_idx": df.index,
+        "ra": df[ra_column].values,
+        "dec": df[dec_column].values,
+    })
+
+    result = _batch_tap_crossmatch(
+        coords_df,
+        tap_service=tap_service,
+        catalog_table=catalog_table,
+        select_cols=select_cols,
+        ra_col=ra_col,
+        dec_col=dec_col,
+        match_radius_arcsec=match_radius_arcsec,
+        chunk_size=chunk_size,
+        n_workers=n_workers,
+        verbose=verbose,
+        desc=f"TAP crossmatch: {catalog_table}",
+    )
+
+    if result.empty:
+        return df
+
+    # Keep closest match per source
+    result = result.sort_values("sep_arcsec").drop_duplicates(subset="_idx", keep="first")
+
+    # Apply optional prefix to avoid column collisions
+    if col_prefix:
+        rename_map = {}
+        for col in result.columns:
+            if col not in ["_idx", "sep_arcsec"]:
+                rename_map[col] = f"{col_prefix}{col}"
+        if rename_map:
+            result = result.rename(columns=rename_map)
+
+    df_out = df.copy()
+    df_out["_idx"] = df_out.index
+    df_out = df_out.merge(result, on="_idx", how="left")
+    df_out = df_out.drop(columns=["_idx"])
+
+    return df_out
+
+
 def _parallel_query(
     df: pd.DataFrame,
     query_func,
@@ -672,5 +742,4 @@ def crossmatch_all_catalogs(
             print(f"  SIMBAD: {df['simbad_main_id'].notna().sum()}/{len(df)} matched")
     
     return df
-
 

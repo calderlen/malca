@@ -34,6 +34,7 @@ from malca.ltv.filter import (
     filter_max_diff_threshold,
     filter_south_pole,
     filter_photometric_scatter,
+    filter_vg_overlap,
     filter_transient_contamination,
     filter_eclipsing_binary_signature,
     filter_crowding,
@@ -50,6 +51,7 @@ from malca.ltv.crossmatch import (
     crossmatch_milliquas,
     query_simbad_classification,
     crossmatch_all_catalogs,
+    crossmatch_tap_catalog,
 )
 
 from malca.ltv.neowise import (
@@ -59,6 +61,20 @@ from malca.ltv.neowise import (
     extract_neowise_trends,
 )
 
+from malca.ltv.dust import (
+    apply_dust_flags,
+)
+
+from malca.ltv.cmd import (
+    load_mist_grid,
+    compute_cmd_features,
+    assign_cmd_groups,
+)
+
+from malca.ltv.gaia_epoch import (
+    query_gaia_epoch_photometry_batch,
+    apply_gaia_epoch_flags,
+)
 from malca.ltv.pipeline import (
     run_full_pipeline,
     apply_extinction_correction,
@@ -86,6 +102,7 @@ __all__ = [
     "filter_max_diff_threshold",
     "filter_south_pole",
     "filter_photometric_scatter",
+    "filter_vg_overlap",
     "filter_transient_contamination",
     "filter_eclipsing_binary_signature",
     "filter_crowding",
@@ -97,11 +114,21 @@ __all__ = [
     "crossmatch_milliquas",
     "query_simbad_classification",
     "crossmatch_all_catalogs",
+    "crossmatch_tap_catalog",
     # NEOWISE
     "query_neowise_lc",
     "combine_epochs",
     "fit_neowise_trends",
     "extract_neowise_trends",
+    # Dust flags
+    "apply_dust_flags",
+    # CMD scaffolding
+    "load_mist_grid",
+    "compute_cmd_features",
+    "assign_cmd_groups",
+    # Gaia epoch photometry
+    "query_gaia_epoch_photometry_batch",
+    "apply_gaia_epoch_flags",
     # Pipeline
     "run_full_pipeline",
     "apply_extinction_correction",
@@ -113,4 +140,3 @@ __all__ = [
     "merge_local_catalog",
     "crossmatch_from_local",
 ]
-

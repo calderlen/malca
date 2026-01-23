@@ -134,7 +134,7 @@ def parse_args() -> Config:
     p.add_argument("--output-format",
                    type=str,
                    default="csv",
-                   choices=["csv", "parquet", "parquet_chunk", "duckdb"],
+                   choices=["csv", "parquet", "parquet_chunk"],
                    help="Output format (default: csv)")
     p.add_argument("--resume",
                    action="store_true",
@@ -189,6 +189,30 @@ def filter_lc_for_ltv(df_g: pd.DataFrame, target_id: int) -> pd.DataFrame:
         df = df[df["JD"] >= 2.458e6]
 
     return df
+
+
+def compute_vg_overlap_stats(df_g: pd.DataFrame, df_v: pd.DataFrame) -> tuple[bool, float, float]:
+    """
+    Compute V/g temporal overlap in days and as a fraction of the union.
+
+    Returns: (has_v, overlap_days, overlap_fraction)
+    """
+    if df_g.empty or "JD" not in df_g.columns:
+        return False, 0.0, 0.0
+
+    if df_v.empty or "JD" not in df_v.columns:
+        return False, 0.0, 0.0
+
+    g_min = float(df_g["JD"].min())
+    g_max = float(df_g["JD"].max())
+    v_min = float(df_v["JD"].min())
+    v_max = float(df_v["JD"].max())
+
+    overlap = max(0.0, min(g_max, v_max) - max(g_min, v_min))
+    union = max(g_max, v_max) - min(g_min, v_min)
+    frac = overlap / union if union > 0 else 0.0
+
+    return True, float(overlap), float(frac)
 
 
 def seasonal_midpoints_from_ra(
@@ -369,10 +393,13 @@ def compute_lomb_scargle(
     mag: np.ndarray,
     err: np.ndarray | None = None,
     *,
-    lin_slope: float = 0.0,
-    intercept: float = 0.0,
+    lin_coeff: tuple[float, float] | None = None,
+    quad_coeff: tuple[float, float, float] | None = None,
+    detrend_mode: str = "linear",
+    intercept: float | None = None,
     min_period_days: float = 10.0,
     max_period_days: float = 1000.0,
+    fap_threshold: float | None = None,
     samples_per_peak: int = 5,
 ) -> dict:
     """
@@ -381,6 +408,7 @@ def compute_lomb_scargle(
     Paper method:
     - Subtract linear/quadratic trend from light curve
     - Use Lomb-Scargle to search for periods > 10 days
+    - Discard periods longer than observing season (set via max_period_days)
     - Report best period, power, and FAP
     
     Returns dict with:
@@ -397,8 +425,19 @@ def compute_lomb_scargle(
     if len(JD) < 50:
         return result
     
-    # Detrend using linear fit
-    mag_detrended = mag - (lin_slope * (JD - JD.min()) / 365.25 + intercept)
+    # Detrend using linear or quadratic fit
+    t_years = (JD - JD.min()) / 365.25
+    if detrend_mode == "quadratic" and quad_coeff is not None:
+        a, b, c = quad_coeff
+        trend = a * t_years * t_years + b * t_years + c
+    elif lin_coeff is not None:
+        m, b = lin_coeff
+        trend = m * t_years + b
+    else:
+        baseline = float(np.median(mag)) if intercept is None else float(intercept)
+        trend = np.full_like(mag, baseline, dtype=float)
+
+    mag_detrended = mag - trend
     
     # Compute Lomb-Scargle
     if err is not None and len(err) == len(JD):
@@ -407,6 +446,8 @@ def compute_lomb_scargle(
         ls = LombScargle(JD, mag_detrended)
     
     # Frequency grid: periods from min_period to max_period
+    if max_period_days <= 0 or max_period_days < min_period_days:
+        return result
     min_freq = 1.0 / max_period_days
     max_freq = 1.0 / min_period_days
     
@@ -428,8 +469,9 @@ def compute_lomb_scargle(
         # False alarm probability
         fap = float(ls.false_alarm_probability(best_power))
         
-        result["ls_period"] = best_period
-        result["ls_power"] = best_power
+        if fap_threshold is None or fap <= fap_threshold:
+            result["ls_period"] = best_period
+            result["ls_power"] = best_power
         result["ls_fap"] = fap
         
     except Exception:
@@ -465,6 +507,10 @@ def process_one_lc(
     if df.empty:
         return None
 
+    # V/g overlap statistics (for intercalibration failure filter)
+    df_v_clean = clean_lc(df_v) if not df_v.empty else df_v
+    vg_has_v, vg_overlap_days, vg_overlap_frac = compute_vg_overlap_stats(df, df_v_clean)
+
     JD = df["JD"].to_numpy(dtype=float)
     mag = df["mag"].to_numpy(dtype=float)
     lc_median = float(np.median(mag))
@@ -492,13 +538,42 @@ def process_one_lc(
 
     lin_slope, quad_slope, c1, c2, diff = compute_trend_metrics(indexes.astype(float), meds.astype(float))
 
+    # Fit seasonal medians vs time for LS detrending
+    season_times = []
+    season_spans = []
+    for s in indexes:
+        sel = season_idx == s
+        if not np.any(sel):
+            continue
+        season_times.append(np.median(JD[sel]))
+        season_spans.append(JD[sel].max() - JD[sel].min())
+
+    season_times = np.asarray(season_times, dtype=float)
+    season_spans = np.asarray(season_spans, dtype=float)
+    t_years = (season_times - JD.min()) / 365.25 if season_times.size > 0 else np.array([])
+
+    lin_coeff = None
+    quad_coeff = None
+    if t_years.size >= 2:
+        lin_coeff = tuple(np.polyfit(t_years, meds, 1))
+    if t_years.size >= cfg.min_seasons_for_quadratic:
+        quad_coeff = tuple(np.polyfit(t_years, meds, 2))
+
+    avg_season_span_days = float(np.mean(season_spans)) if season_spans.size > 0 else None
+
     # Compute Lomb-Scargle on detrended light curve (paper: periods > 10 days)
     err = df["error"].to_numpy(dtype=float) if "error" in df.columns else None
+    detrend_mode = "quadratic" if quad_coeff is not None else "linear"
+    max_period_days = avg_season_span_days if avg_season_span_days is not None else 1000.0
     ls_result = compute_lomb_scargle(
         JD, mag, err,
-        lin_slope=lin_slope,
+        lin_coeff=lin_coeff,
+        quad_coeff=quad_coeff,
+        detrend_mode=detrend_mode,
         intercept=lc_median,
         min_period_days=10.0,
+        max_period_days=max_period_days,
+        fap_threshold=0.1,
     )
 
     return {
@@ -514,6 +589,9 @@ def process_one_lc(
         "coeff1": c1,
         "coeff2": c2,
         "max diff": diff,
+        "vg_has_v": vg_has_v,
+        "vg_overlap_days": vg_overlap_days,
+        "vg_overlap_fraction": vg_overlap_frac,
         "ls_period": ls_result["ls_period"],
         "ls_power": ls_result["ls_power"],
         "ls_fap": ls_result["ls_fap"],

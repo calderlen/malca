@@ -12,9 +12,6 @@ pyarrow
 # Optional: visualization
 plotly
 
-# Optional: database
-duckdb
-
 # Optional: multiwavelength analysis
 astroquery>=0.4.6
 dustmaps3d

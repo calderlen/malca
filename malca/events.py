@@ -1431,8 +1431,7 @@ def main():
     parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff (sets require_sigma_eff=False)")
     parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Apply signal amplitude filter: require |event_mag - baseline_mag| > threshold (e.g., 0.05)")
     parser.add_argument("--output", type=str, default=None, help="Output path for results (suffix adjusted per format).")
-    parser.add_argument("--metadata-csv", type=str, default=None,
-                        help="Optional CSV with 'path' and extra metadata columns to attach to results.")
+    parser.add_argument("--metadata-csv", type=str, default=None, help="Optional CSV with 'path' and extra metadata columns to attach to results.")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk"], help="Output format for results.")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows.")
     parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")

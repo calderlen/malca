@@ -257,13 +257,24 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         print("Error: 'dustmaps3d' package not installed. Run: pip install dustmaps3d")
         return df
 
-    if 'ra' not in df.columns or 'dec' not in df.columns:
+    if 'ra' in df.columns and 'dec' in df.columns:
+        ra_col = 'ra'
+        dec_col = 'dec'
+    elif 'ra_deg' in df.columns and 'dec_deg' in df.columns:
+        ra_col = 'ra_deg'
+        dec_col = 'dec_deg'
+    else:
         print("Warning: Missing ra/dec columns for dust query.")
         return df
         
     # Distance (in pc from Gaia, need kpc for dustmaps3d)
     if 'distance_gspphot' in df.columns:
         dist_pc = df['distance_gspphot'].values
+    elif 'gaia_parallax' in df.columns:
+        plx = df['gaia_parallax'].values
+        valid_plx = (np.isfinite(plx)) & (plx > 0)
+        dist_pc = np.full(len(df), np.nan)
+        dist_pc[valid_plx] = 1000.0 / plx[valid_plx]
     elif 'parallax' in df.columns:
         plx = df['parallax'].values
         valid_plx = (np.isfinite(plx)) & (plx > 0)
@@ -274,14 +285,14 @@ def get_dust_extinction(df: pd.DataFrame) -> pd.DataFrame:
         return df
     
     dist_kpc = dist_pc / 1000.0
-    valid_mask = (np.isfinite(df['ra'])) & (np.isfinite(df['dec'])) & (np.isfinite(dist_kpc)) & (dist_kpc > 0)
+    valid_mask = (np.isfinite(df[ra_col])) & (np.isfinite(df[dec_col])) & (np.isfinite(dist_kpc)) & (dist_kpc > 0)
     
     if not valid_mask.any():
         return df
     
     # Convert RA/Dec to Galactic l, b
-    coords = SkyCoord(ra=df.loc[valid_mask, 'ra'].values * u.deg, 
-                      dec=df.loc[valid_mask, 'dec'].values * u.deg, 
+    coords = SkyCoord(ra=df.loc[valid_mask, ra_col].values * u.deg, 
+                      dec=df.loc[valid_mask, dec_col].values * u.deg, 
                       frame='icrs')
     galactic = coords.galactic
     

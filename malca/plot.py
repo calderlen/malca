@@ -163,7 +163,7 @@ def load_events_paths(
 ) -> list[Path]:
     """
     Load events/post-filter output and return unique LC paths.
-    Supports CSV/Parquet and (if installed) DuckDB.
+    Supports CSV/Parquet.
     """
     events_path = Path(events_path)
     suffix = events_path.suffix.lower()
@@ -796,7 +796,7 @@ def main():
     parser.add_argument(
         "--events",
         type=Path,
-        help="Events/post-filter output (CSV/Parquet/DuckDB) with a path column (overrides --detect-run).",
+        help="Events/post-filter output (CSV/Parquet) with a path column (overrides --detect-run).",
     )
     parser.add_argument(
         "--path-col",

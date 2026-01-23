@@ -39,6 +39,9 @@ from malca.ltv.crossmatch import (
     query_simbad_classification,
 )
 from malca.ltv.neowise import extract_neowise_trends
+from malca.ltv.dust import apply_dust_flags
+from malca.ltv.cmd import compute_cmd_features, assign_cmd_groups, load_mist_grid
+from malca.ltv.gaia_epoch import query_gaia_epoch_photometry_batch, apply_gaia_epoch_flags
 
 
 # =============================================================================
@@ -85,6 +88,20 @@ def run_full_pipeline(
     run_crossmatch: bool = True,
     run_neowise: bool = True,
     run_extinction: bool = True,
+    run_dust_flags: bool = True,
+    run_cmd: bool = False,
+    mist_path: str | Path | None = None,
+    cmd_boundaries: dict | None = None,
+    run_gaia_epoch: bool = False,
+    gaia_epoch_table: str | None = None,
+    gaia_epoch_time_col: str = "time",
+    gaia_epoch_g_col: str = "g_mag",
+    gaia_epoch_bp_col: str = "bp_mag",
+    gaia_epoch_rp_col: str = "rp_mag",
+    gaia_epoch_data_release: str = "Gaia DR3",
+    gaia_epoch_data_structure: str = "RAW",
+    gaia_epoch_valid_data: bool = True,
+    gaia_epoch_band: str | None = None,
     # Crossmatch options
     include_gaia_dr3: bool = True,
     include_gaia_alerts: bool = True,
@@ -194,6 +211,17 @@ def run_full_pipeline(
             verbose=verbose,
         )
         print()
+
+    # =========================================================================
+    # Stage 3b: Dust-driven variability flags
+    # =========================================================================
+    if run_dust_flags:
+        if verbose:
+            print("-" * 60)
+            print("STAGE 3b: DUST FLAGS")
+            print("-" * 60)
+        df = apply_dust_flags(df)
+        print()
     
     # =========================================================================
     # Stage 4: Extinction correction
@@ -205,6 +233,46 @@ def run_full_pipeline(
             print("-" * 60)
         
         df = apply_extinction_correction(df, verbose=verbose)
+        print()
+
+    # =========================================================================
+    # Stage 4b: Gaia epoch photometry deltas (optional)
+    # =========================================================================
+    if run_gaia_epoch:
+        if verbose:
+            print("-" * 60)
+            print("STAGE 4b: GAIA EPOCH PHOTOMETRY")
+            print("-" * 60)
+        df = query_gaia_epoch_photometry_batch(
+            df,
+            tap_table=gaia_epoch_table,
+            time_col=gaia_epoch_time_col,
+            g_col=gaia_epoch_g_col,
+            bp_col=gaia_epoch_bp_col,
+            rp_col=gaia_epoch_rp_col,
+            data_release=gaia_epoch_data_release,
+            data_structure=gaia_epoch_data_structure,
+            valid_data=gaia_epoch_valid_data,
+            band=gaia_epoch_band,
+            n_workers=n_workers,
+            chunk_size=chunk_size,
+            verbose=verbose,
+        )
+        df = apply_gaia_epoch_flags(df)
+        print()
+
+    # =========================================================================
+    # Stage 5: CMD features / grouping (optional scaffolding)
+    # =========================================================================
+    if run_cmd:
+        if verbose:
+            print("-" * 60)
+            print("STAGE 5: CMD FEATURES")
+            print("-" * 60)
+        df = compute_cmd_features(df)
+        if mist_path is not None:
+            _ = load_mist_grid(mist_path)
+        df = assign_cmd_groups(df, boundaries=cmd_boundaries)
         print()
     
     # =========================================================================
@@ -236,6 +304,11 @@ def run_full_pipeline(
             n_neowise = (df["neowise_n_epochs"] > 0).sum()
             pct = n_neowise/len(df)*100 if len(df) > 0 else 0
             print(f"With NEOWISE data: {n_neowise:,} ({pct:.1f}%)")
+
+        if "dust_candidate" in df.columns:
+            n_dust = df["dust_candidate"].sum()
+            pct = n_dust/len(df)*100 if len(df) > 0 else 0
+            print(f"Dust candidates: {n_dust:,} ({pct:.1f}%)")
         
         print("=" * 60)
     
@@ -305,6 +378,50 @@ def add_pipeline_args(parser):
         help="Skip extinction correction stage",
     )
     parser.add_argument(
+        "--skip-dust-flags",
+        action="store_true",
+        help="Skip dust-driven variability flags",
+    )
+    parser.add_argument(
+        "--run-gaia-epoch",
+        action="store_true",
+        help="Query Gaia epoch photometry and compute delta MG / delta (BP-RP)",
+    )
+    parser.add_argument(
+        "--gaia-epoch-table",
+        type=str,
+        default=None,
+        help="Gaia TAP epoch photometry table (optional; if omitted, DataLink is used)",
+    )
+    parser.add_argument(
+        "--gaia-epoch-data-release",
+        type=str,
+        default="Gaia DR3",
+        help="Gaia data release for DataLink (default: Gaia DR3)",
+    )
+    parser.add_argument(
+        "--gaia-epoch-data-structure",
+        type=str,
+        default="RAW",
+        help="DataLink structure: RAW or INDIVIDUAL (default: RAW)",
+    )
+    parser.add_argument(
+        "--gaia-epoch-band",
+        type=str,
+        default=None,
+        help="Optional band restriction for DataLink (e.g., G, BP, RP)",
+    )
+    parser.add_argument(
+        "--gaia-epoch-include-invalid",
+        action="store_true",
+        help="Include invalid epoch photometry (valid_data=False)",
+    )
+    parser.add_argument(
+        "--run-cmd",
+        action="store_true",
+        help="Compute CMD features (BP-RP, M_G) after extinction correction",
+    )
+    parser.add_argument(
         "--log-rejections",
         type=str,
         default=None,
@@ -338,6 +455,14 @@ def run_pipeline_cli(args):
         run_crossmatch=not args.skip_crossmatch,
         run_neowise=not args.skip_neowise,
         run_extinction=not args.skip_extinction,
+        run_dust_flags=not args.skip_dust_flags,
+        run_cmd=args.run_cmd,
+        run_gaia_epoch=args.run_gaia_epoch,
+        gaia_epoch_table=args.gaia_epoch_table,
+        gaia_epoch_data_release=args.gaia_epoch_data_release,
+        gaia_epoch_data_structure=args.gaia_epoch_data_structure,
+        gaia_epoch_valid_data=not args.gaia_epoch_include_invalid,
+        gaia_epoch_band=args.gaia_epoch_band,
         n_workers=args.n_workers,
         chunk_size=args.chunk_size,
         log_csv=args.log_rejections,

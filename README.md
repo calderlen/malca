@@ -15,7 +15,7 @@ _This README is a WIP._
 
 #### Dependencies
 - Core pipeline: numpy, pandas, scipy, numba, astropy, celerite2, matplotlib, tqdm
-- Optional outputs: pyarrow (parquet), duckdb
+- Optional outputs: pyarrow (parquet)
 - Optional visualization: plotly (3D injection plots)
 - Multi-wavelength characterization: astroquery (Gaia queries), dustmaps3d (3D dust extinction), pyvo (StarHorse TAP queries), banyan-sigma (young associations), requests (unWISE queries)
 - Notebooks/EDA: jupyterlab, ipykernel, seaborn, scikit-learn, joblib
@@ -543,55 +543,8 @@ pip install -e ".[multiwavelength]"
 - False-positive reduction summary (pre vs post filter):
   `python -m malca.fp_analysis --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
 
-### CLI modules
-- `malca.manifest`: `python -m malca.manifest --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --mag-bin 13_13.5 --out /home/lenhart.106/code/malca/output/lc_manifest_13_13.5.parquet --workers 10`
-- `malca.events_filtered`: `python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv --batch-size 2000 --lc-root /data/poohbah/1/assassin/rowan.90/lcsv2 --index-root /data/poohbah/1/assassin/rowan.90/lcsv2 --output /home/lenhart.106/code/malca/output/lc_events_results_13_13.5.csv --trigger-mode posterior_prob --baseline-func gp`
-- `malca.events`: `python -m malca.events --input /path/to/lc*_cal/*.dat2 --output /home/lenhart.106/code/malca/output/results.csv --workers 10`
-- `malca.post_filter`: `python -m malca.post_filter --input /home/lenhart.106/code/malca/output/results.csv --output /home/lenhart.106/code/malca/output/results_filtered.csv`
-- `malca.plot`: `python -m malca.plot --input /path/to/lc123.dat2 --out-dir /home/lenhart.106/code/malca/output/plots --format png`
-- `malca.injection`: `python -m malca.injection --workers 10` (uses `output/lc_manifest_all.parquet`, outputs to `output/injection/`)
-- `malca.ltv.core`: `python -m malca.ltv.core --mag-bin 13_13.5 --output /home/lenhart.106/code/malca/output/ltv_13_13.5.csv --workers 10`
-- `malca.stats`: `python -m malca.stats /path/to/lc123.dat2`
-- `malca.fp_analysis`: `python -m malca.fp_analysis --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
-- **Testing modules** (in `tests/` directory):
-  - `tests.reproduction`: `python -m tests.reproduction --method bayes --manifest output/lc_manifest.parquet --candidates targets.csv --out-dir output/results_repro`
-  - `tests.validation`: `python -m tests.validation --method {loo,bf} [--mag-bin 13_13.5] [--all-mag-bins]` (auto-discovers results in `output/{loo,logbf}_events_results/`)
-- **VSX tools** (now in `malca.vsx` subpackage):
-  - `malca.vsx.filter`: `python -m malca.vsx.filter`
-  - `malca.vsx.crossmatch`: `python -m malca.vsx.crossmatch`
-  - `malca.vsx.reproducibility`: `python -m malca.vsx.reproducibility`
-
-#### Legacy/old scripts
-- `malca.old.plot_results_bayes`: `python -m malca.old.plot_results_bayes /path/to/*-light-curves.csv --results-csv /home/lenhart.106/code/malca/output/results.csv --out-dir /home/lenhart.106/code/malca/output/plots`
-- `malca.old.plot_results`: `python -m malca.old.plot_results /home/lenhart.106/code/malca/output/peaks.csv --csv-dir input/skypatrol2 --out-dir /home/lenhart.106/code/malca/output/plots`
-- `malca.old.lc_events`: `python -m malca.old.lc_events --mode dips --mag-bin 13_13.5 --out-dir /home/lenhart.106/code/malca/output/lc_events_old --format csv --workers 10`
-- `malca.old.lc_filter`: `python -m malca.old.lc_filter /home/lenhart.106/code/malca/output/peaks.csv --output /home/lenhart.106/code/malca/output/peaks_filtered.csv`
-- `malca.old.falsepositives`: `python -m malca.old.falsepositives --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
-- `malca.old.stats`: `python -m malca.old.stats /path/to/lc123.dat2`
-- `malca.old.test_skypatrol`: `python -m malca.old.test_skypatrol input/skypatrol2/*.csv --out /home/lenhart.106/code/malca/output/test_results.csv`
-
-### Notes
-- Always generate the manifest first; everything else depends on knowing where each `<asas_sn_id>.dat2` lives.
-- VSX filtering is enabled by default in `events_filtered.py` - uses pre-crossmatched file `input/vsx/asassn_x_vsx_matches_20250919_2252.csv`
-  - To disable VSX handling: add `--skip-vsx` flag
-  - To tag instead of filter: add `--vsx-mode tag`
-  - Tags are stored in `prefilter/vsx_tags/vsx_tags_<magbin>.csv` and merged into events results (even when filtering).
-  - To use a different crossmatch file: `--vsx-crossmatch /path/to/crossmatch.csv`
-  - Crossmatch file must have columns: `asas_sn_id`, `sep_arcsec`, `class`
-- Bright nearby star (BNS) filtering is NOT needed - ASAS-SN already filtered this during LC generation
-- Pre-filters (run on all sources before event detection):
-  - Sparse LC removal: reject LCs with insufficient time span or cadence
-  - Multi-camera requirement: require observations from ≥2 cameras
-  - VSX crossmatch: reject known variables within 3 arcsec
-- Post-filters (run on detected candidates only):
-  - Periodicity validation: bootstrap Lomb-Scargle periodogram with significance testing
-  - Gaia RUWE check: flag potential binary contamination (RUWE > 1.4)
-  - Periodic catalog crossmatch: check against known periodic variable catalogs
-
-
 ### Dependencies
 - **Required**: numpy, pandas, scipy, numba, astropy, tqdm, matplotlib, celerite2, pyarrow
 - **Optional**:
   - `plotly` - Interactive 3D efficiency plots in injection testing
-  - `duckdb` - Alternative output format (use `--output-format duckdb`)
   - `joblib`, `seaborn`, `scikit-learn` - Notebook analysis and profiling

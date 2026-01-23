@@ -113,14 +113,10 @@ def main():
     parser.add_argument("--skip-multi-camera", action="store_true", help="Skip multi-camera filter")
     parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX crossmatch/tagging")
     parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
-    parser.add_argument("--vsx-mode", type=str, default="filter", choices=["tag", "filter"],
-                        help="VSX handling: tag adds sep_arcsec/class columns, filter removes matches (default: filter)")
+    parser.add_argument("--vsx-mode", type=str, default="filter", choices=["tag", "filter"], help="VSX handling: tag adds sep_arcsec/class columns, filter removes matches (default: filter)")
     parser.add_argument("--vsx-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="Path to pre-crossmatched VSX CSV (with asas_sn_id, sep_arcsec, class)")
-    parser.add_argument("--pass-all-prefilters", action="store_true",
-                        help="Pass all light curves to events.py regardless of pre-filter results (tags are still added)")
-    parser.add_argument("--enforce-filters", type=str, default=None,
-                        help="Comma-separated list of pre-filters to enforce (e.g., 'sparse,multi_camera'). "
-                             "Only rows failing these filters are excluded. Default: enforce all enabled filters.")
+    parser.add_argument("--pass-all-prefilters", action="store_true", help="Pass all light curves to events.py regardless of pre-filter results (tags are still added)")
+    parser.add_argument("--enforce-filters", type=str, default=None, help="Comma-separated list of pre-filters to enforce (e.g., 'sparse,multi_camera'). " "Only rows failing these filters are excluded. Default: enforce all enabled filters.")
     parser.add_argument("--workers", type=int, default=10, help="Workers for parallel processing")
     parser.add_argument("--stats-chunk-size", type=int, default=5000, help="Rows per checkpoint save during stats computation")
     parser.add_argument("--batch-size", type=int, default=2000, help="Max light curves per events.py call")
@@ -157,43 +153,30 @@ def main():
     parser.add_argument("--allow-missing-sigma-eff", action="store_true", help="Do not error if baseline omits sigma_eff")
     parser.add_argument("--min-mag-offset", type=float, default=0.1, help="Require |event_mag - baseline_mag| > threshold")
     parser.add_argument("--output", type=str, default=None, help="Output path for results (default: <out_dir>/lc_events_results.csv)")
-    parser.add_argument("--out-dir", type=str, default=None,
-                        help="Directory for all outputs (default: output/runs/<timestamp>)")
+    parser.add_argument("--out-dir", type=str, default=None, help="Directory for all outputs (default: output/runs/<timestamp>)")
     parser.add_argument("--output-format", type=str, default="csv", choices=["csv", "parquet", "parquet_chunk"], help="Output format")
     parser.add_argument("--chunk-size", type=int, default=10000, help="Write results in chunks of this many rows")
 
     # Step 5: Post-filter args
-    parser.add_argument("--run-post-filter", action="store_true",
-                        help="Run post_filter after events.py completes")
-    parser.add_argument("--min-bayes-factor", type=float, default=10.0,
-                        help="Min Bayes factor for post-filter (default: 10.0)")
-    parser.add_argument("--post-filter-min-run-cameras", type=int, default=2,
-                        help="Min cameras for run robustness filter (default: 2)")
-    parser.add_argument("--post-filter-min-run-points", type=int, default=2,
-                        help="Min points per run for robustness filter (default: 2)")
+    parser.add_argument("--run-post-filter", action="store_true", help="Run post_filter after events.py completes")
+    parser.add_argument("--min-bayes-factor", type=float, default=10.0, help="Min Bayes factor for post-filter (default: 10.0)")
+    parser.add_argument("--post-filter-min-run-cameras", type=int, default=2, help="Min cameras for run robustness filter (default: 2)")
+    parser.add_argument("--post-filter-min-run-points", type=int, default=2, help="Min points per run for robustness filter (default: 2)")
 
     # Step 6: Postprocess args
-    parser.add_argument("--run-postprocess", action="store_true",
-                        help="Run postprocess (generate plots) after post_filter")
-    parser.add_argument("--max-plots", type=int, default=None,
-                        help="Limit number of plots generated (default: no limit)")
-    parser.add_argument("--plot-format", type=str, default="png", choices=["png", "pdf"],
-                        help="Output format for plots (default: png)")
+    parser.add_argument("--run-postprocess", action="store_true", help="Run postprocess (generate plots) after post_filter")
+    parser.add_argument("--max-plots", type=int, default=None, help="Limit number of plots generated (default: no limit)")
+    parser.add_argument("--plot-format", type=str, default="png", choices=["png", "pdf"], help="Output format for plots (default: png)")
 
     # Step 7: Classify args
-    parser.add_argument("--run-classify", action="store_true",
-                        help="Run classification (EB/CV/starspot rejection, YSO) after post_filter")
+    parser.add_argument("--run-classify", action="store_true", help="Run classification (EB/CV/starspot rejection, YSO) after post_filter")
 
     # Step 8: Enrich args
-    parser.add_argument("--run-enrich", action="store_true",
-                        help="Enrich passing candidates with comprehensive light curve stats")
-    parser.add_argument("--enrich-compute-ls", action="store_true",
-                        help="Include Lomb-Scargle periodogram in enrichment (expensive)")
+    parser.add_argument("--run-enrich", action="store_true", help="Enrich passing candidates with comprehensive light curve stats")
+    parser.add_argument("--enrich-compute-ls", action="store_true", help="Include Lomb-Scargle periodogram in enrichment (expensive)")
 
-    parser.add_argument("-o", "--overwrite", action="store_true",
-                        help="Overwrite checkpoint log and existing output if present (start fresh).")
-    parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Enable verbose output (default: quiet).")
+    parser.add_argument("-o", "--overwrite", action="store_true", help="Overwrite checkpoint log and existing output if present (start fresh).")
+    parser.add_argument("-v", "--verbose", action="store_true",help="Enable verbose output (default: quiet).")
 
     args = parser.parse_args()
 
