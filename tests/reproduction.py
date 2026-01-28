@@ -1514,6 +1514,13 @@ def build_reproduction_report(
             df_for_post["dip_best_delta_bic"] = _max_cols("g_dip_best_delta_bic", "v_dip_best_delta_bic")
             df_for_post["jump_best_delta_bic"] = _max_cols("g_jump_best_delta_bic", "v_jump_best_delta_bic")
             df_for_post["dipper_score"] = _max_cols("g_dipper_score", "v_dipper_score")
+            # Required by filter_posterior_strength
+            df_for_post["dip_max_log_bf_local"] = _max_cols("g_bayes_dip_max_logbf", "v_bayes_dip_max_logbf")
+            df_for_post["jump_max_log_bf_local"] = _max_cols("g_bayes_jump_max_logbf", "v_bayes_jump_max_logbf")
+            df_for_post["dip_max_run_duration"] = _max_cols("g_dip_max_run_duration", "v_dip_max_run_duration")
+            df_for_post["jump_max_run_duration"] = _max_cols("g_jump_max_run_duration", "v_jump_max_run_duration")
+            df_for_post["dip_max_run_points"] = _max_cols("g_dip_max_run_points", "v_dip_max_run_points")
+            df_for_post["jump_max_run_points"] = _max_cols("g_jump_max_run_points", "v_jump_max_run_points")
 
             rows_df = apply_post_filters(
                 df_for_post,

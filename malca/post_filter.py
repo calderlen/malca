@@ -553,6 +553,15 @@ def validate_gaia_ruwe(
 
     n0 = len(df)
 
+    if gaia_catalog is None:
+        # No catalog provided - return with NaN ruwe values
+        if show_tqdm:
+            tqdm.write(f"[validate_gaia_ruwe] No catalog provided - returning unchanged")
+        df_out = df.copy()
+        df_out["ruwe"] = np.nan
+        df_out["high_ruwe_flag"] = False
+        return df_out
+
     if isinstance(gaia_catalog, (str, Path)):
         gaia_df = pd.read_csv(gaia_catalog)
     else:
