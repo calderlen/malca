@@ -24,6 +24,10 @@ from malca.baseline import (
 )
 from malca.pre_filter import apply_pre_filters
 from malca.filter import filter_signal_amplitude
+from malca.stats import robust_median_dt_days
+from malca.score import compute_event_score
+from malca.classify import compute_all_classifications
+from malca.characterize import query_gaia_by_ids, get_dust_extinction
 
 
 
@@ -672,6 +676,12 @@ def build_reproduction_report(
     skip_post_filters: bool = False,
     # Morphology filtering
     accepted_morphologies: set[str] | None = None,
+    # Post-processing: classification and characterization
+    run_classify: bool = False,
+    run_characterize: bool = False,
+    gaia_cache: Path | str | None = None,
+    index_file: Path | str | None = None,
+    run_dust: bool = False,
     **baseline_kwargs,
 ) -> pd.DataFrame:
     # Default morphologies: gaussian and paczynski (reject noise/none)
@@ -1025,16 +1035,28 @@ def build_reproduction_report(
 
                     if best_run:
                         params = best_run.get("params", {})
+                        morph = best_run.get("morphology", "none")
+                        # Extract width param based on morphology type
+                        if morph == "gaussian":
+                            width_param = params.get("sigma", np.nan)
+                        elif morph == "paczynski":
+                            width_param = params.get("tE", np.nan)
+                        else:
+                            width_param = np.nan
                         return {
                             "n_runs": n_runs,
                             "n_triggered": n_triggered,
-                            "best_morphology": best_run.get("morphology", "none"),
+                            "best_morphology": morph,
                             "best_t0": params.get("t0", np.nan),
                             "best_amplitude": params.get("amplitude", np.nan),
                             "best_duration": params.get("sigma", params.get("tau", np.nan)),
                             "best_run_n_points": best_run.get("n_points", 0),
                             "best_run_start_jd": best_run.get("start_jd", np.nan),
                             "best_run_end_jd": best_run.get("end_jd", np.nan),
+                            # New fields from events.py
+                            "best_delta_bic": best_run.get("delta_bic_null", np.nan),
+                            "best_width_param": width_param,
+                            "best_symmetry_score": best_run.get("symmetry_score", np.nan),
                         }
                     return {
                         "n_runs": n_runs,
@@ -1046,6 +1068,10 @@ def build_reproduction_report(
                         "best_run_n_points": 0,
                         "best_run_start_jd": np.nan,
                         "best_run_end_jd": np.nan,
+                        # New fields from events.py
+                        "best_delta_bic": np.nan,
+                        "best_width_param": np.nan,
+                        "best_symmetry_score": np.nan,
                     }
 
                 g_run_info = extract_run_info(res_g, "dip")
@@ -1056,6 +1082,83 @@ def build_reproduction_report(
                 v_n_points = len(clean_for_bayes(dfv)) if not dfv.empty else 0
                 g_time_span = float(dfg["JD"].max() - dfg["JD"].min()) if not dfg.empty and len(dfg) > 1 else 0.0
                 v_time_span = float(dfv["JD"].max() - dfv["JD"].min()) if not dfv.empty and len(dfv) > 1 else 0.0
+
+                # Additional timing stats (from events.py)
+                dfg_clean = clean_for_bayes(dfg) if not dfg.empty else pd.DataFrame()
+                dfv_clean = clean_for_bayes(dfv) if not dfv.empty else pd.DataFrame()
+
+                g_jd_first = float(dfg_clean["JD"].min()) if not dfg_clean.empty else np.nan
+                g_jd_last = float(dfg_clean["JD"].max()) if not dfg_clean.empty else np.nan
+                g_cadence_median_days = float(robust_median_dt_days(dfg_clean["JD"].to_numpy())) if not dfg_clean.empty else np.nan
+
+                v_jd_first = float(dfv_clean["JD"].min()) if not dfv_clean.empty else np.nan
+                v_jd_last = float(dfv_clean["JD"].max()) if not dfv_clean.empty else np.nan
+                v_cadence_median_days = float(robust_median_dt_days(dfv_clean["JD"].to_numpy())) if not dfv_clean.empty else np.nan
+
+                # Camera statistics (from events.py)
+                def get_camera_stats(df_band: pd.DataFrame) -> dict:
+                    """Extract camera statistics for a band."""
+                    if df_band.empty or "camera#" not in df_band.columns:
+                        return {
+                            "n_cameras": 0,
+                            "camera_ids": "",
+                            "camera_min_points": 0,
+                            "camera_max_points": 0,
+                        }
+                    cams = df_band["camera#"].dropna()
+                    if len(cams) == 0:
+                        return {
+                            "n_cameras": 0,
+                            "camera_ids": "",
+                            "camera_min_points": 0,
+                            "camera_max_points": 0,
+                        }
+                    unique_cams = np.unique(cams.astype(str))
+                    cam_counts = cams.value_counts()
+                    return {
+                        "n_cameras": int(unique_cams.size),
+                        "camera_ids": ",".join(sorted(unique_cams)),
+                        "camera_min_points": int(cam_counts.min()) if len(cam_counts) else 0,
+                        "camera_max_points": int(cam_counts.max()) if len(cam_counts) else 0,
+                    }
+
+                g_cam_stats = get_camera_stats(dfg_clean)
+                v_cam_stats = get_camera_stats(dfv_clean)
+
+                # Dipper score (from events.py) - only computed if significant
+                def compute_dipper_stats(df_band: pd.DataFrame, res_band: dict, kind: str = "dip") -> dict:
+                    """Compute dipper score for a band."""
+                    if df_band.empty or not res_band.get(kind, {}).get("significant", False):
+                        return {
+                            "dipper_score": 0.0,
+                            "dipper_n_dips": 0,
+                            "dipper_n_valid_dips": 0,
+                        }
+                    try:
+                        df_base = res_band.get("df_base")
+                        if df_base is not None and "baseline" in df_base.columns:
+                            baseline_mags = df_base["baseline"].to_numpy()
+                        else:
+                            baseline_mags = None
+                        score, events = compute_event_score(df_band, event_type='dip', baseline_mags=baseline_mags)
+                        return {
+                            "dipper_score": float(score),
+                            "dipper_n_dips": int(len(events)),
+                            "dipper_n_valid_dips": int(sum(1 for e in events if e.valid)),
+                        }
+                    except Exception:
+                        return {
+                            "dipper_score": 0.0,
+                            "dipper_n_dips": 0,
+                            "dipper_n_valid_dips": 0,
+                        }
+
+                g_dipper_stats = compute_dipper_stats(dfg_clean, res_g)
+                v_dipper_stats = compute_dipper_stats(dfv_clean, res_v)
+
+                # Also extract jump run info
+                g_jump_run_info = extract_run_info(res_g, "jump")
+                v_jump_run_info = extract_run_info(res_v, "jump")
 
                 # Override significant flag if no runs pass morphology filter
                 if res_g["dip"]["n_accepted"] == 0:
@@ -1163,7 +1266,15 @@ def build_reproduction_report(
                         "g_time_span": g_time_span,
                         "v_time_span": v_time_span,
 
-                        # Run details - g band
+                        # Timing stats (from events.py)
+                        "g_jd_first": g_jd_first,
+                        "v_jd_first": v_jd_first,
+                        "g_jd_last": g_jd_last,
+                        "v_jd_last": v_jd_last,
+                        "g_cadence_median_days": g_cadence_median_days,
+                        "v_cadence_median_days": v_cadence_median_days,
+
+                        # Run details - g band dips
                         "g_n_runs": g_run_info["n_runs"],
                         "g_n_triggered": g_run_info["n_triggered"],
                         "g_best_morphology": g_run_info["best_morphology"],
@@ -1173,8 +1284,12 @@ def build_reproduction_report(
                         "g_best_run_n_points": g_run_info["best_run_n_points"],
                         "g_best_run_start_jd": g_run_info["best_run_start_jd"],
                         "g_best_run_end_jd": g_run_info["best_run_end_jd"],
+                        # New morphology fields (from events.py)
+                        "g_dip_best_delta_bic": g_run_info["best_delta_bic"],
+                        "g_dip_best_width_param": g_run_info["best_width_param"],
+                        "g_dip_symmetry_score": g_run_info["best_symmetry_score"],
 
-                        # Run details - V band
+                        # Run details - V band dips
                         "v_n_runs": v_run_info["n_runs"],
                         "v_n_triggered": v_run_info["n_triggered"],
                         "v_best_morphology": v_run_info["best_morphology"],
@@ -1184,6 +1299,84 @@ def build_reproduction_report(
                         "v_best_run_n_points": v_run_info["best_run_n_points"],
                         "v_best_run_start_jd": v_run_info["best_run_start_jd"],
                         "v_best_run_end_jd": v_run_info["best_run_end_jd"],
+                        # New morphology fields (from events.py)
+                        "v_dip_best_delta_bic": v_run_info["best_delta_bic"],
+                        "v_dip_best_width_param": v_run_info["best_width_param"],
+                        "v_dip_symmetry_score": v_run_info["best_symmetry_score"],
+
+                        # Run details - g band jumps (from events.py)
+                        "g_jump_n_runs": g_jump_run_info["n_runs"],
+                        "g_jump_n_triggered": g_jump_run_info["n_triggered"],
+                        "g_jump_best_morphology": g_jump_run_info["best_morphology"],
+                        "g_jump_best_delta_bic": g_jump_run_info["best_delta_bic"],
+                        "g_jump_best_width_param": g_jump_run_info["best_width_param"],
+
+                        # Run details - V band jumps (from events.py)
+                        "v_jump_n_runs": v_jump_run_info["n_runs"],
+                        "v_jump_n_triggered": v_jump_run_info["n_triggered"],
+                        "v_jump_best_morphology": v_jump_run_info["best_morphology"],
+                        "v_jump_best_delta_bic": v_jump_run_info["best_delta_bic"],
+                        "v_jump_best_width_param": v_jump_run_info["best_width_param"],
+
+                        # Run count/max stats (from events.py - using dip stats)
+                        "g_dip_run_count": int(res_g["dip"].get("n_runs", 0)),
+                        "v_dip_run_count": int(res_v["dip"].get("n_runs", 0)),
+                        "g_jump_run_count": int(res_g["jump"].get("n_runs", 0)),
+                        "v_jump_run_count": int(res_v["jump"].get("n_runs", 0)),
+                        "g_dip_max_run_points": int(res_g["dip"].get("max_run_points", 0)),
+                        "v_dip_max_run_points": int(res_v["dip"].get("max_run_points", 0)),
+                        "g_dip_max_run_duration": float(res_g["dip"].get("max_run_duration", np.nan)),
+                        "v_dip_max_run_duration": float(res_v["dip"].get("max_run_duration", np.nan)),
+                        "g_dip_max_run_sum": float(res_g["dip"].get("max_run_sum", np.nan)),
+                        "v_dip_max_run_sum": float(res_v["dip"].get("max_run_sum", np.nan)),
+                        "g_dip_max_run_max": float(res_g["dip"].get("max_run_max", np.nan)),
+                        "v_dip_max_run_max": float(res_v["dip"].get("max_run_max", np.nan)),
+                        "g_dip_max_run_cameras": int(res_g["dip"].get("max_run_cameras", 0)),
+                        "v_dip_max_run_cameras": int(res_v["dip"].get("max_run_cameras", 0)),
+
+                        # Detection parameters (from events.py)
+                        "g_baseline_mag": float(res_g["dip"].get("baseline_mag", np.nan)),
+                        "v_baseline_mag": float(res_v["dip"].get("baseline_mag", np.nan)),
+                        "g_dip_best_p": float(res_g["dip"].get("best_p", np.nan)),
+                        "v_dip_best_p": float(res_v["dip"].get("best_p", np.nan)),
+                        "g_jump_best_p": float(res_g["jump"].get("best_p", np.nan)),
+                        "v_jump_best_p": float(res_v["jump"].get("best_p", np.nan)),
+                        "g_dip_best_mag_event": float(res_g["dip"].get("best_mag_event", np.nan)),
+                        "v_dip_best_mag_event": float(res_v["dip"].get("best_mag_event", np.nan)),
+                        "g_dip_trigger_max": float(res_g["dip"].get("trigger_max", np.nan)),
+                        "v_dip_trigger_max": float(res_v["dip"].get("trigger_max", np.nan)),
+                        "g_jump_trigger_max": float(res_g["jump"].get("trigger_max", np.nan)),
+                        "v_jump_trigger_max": float(res_v["jump"].get("trigger_max", np.nan)),
+
+                        # Camera statistics (from events.py)
+                        "g_n_cameras": g_cam_stats["n_cameras"],
+                        "v_n_cameras": v_cam_stats["n_cameras"],
+                        "g_camera_ids": g_cam_stats["camera_ids"],
+                        "v_camera_ids": v_cam_stats["camera_ids"],
+                        "g_camera_min_points": g_cam_stats["camera_min_points"],
+                        "v_camera_min_points": v_cam_stats["camera_min_points"],
+                        "g_camera_max_points": g_cam_stats["camera_max_points"],
+                        "v_camera_max_points": v_cam_stats["camera_max_points"],
+
+                        # Dipper score (from events.py)
+                        "g_dipper_score": g_dipper_stats["dipper_score"],
+                        "v_dipper_score": v_dipper_stats["dipper_score"],
+                        "g_dipper_n_dips": g_dipper_stats["dipper_n_dips"],
+                        "v_dipper_n_dips": v_dipper_stats["dipper_n_dips"],
+                        "g_dipper_n_valid_dips": g_dipper_stats["dipper_n_valid_dips"],
+                        "v_dipper_n_valid_dips": v_dipper_stats["dipper_n_valid_dips"],
+
+                        # System info (from events.py)
+                        "g_used_sigma_eff": bool(res_g["dip"].get("used_sigma_eff", False)),
+                        "v_used_sigma_eff": bool(res_v["dip"].get("used_sigma_eff", False)),
+                        "g_baseline_source": str(res_g["dip"].get("baseline_source", "unknown")),
+                        "v_baseline_source": str(res_v["dip"].get("baseline_source", "unknown")),
+                        "g_trigger_mode": str(res_g["dip"].get("trigger_mode", trigger_mode)),
+                        "v_trigger_mode": str(res_v["dip"].get("trigger_mode", trigger_mode)),
+                        "g_dip_trigger_threshold": float(res_g["dip"].get("trigger_threshold", np.nan)),
+                        "v_dip_trigger_threshold": float(res_v["dip"].get("trigger_threshold", np.nan)),
+                        "g_jump_trigger_threshold": float(res_g["jump"].get("trigger_threshold", np.nan)),
+                        "v_jump_trigger_threshold": float(res_v["jump"].get("trigger_threshold", np.nan)),
                     }
                 )
     else:
@@ -1206,9 +1399,25 @@ def build_reproduction_report(
             n_before = len(rows_df)
 
         try:
+            # Create combined columns for the filter (which expects detect schema)
+            # Use g-band as primary, fall back to v-band
+            df_for_filter = rows_df.copy()
+            if "g_baseline_mag" in df_for_filter.columns:
+                df_for_filter["baseline_mag"] = df_for_filter["g_baseline_mag"].fillna(
+                    df_for_filter.get("v_baseline_mag", np.nan)
+                )
+            if "g_dip_best_mag_event" in df_for_filter.columns:
+                df_for_filter["dip_best_mag_event"] = df_for_filter["g_dip_best_mag_event"].fillna(
+                    df_for_filter.get("v_dip_best_mag_event", np.nan)
+                )
+            if "g_jump_best_mag_event" in df_for_filter.columns:
+                df_for_filter["jump_best_mag_event"] = df_for_filter["g_jump_best_mag_event"].fillna(
+                    df_for_filter.get("v_jump_best_mag_event", np.nan)
+                )
+
             # Get filtered result to identify which rows pass
             rows_df_filtered = filter_signal_amplitude(
-                rows_df.copy(),
+                df_for_filter,
                 min_mag_offset=min_mag_offset,
                 show_tqdm=verbose,
             )
@@ -1238,6 +1447,160 @@ def build_reproduction_report(
             if verbose:
                 print(f"[SIGNAL-FILTER] Warning: signal amplitude filter failed: {e}")
                 print(f"[SIGNAL-FILTER] Continuing without signal amplitude filtering...")
+
+    # ==========================================================================
+    # Post-processing: Load index to get Gaia IDs and coordinates
+    # ==========================================================================
+    if (run_characterize or run_dust) and not rows_df.empty and index_file:
+        index_path = Path(index_file) if index_file else None
+        if index_path and index_path.exists():
+            if verbose:
+                print(f"\n[INDEX] Loading ASAS-SN index from {index_path}...")
+
+            try:
+                # Load only needed columns from index
+                index_cols = ["asas_sn_id", "gaia_id", "ra_deg", "dec_deg"]
+                if str(index_path).endswith('.parquet'):
+                    index_df = pd.read_parquet(index_path, columns=index_cols)
+                else:
+                    index_df = pd.read_csv(index_path, usecols=index_cols)
+
+                # Ensure asas_sn_id is string for matching
+                index_df["asas_sn_id"] = index_df["asas_sn_id"].astype(str)
+
+                # The source_id in rows_df is actually asas_sn_id
+                if "asas_sn_id" in rows_df.columns:
+                    merge_col = "asas_sn_id"
+                    rows_df[merge_col] = rows_df[merge_col].astype(str)
+                elif "source_id" in rows_df.columns:
+                    merge_col = "source_id"
+                    rows_df["_merge_id"] = rows_df[merge_col].astype(str)
+                    merge_col = "_merge_id"
+                else:
+                    merge_col = None
+
+                if merge_col:
+                    rows_df = rows_df.merge(
+                        index_df,
+                        left_on=merge_col,
+                        right_on="asas_sn_id",
+                        how="left",
+                        suffixes=("", "_idx")
+                    )
+                    # Clean up merge columns
+                    rows_df = rows_df.drop(columns=["_merge_id", "asas_sn_id_idx"], errors="ignore")
+
+                    if verbose:
+                        n_with_gaia = rows_df["gaia_id"].notna().sum() if "gaia_id" in rows_df.columns else 0
+                        print(f"[INDEX] Matched {n_with_gaia}/{len(rows_df)} sources to index (got gaia_id, ra_deg, dec_deg)")
+
+            except Exception as e:
+                if verbose:
+                    print(f"[INDEX] Warning: Failed to load index: {e}")
+        elif verbose:
+            print(f"[INDEX] Warning: Index file not found: {index_path}")
+
+    # ==========================================================================
+    # Post-processing: Characterization (Gaia DR3, stellar params, photometry)
+    # ==========================================================================
+    if run_characterize and not rows_df.empty:
+        if verbose:
+            print(f"\n[CHARACTERIZE] Querying Gaia DR3 for {len(rows_df)} sources...")
+
+        try:
+            # Get Gaia source IDs - prefer gaia_id from index, fall back to source_id
+            gaia_ids = []
+            if "gaia_id" in rows_df.columns:
+                gaia_ids = rows_df["gaia_id"].dropna().astype(int).astype(str).tolist()
+            elif "gaia_source_id" in rows_df.columns:
+                gaia_ids = rows_df["gaia_source_id"].dropna().astype(str).tolist()
+
+            if gaia_ids:
+                if verbose:
+                    print(f"[CHARACTERIZE] Found {len(gaia_ids)} Gaia IDs to query")
+
+                gaia_df = query_gaia_by_ids(
+                    gaia_ids,
+                    cache_file=str(gaia_cache) if gaia_cache else None,
+                )
+
+                if not gaia_df.empty:
+                    # Merge Gaia data with results by gaia_id
+                    gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+
+                    # Select key columns from Gaia
+                    gaia_cols = [
+                        "source_id", "ra", "dec", "parallax", "parallax_error", "ruwe",
+                        "pmra", "pmdec", "phot_g_mean_mag", "bp_rp",
+                        "teff_gspphot", "logg_gspphot", "mh_gspphot",
+                        "distance_gspphot", "ag_gspphot",
+                        "tmass_j", "tmass_h", "tmass_k",
+                        "unwise_w1", "unwise_w2",
+                    ]
+                    gaia_cols_present = [c for c in gaia_cols if c in gaia_df.columns]
+                    gaia_subset = gaia_df[gaia_cols_present].copy()
+
+                    # Rename columns to gaia_ prefix
+                    rename_map = {c: f"gaia_{c}" for c in gaia_cols_present if c != "source_id"}
+                    gaia_subset = gaia_subset.rename(columns=rename_map)
+
+                    # Merge by gaia_id
+                    rows_df["_gaia_id_str"] = rows_df["gaia_id"].astype(str) if "gaia_id" in rows_df.columns else ""
+                    rows_df = rows_df.merge(
+                        gaia_subset,
+                        left_on="_gaia_id_str",
+                        right_on="source_id",
+                        how="left",
+                        suffixes=("", "_gaia_query")
+                    )
+                    rows_df = rows_df.drop(columns=["_gaia_id_str", "source_id_gaia_query", "source_id"], errors="ignore")
+
+                    if verbose:
+                        n_matched = rows_df["gaia_ruwe"].notna().sum() if "gaia_ruwe" in rows_df.columns else 0
+                        print(f"[CHARACTERIZE] Matched {n_matched}/{len(rows_df)} sources to Gaia DR3")
+            else:
+                if verbose:
+                    print("[CHARACTERIZE] No Gaia IDs found. Use --index-file to provide ASAS-SN index with gaia_id column.")
+
+        except Exception as e:
+            if verbose:
+                print(f"[CHARACTERIZE] Warning: Gaia characterization failed: {e}")
+                print(f"[CHARACTERIZE] Continuing without Gaia characterization...")
+
+    # ==========================================================================
+    # Post-processing: Dust extinction
+    # ==========================================================================
+    if run_dust and not rows_df.empty:
+        if verbose:
+            print(f"\n[DUST] Computing 3D dust extinction for {len(rows_df)} sources...")
+
+        try:
+            rows_df = get_dust_extinction(rows_df)
+            if verbose:
+                n_with_av = (rows_df["A_v_3d"] > 0).sum() if "A_v_3d" in rows_df.columns else 0
+                print(f"[DUST] {n_with_av}/{len(rows_df)} sources have A_V > 0")
+        except Exception as e:
+            if verbose:
+                print(f"[DUST] Warning: Dust extinction failed: {e}")
+                print(f"[DUST] Continuing without dust extinction...")
+
+    # ==========================================================================
+    # Post-processing: Classification (EB/CV/starspot rejection, YSO)
+    # ==========================================================================
+    if run_classify and not rows_df.empty:
+        if verbose:
+            print(f"\n[CLASSIFY] Running classification on {len(rows_df)} sources...")
+
+        try:
+            rows_df = compute_all_classifications(rows_df)
+            if verbose:
+                if "final_class" in rows_df.columns:
+                    print("[CLASSIFY] Classification summary:")
+                    print(rows_df["final_class"].value_counts().to_string())
+        except Exception as e:
+            if verbose:
+                print(f"[CLASSIFY] Warning: Classification failed: {e}")
+                print(f"[CLASSIFY] Continuing without classification...")
 
     if "source_id" not in rows_df.columns:
         if "asas_sn_id" in rows_df.columns:
@@ -1745,11 +2108,38 @@ Examples:
         help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)",
     )
 
-    # Post-filter options
+    # Post-processing options
+    parser.add_argument(
+        "--run-classify",
+        action="store_true",
+        help="Run classification (EB/CV/starspot rejection, YSO classification)",
+    )
+    parser.add_argument(
+        "--run-characterize",
+        action="store_true",
+        help="Run characterization (Gaia DR3 query for RUWE, stellar params, 2MASS/WISE photometry)",
+    )
+    parser.add_argument(
+        "--gaia-cache",
+        type=Path,
+        default=None,
+        help="Path to Gaia query cache file (parquet) for faster repeated runs",
+    )
+    parser.add_argument(
+        "--index-file",
+        type=Path,
+        default=Path("output/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet"),
+        help="Path to ASAS-SN index file with gaia_id, ra_deg, dec_deg columns",
+    )
+    parser.add_argument(
+        "--run-dust",
+        action="store_true",
+        help="Run 3D dust extinction correction (requires dustmaps3d)",
+    )
     parser.add_argument(
         "--skip-post-filters",
         action="store_true",
-        help="Skip post-filtering step (currently no post-filters implemented)",
+        help="Skip post-filtering step",
     )
 
     # Morphology filter options
@@ -1960,6 +2350,12 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         skip_post_filters=args.skip_post_filters,
         # Morphology filter
         accepted_morphologies=accepted_morphologies,
+        # Post-processing: classification and characterization
+        run_classify=args.run_classify,
+        run_characterize=args.run_characterize,
+        gaia_cache=args.gaia_cache,
+        index_file=args.index_file,
+        run_dust=args.run_dust,
     )
 
     # Print filtering summary
