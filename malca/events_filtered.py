@@ -9,8 +9,9 @@ Workflow:
 4. Pass to events.py
 5. [Optional] Apply post-filters (posterior strength, run robustness, etc.)
 6. [Optional] Generate postprocess plots for passing candidates
-7. [Optional] Run classification (EB/CV/starspot rejection, YSO classification)
-8. [Optional] Enrich passing candidates with comprehensive light curve stats
+7. [Optional] Run characterization (Gaia DR3 + dust extinction)
+8. [Optional] Run classification (EB/CV/starspot rejection, YSO classification)
+9. [Optional] Enrich passing candidates with comprehensive light curve stats
 
 Usage:
     python -m malca.events_filtered --mag-bin 13_13.5 [events.py args...]
@@ -33,6 +34,7 @@ from malca.post_filter import apply_post_filters
 from malca.postprocess import run_postprocess
 from malca.classify import compute_all_classifications
 from malca.stats import compute_stats
+from malca.characterize import query_gaia_by_ids, get_dust_extinction
 
 
 def safe_write_parquet(df: pd.DataFrame, path: Path) -> None:
@@ -168,10 +170,21 @@ def main():
     parser.add_argument("--max-plots", type=int, default=None, help="Limit number of plots generated (default: no limit)")
     parser.add_argument("--plot-format", type=str, default="png", choices=["png", "pdf"], help="Output format for plots (default: png)")
 
-    # Step 7: Classify args
+    # Step 7: Characterization args
+    parser.add_argument("--run-characterize", action="store_true", help="Run Gaia DR3 characterization after post_filter")
+    parser.add_argument("--gaia-cache", type=Path, default=None, help="Path to Gaia query cache file (parquet)")
+    parser.add_argument(
+        "--index-file",
+        type=Path,
+        default=Path("output/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet"),
+        help="Path to ASAS-SN index file with gaia_id, ra_deg, dec_deg columns",
+    )
+    parser.add_argument("--run-dust", action="store_true", help="Run 3D dust extinction correction (requires dustmaps3d)")
+
+    # Step 8: Classify args
     parser.add_argument("--run-classify", action="store_true", help="Run classification (EB/CV/starspot rejection, YSO) after post_filter")
 
-    # Step 8: Enrich args
+    # Step 9: Enrich args
     parser.add_argument("--run-enrich", action="store_true", help="Enrich passing candidates with comprehensive light curve stats")
     parser.add_argument("--enrich-compute-ls", action="store_true", help="Include Lomb-Scargle periodogram in enrichment (expensive)")
 
@@ -742,17 +755,102 @@ def main():
                     import traceback
                     traceback.print_exc()
 
-    # Step 7: Run classification (optional)
+    # Step 7: Characterization + dust (optional)
+    if args.run_characterize or args.run_dust:
+        if not args.run_post_filter:
+            print("Warning: --run-characterize/--run-dust requires --run-post-filter. Skipping characterization.")
+        else:
+            log("\n=== Step 7: Characterizing candidates ===")
+            try:
+                post_filter_output = results_dir / "lc_events_filtered.csv"
+                if not post_filter_output.exists():
+                    print(f"Warning: post-filter output not found at {post_filter_output}")
+                else:
+                    df_char = pd.read_csv(post_filter_output)
+
+                    if "failed_any" in df_char.columns:
+                        df_char = df_char[~df_char["failed_any"]].copy()
+
+                    if "path" in df_char.columns and "asas_sn_id" not in df_char.columns:
+                        def _extract_id(path_str: str) -> str:
+                            name = Path(path_str).name
+                            if name.endswith("-light-curves.csv"):
+                                return name.split("-")[0]
+                            return Path(name).stem
+
+                        df_char["asas_sn_id"] = df_char["path"].astype(str).map(_extract_id)
+
+                    index_path = args.index_file.expanduser() if args.index_file else None
+                    if index_path and index_path.exists():
+                        try:
+                            index_cols = ["asas_sn_id", "gaia_id", "ra_deg", "dec_deg"]
+                            if str(index_path).endswith(".parquet"):
+                                index_df = pd.read_parquet(index_path, columns=index_cols)
+                            else:
+                                index_df = pd.read_csv(index_path, usecols=index_cols)
+                            index_df["asas_sn_id"] = index_df["asas_sn_id"].astype(str)
+                            if "asas_sn_id" in df_char.columns:
+                                df_char["asas_sn_id"] = df_char["asas_sn_id"].astype(str)
+                                df_char = df_char.merge(index_df, on="asas_sn_id", how="left", suffixes=("", "_idx"))
+                        except Exception as e:
+                            print(f"Warning: could not load index file {index_path}: {e}")
+                    elif args.run_characterize or args.run_dust:
+                        print(f"Warning: index file not found: {index_path}")
+
+                    if args.run_characterize:
+                        gaia_ids = []
+                        if "gaia_id" in df_char.columns:
+                            gaia_ids = df_char["gaia_id"].dropna().astype(str).unique().tolist()
+                        if not gaia_ids:
+                            print("Warning: no Gaia IDs found for characterization. Provide --index-file with gaia_id.")
+                        else:
+                            gaia_df = query_gaia_by_ids(
+                                gaia_ids,
+                                cache_file=str(args.gaia_cache) if args.gaia_cache else None,
+                            )
+                            if not gaia_df.empty:
+                                df_char["gaia_id"] = df_char["gaia_id"].astype(str)
+                                gaia_df["source_id"] = gaia_df["source_id"].astype(str)
+                                df_char = df_char.merge(
+                                    gaia_df,
+                                    left_on="gaia_id",
+                                    right_on="source_id",
+                                    how="left",
+                                    suffixes=("", "_gaia"),
+                                )
+
+                    if args.run_dust:
+                        df_char = get_dust_extinction(df_char)
+
+                    characterize_output = results_dir / "lc_events_characterized.csv"
+                    df_char.to_csv(characterize_output, index=False)
+                    log(f"Characterization results saved to {characterize_output}")
+
+            except Exception as e:
+                print(f"Error in characterization step: {e}")
+                if args.verbose:
+                    import traceback
+                    traceback.print_exc()
+
+    # Step 8: Run classification (optional)
     if args.run_classify:
         if not args.run_post_filter:
             print("Warning: --run-classify requires --run-post-filter. Skipping classification.")
         else:
-            log("\n=== Step 7: Running classification ===")
+            log("\n=== Step 8: Running classification ===")
             try:
+                characterize_output = results_dir / "lc_events_characterized.csv"
                 post_filter_output = results_dir / "lc_events_filtered.csv"
-                if post_filter_output.exists():
+
+                if characterize_output.exists():
+                    df_post_filtered = pd.read_csv(characterize_output)
+                elif post_filter_output.exists():
                     df_post_filtered = pd.read_csv(post_filter_output)
-                    
+                else:
+                    df_post_filtered = None
+                    print(f"Warning: post-filter output not found at {post_filter_output}")
+
+                if df_post_filtered is not None:
                     # Run classification on passing candidates
                     df_passed = df_post_filtered[~df_post_filtered["failed_any"]].copy() if "failed_any" in df_post_filtered.columns else df_post_filtered.copy()
                     
@@ -778,8 +876,6 @@ def main():
                         log(f"Classification: {len(df_classified)} candidates classified")
                     else:
                         log("No passing candidates to classify.")
-                else:
-                    print(f"Warning: post-filter output not found at {post_filter_output}")
 
             except Exception as e:
                 print(f"Error in classification step: {e}")
@@ -787,20 +883,24 @@ def main():
                     import traceback
                     traceback.print_exc()
 
-    # Step 8: Enrich with compute_stats (optional)
+    # Step 9: Enrich with compute_stats (optional)
     if args.run_enrich:
         if not args.run_post_filter:
             print("Warning: --run-enrich requires --run-post-filter. Skipping enrichment.")
         else:
-            log("\n=== Step 8: Enriching with light curve stats ===")
+            log("\n=== Step 9: Enriching with light curve stats ===")
             try:
                 # Load final results (classified if available, otherwise post-filtered)
                 classify_output = results_dir / "lc_events_classified.csv"
+                characterize_output = results_dir / "lc_events_characterized.csv"
                 post_filter_output = results_dir / "lc_events_filtered.csv"
                 
                 if classify_output.exists():
                     df_to_enrich = pd.read_csv(classify_output)
                     source_file = classify_output
+                elif characterize_output.exists():
+                    df_to_enrich = pd.read_csv(characterize_output)
+                    source_file = characterize_output
                 elif post_filter_output.exists():
                     df_to_enrich = pd.read_csv(post_filter_output)
                     source_file = post_filter_output

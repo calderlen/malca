@@ -24,7 +24,9 @@ from malca.baseline import (
 )
 from malca.pre_filter import apply_pre_filters
 from malca.filter import filter_signal_amplitude
-from malca.stats import robust_median_dt_days
+from malca.post_filter import apply_post_filters
+from malca.postprocess import run_postprocess
+from malca.stats import robust_median_dt_days, compute_stats
 from malca.score import compute_event_score
 from malca.classify import compute_all_classifications
 from malca.characterize import query_gaia_by_ids, get_dust_extinction
@@ -672,8 +674,16 @@ def build_reproduction_report(
     skip_vsx: bool = False,
     vsx_catalog: Path | str = Path("/home/lenhart.106/code/malca/input/vsx/vsxcat.090525.csv"),
     vsx_max_sep: float = 3.0,
-    min_mag_offset: float = 0.1,
+    min_mag_offset: float = 0.05,
     skip_post_filters: bool = False,
+    run_post_filter: bool = False,
+    post_filter_min_run_cameras: int = 2,
+    post_filter_min_run_points: int = 2,
+    post_filter_min_bayes_factor: float = 10.0,
+    run_postprocess: bool = False,
+    max_plots: int | None = None,
+    run_enrich: bool = False,
+    enrich_compute_ls: bool = False,
     # Morphology filtering
     accepted_morphologies: set[str] | None = None,
     # Post-processing: classification and characterization
@@ -687,6 +697,8 @@ def build_reproduction_report(
     # Default morphologies: gaussian and paczynski (reject noise/none)
     if accepted_morphologies is None:
         accepted_morphologies = {"gaussian", "paczynski", "fred"}
+    if skip_post_filters:
+        run_post_filter = False
     manifest_df = load_manifest_df(manifest_path) if manifest_path is not None else None
 
     baseline_candidates = candidates if candidates is not None else brayden_candidates
@@ -1333,6 +1345,10 @@ def build_reproduction_report(
                         "v_dip_max_run_max": float(res_v["dip"].get("max_run_max", np.nan)),
                         "g_dip_max_run_cameras": int(res_g["dip"].get("max_run_cameras", 0)),
                         "v_dip_max_run_cameras": int(res_v["dip"].get("max_run_cameras", 0)),
+                        "g_jump_max_run_points": int(res_g["jump"].get("max_run_points", 0)),
+                        "v_jump_max_run_points": int(res_v["jump"].get("max_run_points", 0)),
+                        "g_jump_max_run_cameras": int(res_g["jump"].get("max_run_cameras", 0)),
+                        "v_jump_max_run_cameras": int(res_v["jump"].get("max_run_cameras", 0)),
 
                         # Detection parameters (from events.py)
                         "g_baseline_mag": float(res_g["dip"].get("baseline_mag", np.nan)),
@@ -1343,6 +1359,8 @@ def build_reproduction_report(
                         "v_jump_best_p": float(res_v["jump"].get("best_p", np.nan)),
                         "g_dip_best_mag_event": float(res_g["dip"].get("best_mag_event", np.nan)),
                         "v_dip_best_mag_event": float(res_v["dip"].get("best_mag_event", np.nan)),
+                        "g_jump_best_mag_event": float(res_g["jump"].get("best_mag_event", np.nan)),
+                        "v_jump_best_mag_event": float(res_v["jump"].get("best_mag_event", np.nan)),
                         "g_dip_trigger_max": float(res_g["dip"].get("trigger_max", np.nan)),
                         "v_dip_trigger_max": float(res_v["dip"].get("trigger_max", np.nan)),
                         "g_jump_trigger_max": float(res_g["jump"].get("trigger_max", np.nan)),
@@ -1391,6 +1409,9 @@ def build_reproduction_report(
     else:
         rows_df = pd.DataFrame(columns=["source_id", "mag_bin"])
 
+    if "path" not in rows_df.columns and "dat_path" in rows_df.columns:
+        rows_df["path"] = rows_df["dat_path"]
+
     # Apply signal amplitude filter if enabled
     # Instead of removing rows, mark rejection_reason for rows that fail
     if not rows_df.empty and min_mag_offset > 0:
@@ -1403,17 +1424,14 @@ def build_reproduction_report(
             # Use g-band as primary, fall back to v-band
             df_for_filter = rows_df.copy()
             if "g_baseline_mag" in df_for_filter.columns:
-                df_for_filter["baseline_mag"] = df_for_filter["g_baseline_mag"].fillna(
-                    df_for_filter.get("v_baseline_mag", np.nan)
-                )
+                v_baseline = df_for_filter["v_baseline_mag"] if "v_baseline_mag" in df_for_filter.columns else np.nan
+                df_for_filter["baseline_mag"] = df_for_filter["g_baseline_mag"].fillna(v_baseline)
             if "g_dip_best_mag_event" in df_for_filter.columns:
-                df_for_filter["dip_best_mag_event"] = df_for_filter["g_dip_best_mag_event"].fillna(
-                    df_for_filter.get("v_dip_best_mag_event", np.nan)
-                )
+                v_dip = df_for_filter["v_dip_best_mag_event"] if "v_dip_best_mag_event" in df_for_filter.columns else np.nan
+                df_for_filter["dip_best_mag_event"] = df_for_filter["g_dip_best_mag_event"].fillna(v_dip)
             if "g_jump_best_mag_event" in df_for_filter.columns:
-                df_for_filter["jump_best_mag_event"] = df_for_filter["g_jump_best_mag_event"].fillna(
-                    df_for_filter.get("v_jump_best_mag_event", np.nan)
-                )
+                v_jump = df_for_filter["v_jump_best_mag_event"] if "v_jump_best_mag_event" in df_for_filter.columns else np.nan
+                df_for_filter["jump_best_mag_event"] = df_for_filter["g_jump_best_mag_event"].fillna(v_jump)
 
             # Get filtered result to identify which rows pass
             rows_df_filtered = filter_signal_amplitude(
@@ -1447,6 +1465,157 @@ def build_reproduction_report(
             if verbose:
                 print(f"[SIGNAL-FILTER] Warning: signal amplitude filter failed: {e}")
                 print(f"[SIGNAL-FILTER] Continuing without signal amplitude filtering...")
+
+    # ==========================================================================
+    # Post-processing: Post-filters (apply_post_filters)
+    # ==========================================================================
+    if run_post_filter and method != "bayes":
+        if verbose:
+            print("[POST-FILTER] Warning: post-filtering only supported for --method bayes. Skipping.")
+        run_post_filter = False
+
+    if run_post_filter and not rows_df.empty:
+        if verbose:
+            print("\n[POST-FILTER] Applying post-filters...")
+
+        try:
+            df_for_post = rows_df.copy()
+            if "path" not in df_for_post.columns and "dat_path" in df_for_post.columns:
+                df_for_post["path"] = df_for_post["dat_path"]
+
+            def _combine(primary: str, secondary: str):
+                if primary in df_for_post.columns:
+                    if secondary in df_for_post.columns:
+                        return df_for_post[primary].fillna(df_for_post[secondary])
+                    return df_for_post[primary]
+                if secondary in df_for_post.columns:
+                    return df_for_post[secondary]
+                return np.nan
+
+            def _max_cols(a: str, b: str):
+                if a in df_for_post.columns and b in df_for_post.columns:
+                    return df_for_post[[a, b]].max(axis=1)
+                if a in df_for_post.columns:
+                    return df_for_post[a]
+                if b in df_for_post.columns:
+                    return df_for_post[b]
+                return np.nan
+
+            df_for_post["dip_bayes_factor"] = _max_cols("g_bayes_dip_bayes_factor", "v_bayes_dip_bayes_factor")
+            df_for_post["jump_bayes_factor"] = _max_cols("g_bayes_jump_bayes_factor", "v_bayes_jump_bayes_factor")
+            df_for_post["dip_run_count"] = _max_cols("g_dip_run_count", "v_dip_run_count")
+            df_for_post["jump_run_count"] = _max_cols("g_jump_run_count", "v_jump_run_count")
+            df_for_post["dip_max_run_points"] = _max_cols("g_dip_max_run_points", "v_dip_max_run_points")
+            df_for_post["jump_max_run_points"] = _max_cols("g_jump_max_run_points", "v_jump_max_run_points")
+            df_for_post["dip_max_run_cameras"] = _max_cols("g_dip_max_run_cameras", "v_dip_max_run_cameras")
+            df_for_post["jump_max_run_cameras"] = _max_cols("g_jump_max_run_cameras", "v_jump_max_run_cameras")
+            df_for_post["dip_best_morph"] = _combine("g_best_morphology", "v_best_morphology")
+            df_for_post["jump_best_morph"] = _combine("g_jump_best_morphology", "v_jump_best_morphology")
+            df_for_post["dip_best_delta_bic"] = _max_cols("g_dip_best_delta_bic", "v_dip_best_delta_bic")
+            df_for_post["jump_best_delta_bic"] = _max_cols("g_jump_best_delta_bic", "v_jump_best_delta_bic")
+            df_for_post["dipper_score"] = _max_cols("g_dipper_score", "v_dipper_score")
+
+            rows_df = apply_post_filters(
+                df_for_post,
+                apply_posterior_strength=True,
+                min_bayes_factor=post_filter_min_bayes_factor,
+                apply_run_robustness=True,
+                min_run_points=post_filter_min_run_points,
+                min_run_cameras=post_filter_min_run_cameras,
+                show_tqdm=verbose,
+                verbose=verbose,
+            )
+        except Exception as e:
+            if verbose:
+                print(f"[POST-FILTER] Warning: post-filter failed: {e}")
+                print("[POST-FILTER] Continuing without post-filtering...")
+
+    # ==========================================================================
+    # Post-processing: Postprocess plots (optional)
+    # ==========================================================================
+    if run_postprocess:
+        if not run_post_filter:
+            if verbose:
+                print("[POSTPROCESS] Warning: --run-postprocess requires --run-post-filter. Skipping.")
+        elif not rows_df.empty:
+            if verbose:
+                print("\n[POSTPROCESS] Generating postprocess plots...")
+            try:
+                baseline_map = {
+                    "gp": "per_camera_gp",
+                    "gp_masked": "per_camera_gp_masked",
+                    "trend": "per_camera_trend",
+                }
+                baseline_name = baseline_map.get(str(baseline_func), "per_camera_gp")
+                postprocess_dir = Path(out_dir) / "postprocess"
+                postprocess_dir.mkdir(parents=True, exist_ok=True)
+                run_postprocess(
+                    rows_df,
+                    out_dir=postprocess_dir,
+                    baseline=baseline_name,
+                    logbf_threshold_dip=logbf_threshold_dip,
+                    logbf_threshold_jump=logbf_threshold_jump,
+                    plot_format=plot_format,
+                    max_plots=max_plots,
+                    show_tqdm=verbose,
+                )
+            except Exception as e:
+                if verbose:
+                    print(f"[POSTPROCESS] Warning: postprocess failed: {e}")
+
+    # ==========================================================================
+    # Post-processing: Enrich with compute_stats (optional)
+    # ==========================================================================
+    if run_enrich:
+        if not run_post_filter:
+            if verbose:
+                print("[ENRICH] Warning: --run-enrich requires --run-post-filter. Skipping.")
+        elif not rows_df.empty:
+            if verbose:
+                print("\n[ENRICH] Enriching with light curve stats...")
+            try:
+                if "failed_any" in rows_df.columns:
+                    df_passed = rows_df[~rows_df["failed_any"]].copy()
+                else:
+                    df_passed = rows_df.copy()
+
+                enriched_rows = []
+                for _, row in df_passed.iterrows():
+                    path_val = row.get("path") or row.get("dat_path")
+                    if not path_val:
+                        enriched_rows.append(row.to_dict())
+                        continue
+
+                    lc_path = Path(str(path_val))
+                    if lc_path.name.endswith("-light-curves.csv"):
+                        if verbose:
+                            print(f"[ENRICH] Skipping SkyPatrol file: {lc_path}")
+                        enriched_rows.append(row.to_dict())
+                        continue
+
+                    asassn_id = row.get("asas_sn_id") or row.get("source_id") or lc_path.stem
+                    try:
+                        _, stats_dict = compute_stats(
+                            str(asassn_id),
+                            str(lc_path.parent),
+                            use_only_good=True,
+                            compute_ls=enrich_compute_ls,
+                        )
+                        merged = row.to_dict()
+                        for k, v in stats_dict.items():
+                            if k not in merged:
+                                merged[f"stats_{k}"] = v
+                        enriched_rows.append(merged)
+                    except Exception as e:
+                        if verbose:
+                            print(f"[ENRICH] Warning: compute_stats failed for {lc_path}: {e}")
+                        enriched_rows.append(row.to_dict())
+
+                rows_df = pd.DataFrame(enriched_rows)
+            except Exception as e:
+                if verbose:
+                    print(f"[ENRICH] Warning: enrichment failed: {e}")
+                    print("[ENRICH] Continuing without enrichment...")
 
     # ==========================================================================
     # Post-processing: Load index to get Gaia IDs and coordinates
@@ -1504,16 +1673,22 @@ def build_reproduction_report(
     # Post-processing: Characterization (Gaia DR3, stellar params, photometry)
     # ==========================================================================
     if run_characterize and not rows_df.empty:
-        if verbose:
-            print(f"\n[CHARACTERIZE] Querying Gaia DR3 for {len(rows_df)} sources...")
+        df_char = rows_df
+        if "failed_any" in rows_df.columns:
+            df_char = rows_df[~rows_df["failed_any"]].copy()
+        if df_char.empty:
+            if verbose:
+                print("\n[CHARACTERIZE] No rows passed failed_any filter. Skipping Gaia DR3 query.")
+        elif verbose:
+            print(f"\n[CHARACTERIZE] Querying Gaia DR3 for {len(df_char)} sources...")
 
         try:
             # Get Gaia source IDs - prefer gaia_id from index, fall back to source_id
             gaia_ids = []
-            if "gaia_id" in rows_df.columns:
-                gaia_ids = rows_df["gaia_id"].dropna().astype(int).astype(str).tolist()
-            elif "gaia_source_id" in rows_df.columns:
-                gaia_ids = rows_df["gaia_source_id"].dropna().astype(str).tolist()
+            if "gaia_id" in df_char.columns:
+                gaia_ids = df_char["gaia_id"].dropna().astype(int).astype(str).tolist()
+            elif "gaia_source_id" in df_char.columns:
+                gaia_ids = df_char["gaia_source_id"].dropna().astype(str).tolist()
 
             if gaia_ids:
                 if verbose:
@@ -2104,8 +2279,8 @@ Examples:
     parser.add_argument(
         "--min-mag-offset",
         type=float,
-        default=0.2,
-        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.2)",
+        default=0.05,
+        help="Min magnitude offset for signal amplitude filter (0 to disable, default: 0.05)",
     )
 
     # Post-processing options
@@ -2137,9 +2312,53 @@ Examples:
         help="Run 3D dust extinction correction (requires dustmaps3d)",
     )
     parser.add_argument(
+        "--run-post-filter",
+        action="store_true",
+        help="Apply post-filters (Bayes factor, run robustness, morphology)",
+    )
+    parser.add_argument(
+        "--min-bayes-factor",
+        type=float,
+        default=10.0,
+        help="Min Bayes factor for post-filter (default: 10.0)",
+    )
+    parser.add_argument(
+        "--post-filter-min-run-cameras",
+        type=int,
+        default=2,
+        help="Min cameras for run robustness filter (default: 2)",
+    )
+    parser.add_argument(
+        "--post-filter-min-run-points",
+        type=int,
+        default=2,
+        help="Min points per run for robustness filter (default: 2)",
+    )
+    parser.add_argument(
+        "--run-postprocess",
+        action="store_true",
+        help="Generate diagnostic plots for candidates",
+    )
+    parser.add_argument(
+        "--max-plots",
+        type=int,
+        default=None,
+        help="Limit number of plots generated (default: no limit)",
+    )
+    parser.add_argument(
+        "--run-enrich",
+        action="store_true",
+        help="Enrich candidates with comprehensive light curve stats",
+    )
+    parser.add_argument(
+        "--enrich-compute-ls",
+        action="store_true",
+        help="Include Lomb-Scargle periodogram in enrichment (expensive)",
+    )
+    parser.add_argument(
         "--skip-post-filters",
         action="store_true",
-        help="Skip post-filtering step",
+        help="Skip post-filtering step (deprecated, use --run-post-filter instead)",
     )
 
     # Morphology filter options
@@ -2348,6 +2567,14 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
         vsx_max_sep=args.vsx_max_sep,
         min_mag_offset=args.min_mag_offset,
         skip_post_filters=args.skip_post_filters,
+        run_post_filter=args.run_post_filter,
+        post_filter_min_run_cameras=args.post_filter_min_run_cameras,
+        post_filter_min_run_points=args.post_filter_min_run_points,
+        post_filter_min_bayes_factor=args.min_bayes_factor,
+        run_postprocess=args.run_postprocess,
+        max_plots=args.max_plots,
+        run_enrich=args.run_enrich,
+        enrich_compute_ls=args.enrich_compute_ls,
         # Morphology filter
         accepted_morphologies=accepted_morphologies,
         # Post-processing: classification and characterization
@@ -2382,7 +2609,12 @@ def _main_impl(args: argparse.Namespace, plot_out_dir: Path | None = None) -> pd
     if args.run_min_duration_days is not None:
         print(f"                      min_duration_days={args.run_min_duration_days}")
     print(f"Morphology filter:    accepted={{{', '.join(sorted(accepted_morphologies))}}}")
-    print(f"Post-filters:         {'APPLIED' if not args.skip_post_filters else 'SKIPPED (none implemented)'}")
+    post_filter_state = "APPLIED" if (args.run_post_filter and not args.skip_post_filters) else "SKIPPED"
+    print(f"Post-filters:         {post_filter_state}")
+    if args.run_postprocess:
+        print(f"Postprocess plots:    {'ENABLED' if args.run_post_filter else 'SKIPPED (requires post-filter)'}")
+    if args.run_enrich:
+        print(f"Enrichment:           {'ENABLED' if args.run_post_filter else 'SKIPPED (requires post-filter)'}")
     print("=" * 60 + "\n")
 
     columns = [
