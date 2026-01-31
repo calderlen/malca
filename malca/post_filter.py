@@ -1417,11 +1417,14 @@ Example usage:
     # Determine join column (asas_sn_id or path stem)
     if "asas_sn_id" in df.columns and "asas_sn_id" in index_df.columns:
         join_col = "asas_sn_id"
+        # Ensure same type
+        df[join_col] = df[join_col].astype(str)
+        index_df[join_col] = index_df[join_col].astype(str)
     elif "path" in df.columns:
-        # Extract ID from path
-        df["_join_id"] = df["path"].apply(lambda p: Path(p).stem)
+        # Extract ID from path (as string)
+        df["_join_id"] = df["path"].apply(lambda p: Path(p).stem).astype(str)
         if "asas_sn_id" in index_df.columns:
-            index_df["_join_id"] = index_df["asas_sn_id"]
+            index_df["_join_id"] = index_df["asas_sn_id"].astype(str)
         join_col = "_join_id"
     else:
         raise ValueError("Cannot determine join column between events results and index file")
