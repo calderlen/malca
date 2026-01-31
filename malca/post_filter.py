@@ -199,47 +199,75 @@ def fetch_gaia_dr3_variables(
 
 def fetch_gaia_dr3_ruwe(
     source_ids: list[int] | None = None,
-    coords: tuple[list[float], list[float]] | None = None,
-    radius_arcsec: float = 1.0,
     cache_dir: Path | None = None,
     show_tqdm: bool = True,
+    batch_size: int = 10000,
+    throttle_seconds: float = 1.0,
 ) -> pd.DataFrame:
     """
-    Fetch Gaia DR3 RUWE values for specific sources or coordinates.
+    Fetch Gaia DR3 RUWE values for specific sources.
 
-    Uses bulk queries to avoid rate limiting:
-    - source_ids: Single batched IN query (efficient)
-    - coords: Upload-based crossmatch (1-2 queries total)
+    Results are cached locally to avoid repeated queries.
 
     Parameters
     ----------
     source_ids : list[int] | None
-        Gaia source IDs to query (faster if known)
-    coords : tuple[list[float], list[float]] | None
-        (ra_list, dec_list) in degrees for crossmatch
-    radius_arcsec : float
-        Crossmatch radius (only used with coords)
+        Gaia source IDs to query
     cache_dir : Path | None
-        Cache directory (not used for targeted queries)
+        Cache directory (default: ~/.cache/malca/catalogs)
     show_tqdm : bool
         Show progress messages
+    batch_size : int
+        Number of source IDs per query batch (default: 10000)
+    throttle_seconds : float
+        Delay between batches to avoid rate limiting (default: 1.0)
 
     Returns
     -------
     pd.DataFrame
         Catalog with columns: source_id, ra, dec, ruwe
     """
-    try:
-        from astroquery.gaia import Gaia
-        import tempfile
+    import time
 
-        if source_ids is not None:
-            # Query by source_id (batched IN clause - just a few queries for 10k+ sources)
-            batch_size = 10000
-            all_results = []
+    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "gaia_dr3_ruwe_cache.parquet"
 
-            for i in range(0, len(source_ids), batch_size):
-                batch = source_ids[i:i + batch_size]
+    if source_ids is None or len(source_ids) == 0:
+        raise ValueError("Must provide source_ids")
+
+    # Load existing cache
+    cached_df = pd.DataFrame()
+    if cache_file.exists():
+        try:
+            cached_df = pd.read_parquet(cache_file)
+            if show_tqdm:
+                tqdm.write(f"[fetch_gaia_dr3_ruwe] Loaded {len(cached_df)} cached RUWE values")
+        except Exception as e:
+            if show_tqdm:
+                tqdm.write(f"[fetch_gaia_dr3_ruwe] Warning: Could not load cache: {e}")
+
+    # Determine which IDs need to be queried
+    requested_ids = set(int(sid) for sid in source_ids)
+    if not cached_df.empty and "source_id" in cached_df.columns:
+        cached_ids = set(cached_df["source_id"].astype(int))
+        ids_to_query = list(requested_ids - cached_ids)
+    else:
+        ids_to_query = list(requested_ids)
+
+    if show_tqdm:
+        tqdm.write(f"[fetch_gaia_dr3_ruwe] {len(requested_ids) - len(ids_to_query)} already cached, {len(ids_to_query)} to query")
+
+    # Query missing IDs
+    if ids_to_query:
+        try:
+            from astroquery.gaia import Gaia
+
+            new_results = []
+            n_batches = (len(ids_to_query) + batch_size - 1) // batch_size
+
+            for i in range(0, len(ids_to_query), batch_size):
+                batch = ids_to_query[i:i + batch_size]
                 id_list = ",".join(str(sid) for sid in batch)
                 query = f"""
                 SELECT source_id, ra, dec, ruwe
@@ -248,79 +276,42 @@ def fetch_gaia_dr3_ruwe(
                 """
                 job = Gaia.launch_job(query)
                 result = job.get_results().to_pandas()
-                all_results.append(result)
+                new_results.append(result)
 
+                batch_num = i // batch_size + 1
                 if show_tqdm:
-                    tqdm.write(f"[fetch_gaia_dr3_ruwe] Fetched batch {i//batch_size + 1}/{(len(source_ids) + batch_size - 1)//batch_size}")
+                    tqdm.write(f"[fetch_gaia_dr3_ruwe] Fetched batch {batch_num}/{n_batches} ({len(result)} results)")
 
-            df = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
+                # Throttle between batches (except last)
+                if batch_num < n_batches and throttle_seconds > 0:
+                    time.sleep(throttle_seconds)
 
-        elif coords is not None:
-            ra_list, dec_list = coords
-            n_sources = len(ra_list)
-            
-            if show_tqdm:
-                tqdm.write(f"[fetch_gaia_dr3_ruwe] Uploading {n_sources} coordinates for crossmatch...")
+            # Combine new results
+            if new_results:
+                new_df = pd.concat(new_results, ignore_index=True)
+                new_df.columns = new_df.columns.str.lower()
 
-            # Create temporary table for upload crossmatch
-            upload_df = pd.DataFrame({
-                "target_id": range(n_sources),
-                "ra": ra_list,
-                "dec": dec_list,
-            })
+                # Update cache
+                if not cached_df.empty:
+                    cached_df = pd.concat([cached_df, new_df], ignore_index=True)
+                    cached_df = cached_df.drop_duplicates(subset=["source_id"], keep="last")
+                else:
+                    cached_df = new_df
 
-            # Write to temp file for upload
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
-                upload_df.to_csv(f, index=False)
-                temp_path = f.name
-
-            try:
-                # Upload and crossmatch in a single query
-                Gaia.upload_table(source=temp_path, table_name="my_targets")
-                
-                query = f"""
-                SELECT t.target_id, g.source_id, g.ra, g.dec, g.ruwe,
-                       DISTANCE(POINT('ICRS', t.ra, t.dec), POINT('ICRS', g.ra, g.dec)) AS dist_deg
-                FROM tap_upload.my_targets AS t
-                JOIN gaiadr3.gaia_source AS g
-                ON CONTAINS(
-                    POINT('ICRS', g.ra, g.dec),
-                    CIRCLE('ICRS', t.ra, t.dec, {radius_arcsec / 3600.0})
-                ) = 1
-                """
-                
-                job = Gaia.launch_job_async(query)
-                result = job.get_results().to_pandas()
-                
-                # Keep only closest match per target
-                if not result.empty:
-                    result = result.sort_values("dist_deg").drop_duplicates(subset=["target_id"], keep="first")
-                
-                df = result[["source_id", "ra", "dec", "ruwe"]].copy() if not result.empty else pd.DataFrame()
-                
+                # Save updated cache
+                cached_df.to_parquet(cache_file, index=False)
                 if show_tqdm:
-                    tqdm.write(f"[fetch_gaia_dr3_ruwe] Matched {len(df)}/{n_sources} sources")
-                    
-            finally:
-                # Clean up uploaded table
-                try:
-                    Gaia.delete_user_table("my_targets")
-                except Exception:
-                    pass
-                try:
-                    import os
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
-        else:
-            raise ValueError("Must provide either source_ids or coords")
+                    tqdm.write(f"[fetch_gaia_dr3_ruwe] Updated cache with {len(new_df)} new entries (total: {len(cached_df)})")
 
-        # Normalize column names
-        df.columns = df.columns.str.lower()
-        return df
+        except ImportError:
+            raise ImportError("astroquery is required for Gaia TAP queries. Install with: pip install astroquery")
 
-    except ImportError:
-        raise ImportError("astroquery is required for Gaia TAP queries. Install with: pip install astroquery")
+    # Return only requested IDs
+    if cached_df.empty:
+        return pd.DataFrame(columns=["source_id", "ra", "dec", "ruwe"])
+
+    result_df = cached_df[cached_df["source_id"].astype(int).isin(requested_ids)].copy()
+    return result_df.reset_index(drop=True)
 
 
 def log_rejections(
