@@ -193,7 +193,32 @@ def jd_to_year(jd):
     return year_epoch + ((jd + 2450000.0) - jd_epoch) / days_in_year
 
 
-def read_lc_dat2(asassn_id, path):
+def read_lc_dat2(asassn_id, path, excluded_cameras: set[int] | str | None = None):
+    """
+    Read light curve data from .dat2 file.
+
+    Parameters
+    ----------
+    asassn_id : str
+        ASAS-SN source ID
+    path : str
+        Path to directory containing the .dat2 file
+    excluded_cameras : set[int] | str | None
+        Camera IDs to exclude from the output. Can be:
+        - None: no filtering
+        - set of ints: camera IDs to exclude
+        - comma-separated string: "1,6,7" -> exclude cameras 1, 6, 7
+
+    Returns
+    -------
+    df_g, df_v : pd.DataFrame
+        g-band and V-band DataFrames with excluded cameras removed
+    """
+    # Parse excluded_cameras if string
+    if isinstance(excluded_cameras, str) and excluded_cameras:
+        excluded_cameras = {int(c.strip()) for c in excluded_cameras.split(",") if c.strip()}
+    elif excluded_cameras is None:
+        excluded_cameras = set()
 
     dat2_path = os.path.join(path, f"{asassn_id}.dat2")
     if os.path.exists(dat2_path):
@@ -238,6 +263,10 @@ def read_lc_dat2(asassn_id, path):
             "field": "string"
         })
 
+        # Filter out excluded cameras
+        if excluded_cameras:
+            df = df[~df["camera#"].isin(excluded_cameras)]
+
         df_g = df.loc[df["v_g_band"] == 0].reset_index(drop=True)    
         df_v = df.loc[df["v_g_band"] == 1].reset_index(drop=True)
 
@@ -246,6 +275,7 @@ def read_lc_dat2(asassn_id, path):
     raise FileNotFoundError(
         f"Light curve file not found: {dat2_path}"
     )
+
 
 def read_lc_csv(asassn_id, path):
     csv_path = os.path.join(path, f"{asassn_id}.csv")

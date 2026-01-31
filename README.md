@@ -79,7 +79,7 @@ python -m malca.injection --manifest output/lc_manifest_all.parquet \
    ```
 2) Pre-filter and run events in batches with resume support:
    ```bash
-   python -m malca.events_filtered --mag-bin 13_13.5 --workers 10 \
+   python -m malca detect --mag-bin 13_13.5 --workers 10 \
        --min-time-span 100 --min-points-per-day 0.05 --min-cameras 2 \
        --vsx-crossmatch input/vsx/asassn_x_vsx_matches_20250919_2252.csv \
        --batch-size 2000 \
@@ -94,7 +94,7 @@ python -m malca.injection --manifest output/lc_manifest_all.parquet \
    - VSX tags are saved to `prefilter/vsx_tags/vsx_tags_<magbin>.csv` and merged into events results.
    - To disable VSX handling: add `--skip-vsx`
    - To tag instead of filter: add `--vsx-mode tag`
-   - All events.py arguments (trigger-mode, baseline-func, thresholds, etc.) are passed directly to events_filtered.py
+   - All events.py arguments (trigger-mode, baseline-func, thresholds, etc.) are passed directly to detect.py
 
 3) Post-filter events (strict quality cuts on candidates only):
    ```bash
@@ -140,7 +140,7 @@ graph TB
     end
 
     subgraph "Production Pipeline"
-        EV_FILT[events_filtered.py<br/>Wrapper + Batching]
+        EV_FILT[detect.py<br/>Wrapper + Batching]
         PREFILT[pre_filter.py<br/>Quality filters]
         EVENTS[events.py<br/>Bayesian Detection]
         AMP_FILT[filter.py<br/>Signal amplitude filter]
@@ -168,7 +168,7 @@ graph TB
     end
 
     subgraph "Testing & Validation (tests/)"
-        REPRO[tests/reproduction.py<br/>Known objects]
+        REPRO[tests/reproduce.py<br/>Known objects]
         VALID[tests/validation.py<br/>Results validation]
         INJ[injection.py<br/>Synthetic dips]
 
@@ -186,7 +186,7 @@ graph TB
     subgraph "Analysis"
         PLOT[plot.py<br/>Visualization]
         LTV[ltv/pipeline.py<br/>Long-term variability]
-        FP[fp_analysis.py<br/>FP analysis]
+        FP[filter_attrition.py<br/>Filter attrition]
 
         CAND --> PLOT
         RAW -.-> PLOT
@@ -225,7 +225,7 @@ graph TB
 
 **Key Components:**
 - **Production**: `manifest.py` → `pre_filter.py` → `events.py` → `post_filter.py`
-- **Testing**: `tests/reproduction.py` (re-runs detection), `tests/validation.py` (validates results), `injection.py` (synthetic dips)
+- **Testing**: `tests/reproduce.py` (re-runs detection), `tests/validation.py` (validates results), `injection.py` (synthetic dips)
 - **CLI**: Unified interface via `python -m malca [command]`
 
 See [docs/architecture.md](docs/architecture.md) for detailed documentation.
@@ -238,8 +238,8 @@ When running the full detection pipeline with `--detect-run`, the following dire
 
 ```
 output/runs/20250121_143052/          # Timestamp-based run directory
-├── run_params.json                   # Detection parameters (events_filtered.py)
-├── run_summary.json                 # Detection results stats (events_filtered.py)
+├── run_params.json                   # Detection parameters (detect.py)
+├── run_summary.json                 # Detection results stats (detect.py)
 ├── filter_log.json                   # Filtering parameters & stats (post_filter.py)
 ├── plot_log.json                     # Plotting parameters (plot.py)
 ├── run.log                           # Simple text log with paths
@@ -386,11 +386,11 @@ output/
   - VSX handling in pre-filter:
     - Default is filter: drops VSX matches, but keeps `sep_arcsec` and `class` on survivors.
     - Use `--vsx-mode tag` (with `--skip-vsx` off) to keep all matches and only tag.
-    - When using `events_filtered.py`, tags are also merged into events results and saved to `prefilter/vsx_tags/vsx_tags_<magbin>.csv`.
+    - When using `detect.py`, tags are also merged into events results and saved to `prefilter/vsx_tags/vsx_tags_<magbin>.csv`.
 - Targeted reproduction of specific candidates (Bayesian only):
   ```bash
   # Re-run detection on raw data (requires manifest and .dat2 files)
-  python -m tests.reproduction --method bayes --manifest output/lc_manifest.parquet \
+  python -m malca reproduce --method bayes --manifest output/lc_manifest.parquet \
       --candidates my_targets.csv --out-dir output/results_repro --workers 10
   ```
   **Note**: Only `--method bayes` is supported. Legacy methods `naive` and `biweight` have been deprecated.
@@ -541,7 +541,7 @@ pip install -e ".[multiwavelength]"
 - Quick stats for a single LC file:
   `python -m malca.stats /path/to/lc123.dat2`
 - False-positive reduction summary (pre vs post filter):
-  `python -m malca.fp_analysis --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
+  `python -m malca.filter_attrition --pre /home/lenhart.106/code/malca/output/pre.csv --post /home/lenhart.106/code/malca/output/post.csv`
 
 ### Dependencies
 - **Required**: numpy, pandas, scipy, numba, astropy, tqdm, matplotlib, celerite2, pyarrow

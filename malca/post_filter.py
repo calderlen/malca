@@ -4,11 +4,15 @@ Most filters depend only on the output columns from events.py; the camera
 median validation also reads per-camera stats from .raw2 files via path.
 
 Filters:
-7. filter_posterior_strength - require strong Bayes factors
+7. filter_evidence_strength - require strong Bayes factors
 8. filter_run_robustness - require sufficient run count and points
 9. filter_morphology - require specific morphology with good BIC
 10. filter_score - require minimum dipper_score (log10 event score)
-11. validate_camera_medians - require camera median agreement from .raw2
+
+Validation filters (expensive, run on candidates only):
+11. validate_periodicity - bootstrap LSP to check if source is periodic
+12. validate_gaia_ruwe - flag/reject high RUWE sources from Gaia
+13. validate_periodic_catalog - cross-match against known periodic catalogs
 
 Required input columns (from events.py):
     dip_bayes_factor, jump_bayes_factor,
@@ -29,6 +33,286 @@ import re
 import pandas as pd
 import numpy as np
 from tqdm.auto import tqdm
+
+
+# =============================================================================
+# Catalog Query Helpers (with caching)
+# =============================================================================
+
+DEFAULT_CACHE_DIR = Path("~/.cache/malca/catalogs").expanduser()
+
+
+def fetch_chen2020_ztf_periodic(
+    cache_dir: Path | None = None,
+    force_download: bool = False,
+    show_tqdm: bool = True,
+) -> pd.DataFrame:
+    """
+    Fetch Chen+2020 ZTF periodic variable catalog from VizieR.
+
+    VizieR ID: J/ApJS/249/18
+    Contains 781,602 periodic variables with periods and classifications.
+
+    Parameters
+    ----------
+    cache_dir : Path | None
+        Directory to cache downloaded catalog (default: ~/.cache/malca/catalogs)
+    force_download : bool
+        Re-download even if cached file exists
+    show_tqdm : bool
+        Show progress messages
+
+    Returns
+    -------
+    pd.DataFrame
+        Catalog with columns: ra, dec, period, var_type
+    """
+    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "chen2020_ztf_periodic.parquet"
+
+    if cache_file.exists() and not force_download:
+        if show_tqdm:
+            tqdm.write(f"[fetch_chen2020] Loading cached catalog from {cache_file}")
+        return pd.read_parquet(cache_file)
+
+    if show_tqdm:
+        tqdm.write("[fetch_chen2020] Querying VizieR J/ApJS/249/18 (this may take a few minutes)...")
+
+    try:
+        from astroquery.vizier import Vizier
+
+        # Query the main table with all rows
+        v = Vizier(columns=["RAJ2000", "DEJ2000", "Per", "Type"], row_limit=-1)
+        tables = v.get_catalogs("J/ApJS/249/18")
+
+        if not tables:
+            raise ValueError("No tables returned from VizieR query")
+
+        # Main catalog is typically the first table
+        cat = tables[0].to_pandas()
+
+        # Normalize column names
+        df = pd.DataFrame({
+            "ra": cat["RAJ2000"].astype(float),
+            "dec": cat["DEJ2000"].astype(float),
+            "period": cat["Per"].astype(float),
+            "var_type": cat["Type"].astype(str),
+        })
+
+        # Cache to disk
+        df.to_parquet(cache_file, index=False)
+        if show_tqdm:
+            tqdm.write(f"[fetch_chen2020] Cached {len(df)} sources to {cache_file}")
+
+        return df
+
+    except ImportError:
+        raise ImportError("astroquery is required for VizieR queries. Install with: pip install astroquery")
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch Chen+2020 catalog from VizieR: {e}")
+
+
+def fetch_gaia_dr3_variables(
+    cache_dir: Path | None = None,
+    force_download: bool = False,
+    show_tqdm: bool = True,
+    row_limit: int = -1,
+) -> pd.DataFrame:
+    """
+    Fetch Gaia DR3 classified variable sources via TAP.
+
+    Queries gaiadr3.vari_classifier_result for sources with classifications.
+
+    Parameters
+    ----------
+    cache_dir : Path | None
+        Directory to cache downloaded catalog (default: ~/.cache/malca/catalogs)
+    force_download : bool
+        Re-download even if cached file exists
+    show_tqdm : bool
+        Show progress messages
+    row_limit : int
+        Max rows to fetch (-1 for all, ~10.5M sources)
+
+    Returns
+    -------
+    pd.DataFrame
+        Catalog with columns: source_id, ra, dec, best_class_name
+    """
+    cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / "gaia_dr3_variables.parquet"
+
+    if cache_file.exists() and not force_download:
+        if show_tqdm:
+            tqdm.write(f"[fetch_gaia_dr3_variables] Loading cached catalog from {cache_file}")
+        return pd.read_parquet(cache_file)
+
+    if show_tqdm:
+        tqdm.write("[fetch_gaia_dr3_variables] Querying Gaia DR3 via TAP (this may take several minutes)...")
+
+    try:
+        from astroquery.gaia import Gaia
+
+        # Query classified variables with coordinates
+        limit_clause = f"TOP {row_limit}" if row_limit > 0 else ""
+        query = f"""
+        SELECT {limit_clause}
+            v.source_id, g.ra, g.dec, v.best_class_name
+        FROM gaiadr3.vari_classifier_result AS v
+        JOIN gaiadr3.gaia_source AS g ON v.source_id = g.source_id
+        """
+
+        job = Gaia.launch_job_async(query)
+        result = job.get_results()
+        df = result.to_pandas()
+
+        # Normalize column names
+        df = df.rename(columns={
+            "SOURCE_ID": "source_id",
+            "RA": "ra",
+            "DEC": "dec",
+            "BEST_CLASS_NAME": "best_class_name",
+        })
+
+        # Cache to disk
+        df.to_parquet(cache_file, index=False)
+        if show_tqdm:
+            tqdm.write(f"[fetch_gaia_dr3_variables] Cached {len(df)} sources to {cache_file}")
+
+        return df
+
+    except ImportError:
+        raise ImportError("astroquery is required for Gaia TAP queries. Install with: pip install astroquery")
+    except Exception as e:
+        raise RuntimeError(f"Failed to fetch Gaia DR3 variables: {e}")
+
+
+def fetch_gaia_dr3_ruwe(
+    source_ids: list[int] | None = None,
+    coords: tuple[list[float], list[float]] | None = None,
+    radius_arcsec: float = 1.0,
+    cache_dir: Path | None = None,
+    show_tqdm: bool = True,
+) -> pd.DataFrame:
+    """
+    Fetch Gaia DR3 RUWE values for specific sources or coordinates.
+
+    Uses bulk queries to avoid rate limiting:
+    - source_ids: Single batched IN query (efficient)
+    - coords: Upload-based crossmatch (1-2 queries total)
+
+    Parameters
+    ----------
+    source_ids : list[int] | None
+        Gaia source IDs to query (faster if known)
+    coords : tuple[list[float], list[float]] | None
+        (ra_list, dec_list) in degrees for crossmatch
+    radius_arcsec : float
+        Crossmatch radius (only used with coords)
+    cache_dir : Path | None
+        Cache directory (not used for targeted queries)
+    show_tqdm : bool
+        Show progress messages
+
+    Returns
+    -------
+    pd.DataFrame
+        Catalog with columns: source_id, ra, dec, ruwe
+    """
+    try:
+        from astroquery.gaia import Gaia
+        import tempfile
+
+        if source_ids is not None:
+            # Query by source_id (batched IN clause - just a few queries for 10k+ sources)
+            batch_size = 10000
+            all_results = []
+
+            for i in range(0, len(source_ids), batch_size):
+                batch = source_ids[i:i + batch_size]
+                id_list = ",".join(str(sid) for sid in batch)
+                query = f"""
+                SELECT source_id, ra, dec, ruwe
+                FROM gaiadr3.gaia_source
+                WHERE source_id IN ({id_list})
+                """
+                job = Gaia.launch_job(query)
+                result = job.get_results().to_pandas()
+                all_results.append(result)
+
+                if show_tqdm:
+                    tqdm.write(f"[fetch_gaia_dr3_ruwe] Fetched batch {i//batch_size + 1}/{(len(source_ids) + batch_size - 1)//batch_size}")
+
+            df = pd.concat(all_results, ignore_index=True) if all_results else pd.DataFrame()
+
+        elif coords is not None:
+            ra_list, dec_list = coords
+            n_sources = len(ra_list)
+            
+            if show_tqdm:
+                tqdm.write(f"[fetch_gaia_dr3_ruwe] Uploading {n_sources} coordinates for crossmatch...")
+
+            # Create temporary table for upload crossmatch
+            upload_df = pd.DataFrame({
+                "target_id": range(n_sources),
+                "ra": ra_list,
+                "dec": dec_list,
+            })
+
+            # Write to temp file for upload
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+                upload_df.to_csv(f, index=False)
+                temp_path = f.name
+
+            try:
+                # Upload and crossmatch in a single query
+                Gaia.upload_table(source=temp_path, table_name="my_targets")
+                
+                query = f"""
+                SELECT t.target_id, g.source_id, g.ra, g.dec, g.ruwe,
+                       DISTANCE(POINT('ICRS', t.ra, t.dec), POINT('ICRS', g.ra, g.dec)) AS dist_deg
+                FROM tap_upload.my_targets AS t
+                JOIN gaiadr3.gaia_source AS g
+                ON CONTAINS(
+                    POINT('ICRS', g.ra, g.dec),
+                    CIRCLE('ICRS', t.ra, t.dec, {radius_arcsec / 3600.0})
+                ) = 1
+                """
+                
+                job = Gaia.launch_job_async(query)
+                result = job.get_results().to_pandas()
+                
+                # Keep only closest match per target
+                if not result.empty:
+                    result = result.sort_values("dist_deg").drop_duplicates(subset=["target_id"], keep="first")
+                
+                df = result[["source_id", "ra", "dec", "ruwe"]].copy() if not result.empty else pd.DataFrame()
+                
+                if show_tqdm:
+                    tqdm.write(f"[fetch_gaia_dr3_ruwe] Matched {len(df)}/{n_sources} sources")
+                    
+            finally:
+                # Clean up uploaded table
+                try:
+                    Gaia.delete_user_table("my_targets")
+                except Exception:
+                    pass
+                try:
+                    import os
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+        else:
+            raise ValueError("Must provide either source_ids or coords")
+
+        # Normalize column names
+        df.columns = df.columns.str.lower()
+        return df
+
+    except ImportError:
+        raise ImportError("astroquery is required for Gaia TAP queries. Install with: pip install astroquery")
 
 
 def log_rejections(
@@ -56,7 +340,7 @@ def log_rejections(
     df_log.to_csv(log_path, mode="a", header=not log_path.exists(), index=False)
 
 
-def filter_posterior_strength(
+def filter_evidence_strength(
     df: pd.DataFrame,
     *,
     min_bayes_factor: float = 10.0,
@@ -70,7 +354,7 @@ def filter_posterior_strength(
     Optionally require dip_max_log_bf_local or jump_max_log_bf_local to be finite.
     """
     n0 = len(df)
-    pbar = tqdm(total=2, desc="filter_posterior_strength", leave=False) if show_tqdm else None
+    pbar = tqdm(total=2, desc="filter_evidence_strength", leave=False) if show_tqdm else None
 
     # At least one of dip or jump BF must exceed threshold
     mask = (df["dip_bayes_factor"].fillna(0) > min_bayes_factor) | \
@@ -88,8 +372,8 @@ def filter_posterior_strength(
         pbar.update(1)
 
     if show_tqdm and verbose:
-        tqdm.write(f"[filter_posterior_strength] kept {len(out)}/{n0}")
-    log_rejections(df, out, "filter_posterior_strength", rejected_log_csv)
+        tqdm.write(f"[filter_evidence_strength] kept {len(out)}/{n0}")
+    log_rejections(df, out, "filter_evidence_strength", rejected_log_csv)
 
     if pbar:
         pbar.update(1)
@@ -295,101 +579,59 @@ def _read_raw_camera_stats(path: Path) -> pd.DataFrame:
     return df
 
 
-def validate_camera_medians(
-    df: pd.DataFrame,
-    *,
-    max_median_spread: float = 0.3,
-    mag_bin: str | None = None,
-    mag_tolerance: float = 0.5,
-    allow_missing_raw: bool = False,
-    show_tqdm: bool = False,
-    verbose: bool = False,
-    rejected_log_csv: str | Path | None = None,
-) -> pd.DataFrame:
+
+def _lsp_worker(args: tuple) -> dict:
     """
-    Validate candidates using per-camera median magnitudes from .raw2 files.
-
-    Rejects candidates where camera medians disagree strongly, or where the
-    camera medians fall outside the expected magnitude bin (with tolerance).
+    Worker function for parallel LSP computation.
+    
+    Args:
+        args: Tuple of (path_str, n_bootstrap, exclude_alias_periods)
+        
+    Returns:
+        Dict with path and LSP results
     """
-    mag_bin_range = _parse_mag_bin_range(mag_bin)
+    from pathlib import Path as WorkerPath
+    from malca.utils import read_lc_dat2
+    from malca.stats import bootstrap_lomb_scargle
+    
+    path_str, n_bootstrap, exclude_alias_periods = args
+    
+    try:
+        path = WorkerPath(path_str)
+        asassn_id = path.stem
+        dir_path = str(path.parent)
+        
+        dfg, dfv = read_lc_dat2(asassn_id, dir_path)
+        df_lc = pd.concat([dfg, dfv], ignore_index=True)
+        
+        jd = df_lc["JD"].values
+        mag = df_lc["mag"].values
+        err = df_lc["error"].values
+        
+        ls_result = bootstrap_lomb_scargle(
+            jd, mag, err,
+            n_bootstrap=n_bootstrap,
+            exclude_alias_periods=exclude_alias_periods,
+        )
+        
+        return {
+            "path": path_str,
+            "lsp_power": ls_result["ls_power"],
+            "lsp_period": ls_result["ls_period_days"],
+            "lsp_bootstrap_sig": ls_result["ls_bootstrap_sig"],
+            "lsp_is_alias": ls_result["ls_is_alias"],
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "path": path_str,
+            "lsp_power": np.nan,
+            "lsp_period": np.nan,
+            "lsp_bootstrap_sig": np.nan,
+            "lsp_is_alias": False,
+            "error": str(e),
+        }
 
-    min_medians = []
-    max_medians = []
-    mean_medians = []
-    median_spreads = []
-    n_cameras = []
-    valid_flags = []
-    reasons = []
-    mag_min_bounds = []
-    mag_max_bounds = []
-    keep_flags = []
-
-    paths = df["path"].astype(str).tolist()
-    iterator = enumerate(paths)
-    if show_tqdm:
-        iterator = tqdm(iterator, total=len(paths), desc="validate_camera_medians", leave=False)
-
-    for _, path_str in iterator:
-        path = Path(path_str)
-        raw_path = _find_raw_stats_path(path)
-
-        stats = _read_raw_camera_stats(raw_path)
-
-        medians = stats["median"].to_numpy(dtype=float)
-        med_min = float(np.nanmin(medians)) if medians.size else np.nan
-        med_max = float(np.nanmax(medians)) if medians.size else np.nan
-        med_mean = float(np.nanmean(medians)) if medians.size else np.nan
-        spread = float(med_max - med_min) if np.isfinite(med_min) and np.isfinite(med_max) else np.nan
-
-        row_range = mag_bin_range or _mag_bin_range_from_path(path)
-        if row_range is not None:
-            mag_min = float(row_range[0] - mag_tolerance)
-            mag_max = float(row_range[1] + mag_tolerance)
-        else:
-            mag_min = np.nan
-            mag_max = np.nan
-
-        row_valid = True
-        row_reasons = []
-
-        if np.isfinite(spread) and max_median_spread is not None:
-            if spread > max_median_spread:
-                row_valid = False
-                row_reasons.append(f"spread>{max_median_spread}")
-
-        if np.isfinite(med_min) and np.isfinite(med_max) and np.isfinite(mag_min) and np.isfinite(mag_max):
-            if med_min < mag_min or med_max > mag_max:
-                row_valid = False
-                row_reasons.append("outside_mag_bin")
-
-        min_medians.append(med_min)
-        max_medians.append(med_max)
-        mean_medians.append(med_mean)
-        median_spreads.append(spread)
-        n_cameras.append(int(stats["camera"].nunique()))
-        valid_flags.append(row_valid)
-        reasons.append(";".join(row_reasons) if row_reasons else "")
-        mag_min_bounds.append(mag_min)
-        mag_max_bounds.append(mag_max)
-        keep_flags.append(row_valid)
-
-    df_out = df.copy()
-    df_out["camera_median_min"] = min_medians
-    df_out["camera_median_max"] = max_medians
-    df_out["camera_median_mean"] = mean_medians
-    df_out["camera_median_spread"] = median_spreads
-    df_out["camera_median_n_cameras"] = n_cameras
-    df_out["camera_median_valid"] = valid_flags
-    df_out["camera_median_reason"] = reasons
-    df_out["camera_median_mag_min"] = mag_min_bounds
-    df_out["camera_median_mag_max"] = mag_max_bounds
-
-    out = df_out.loc[keep_flags].reset_index(drop=True)
-    if show_tqdm and verbose:
-        tqdm.write(f"[validate_camera_medians] kept {len(out)}/{len(df_out)}")
-    log_rejections(df_out, out, "validate_camera_medians", rejected_log_csv)
-    return out
 
 def validate_periodicity(
     df: pd.DataFrame,
@@ -400,6 +642,8 @@ def validate_periodicity(
     show_tqdm: bool = False,
     verbose: bool = False,
     rejected_log_csv: str | Path | None = None,
+    workers: int = 1,
+    checkpoint_dir: str | Path | None = None,
 ) -> pd.DataFrame:
     """
     Detailed periodicity validation on candidates (like ZTF paper Section 4.5).
@@ -426,6 +670,10 @@ def validate_periodicity(
         Show progress
     rejected_log_csv : str | Path | None
         Log file for rejected candidates
+    workers : int
+        Number of parallel workers (default 1 = sequential)
+    checkpoint_dir : str | Path | None
+        Directory for checkpoint files (enables resume on restart)
 
     Returns
     -------
@@ -440,49 +688,113 @@ def validate_periodicity(
     - Exclude alias frequencies
     - Flag coherent periodic structure
     """
-    from pathlib import Path
-    from malca.utils import read_lc_dat2
-    from malca.stats import bootstrap_lomb_scargle
+    from multiprocessing import Pool, cpu_count
+    import json
 
     n0 = len(df)
-
+    paths = df["path"].tolist()
+    
+    # Checkpoint handling
+    checkpoint_file = None
+    completed_results = {}
+    
+    if checkpoint_dir is not None:
+        checkpoint_path = Path(checkpoint_dir)
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        checkpoint_file = checkpoint_path / "lsp_checkpoint.parquet"
+        
+        # Load existing checkpoint if present
+        if checkpoint_file.exists():
+            try:
+                checkpoint_df = pd.read_parquet(checkpoint_file)
+                completed_results = {
+                    row["path"]: row.to_dict() 
+                    for _, row in checkpoint_df.iterrows()
+                }
+                if show_tqdm:
+                    tqdm.write(f"[validate_periodicity] Loaded {len(completed_results)} cached results from checkpoint")
+            except Exception as e:
+                if show_tqdm:
+                    tqdm.write(f"[validate_periodicity] Warning: Could not load checkpoint: {e}")
+    
+    # Filter to paths not already processed
+    paths_to_process = [p for p in paths if p not in completed_results]
+    
+    if show_tqdm:
+        tqdm.write(f"[validate_periodicity] {len(paths) - len(paths_to_process)}/{len(paths)} already cached, processing {len(paths_to_process)}")
+    
+    # Prepare worker arguments
+    worker_args = [(p, n_bootstrap, exclude_alias_periods) for p in paths_to_process]
+    
+    # Process with multiprocessing or sequential based on workers
+    new_results = []
+    n_errors = 0
+    
+    if workers > 1 and len(paths_to_process) > 0:
+        # Parallel execution
+        actual_workers = min(workers, cpu_count(), len(paths_to_process))
+        
+        with Pool(processes=actual_workers) as pool:
+            iterator = pool.imap_unordered(_lsp_worker, worker_args)
+            if show_tqdm:
+                iterator = tqdm(iterator, total=len(paths_to_process), desc="LSP validation")
+            
+            checkpoint_batch = []
+            checkpoint_interval = max(100, len(paths_to_process) // 20)  # Save every 5%
+            
+            for result in iterator:
+                new_results.append(result)
+                if result["error"] is not None:
+                    n_errors += 1
+                
+                # Batch checkpoint saves
+                if checkpoint_file is not None:
+                    checkpoint_batch.append(result)
+                    if len(checkpoint_batch) >= checkpoint_interval:
+                        _save_checkpoint(checkpoint_file, completed_results, new_results)
+                        checkpoint_batch = []
+    else:
+        # Sequential execution (workers=1 or no paths to process)
+        iterator = worker_args
+        if show_tqdm and len(paths_to_process) > 0:
+            iterator = tqdm(worker_args, desc="LSP validation")
+        
+        for args in iterator:
+            result = _lsp_worker(args)
+            new_results.append(result)
+            if result["error"] is not None:
+                n_errors += 1
+    
+    # Final checkpoint save
+    if checkpoint_file is not None and new_results:
+        _save_checkpoint(checkpoint_file, completed_results, new_results)
+        if show_tqdm:
+            tqdm.write(f"[validate_periodicity] Saved checkpoint with {len(completed_results) + len(new_results)} entries")
+    
+    # Combine cached + new results
+    all_results = {**completed_results}
+    for r in new_results:
+        all_results[r["path"]] = r
+    
+    # Build output columns
     powers = []
     periods = []
     bootstrap_significances = []
     is_alias = []
     keep_flags = []
-
-    paths = df["path"].tolist()
-    iterator = tqdm(paths, desc="LSP validation") if show_tqdm else paths
-
-    for path_str in iterator:
-        path = Path(path_str)
-        asassn_id = path.stem
-        dir_path = str(path.parent)
-
-        dfg, dfv = read_lc_dat2(asassn_id, dir_path)
-        df_lc = pd.concat([dfg, dfv], ignore_index=True)
-
-        jd = df_lc["JD"].values
-        mag = df_lc["mag"].values
-        err = df_lc["error"].values
-
-        # Use bootstrap_lomb_scargle from stats.py
-        ls_result = bootstrap_lomb_scargle(
-            jd, mag, err,
-            n_bootstrap=n_bootstrap,
-            exclude_alias_periods=exclude_alias_periods,
-        )
-
-        powers.append(ls_result["ls_power"])
-        periods.append(ls_result["ls_period_days"])
-        bootstrap_significances.append(ls_result["ls_bootstrap_sig"])
-        is_alias.append(ls_result["ls_is_alias"])
-
-        # Keep if NOT significantly periodic (or is an alias)
+    
+    for path_str in paths:
+        result = all_results.get(path_str, {})
+        powers.append(result.get("lsp_power", np.nan))
+        periods.append(result.get("lsp_period", np.nan))
+        bootstrap_significances.append(result.get("lsp_bootstrap_sig", np.nan))
+        is_alias.append(result.get("lsp_is_alias", False))
+        
+        # Keep if NOT significantly periodic (or is an alias, or has error)
         keep = True
-        if not ls_result["ls_is_alias"]:
-            if ls_result["ls_bootstrap_sig"] < significance_level:
+        if not result.get("lsp_is_alias", False) and result.get("error") is None:
+            sig = result.get("lsp_bootstrap_sig", np.nan)
+            if not np.isnan(sig) and sig < significance_level:
                 keep = False
         keep_flags.append(keep)
 
@@ -496,16 +808,33 @@ def validate_periodicity(
 
     if show_tqdm:
         tqdm.write(f"[validate_periodicity] kept {len(df_filtered)}/{n0}")
+        if n_errors > 0:
+            tqdm.write(f"[validate_periodicity] {n_errors} sources had errors (kept as-is)")
 
     log_rejections(df_out, df_filtered, "validate_periodicity", rejected_log_csv)
 
     return df_filtered
 
 
+def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) -> None:
+    """Save checkpoint to parquet file."""
+    all_data = list(completed.values()) + new_results
+    # Remove error column for storage
+    clean_data = []
+    for r in all_data:
+        clean_data.append({
+            "path": r["path"],
+            "lsp_power": r.get("lsp_power", np.nan),
+            "lsp_period": r.get("lsp_period", np.nan),
+            "lsp_bootstrap_sig": r.get("lsp_bootstrap_sig", np.nan),
+            "lsp_is_alias": r.get("lsp_is_alias", False),
+        })
+    pd.DataFrame(clean_data).to_parquet(checkpoint_file, index=False)
+
+
 def validate_gaia_ruwe(
     df: pd.DataFrame,
     *,
-    gaia_catalog: pd.DataFrame | Path | None = None,
     max_ruwe: float = 1.4,
     flag_only: bool = True,
     show_tqdm: bool = False,
@@ -515,6 +844,7 @@ def validate_gaia_ruwe(
     """
     Validate candidates using Gaia RUWE (Renormalized Unit Weight Error).
 
+    Queries Gaia DR3 via TAP for candidate coordinates.
     RUWE > 1.4 indicates potential companion (binary contamination).
     Paper identifies 5/81 candidates with high RUWE.
 
@@ -522,9 +852,6 @@ def validate_gaia_ruwe(
     ----------
     df : pd.DataFrame
         Candidates (must have ra_deg, dec_deg columns)
-    gaia_catalog : pd.DataFrame | Path | None
-        Gaia DR3 catalog with RUWE values, or path to CSV
-        If None, attempts to query Gaia archive (slow)
     max_ruwe : float
         RUWE threshold (default 1.4, from paper)
     flag_only : bool
@@ -553,24 +880,29 @@ def validate_gaia_ruwe(
 
     n0 = len(df)
 
-    if gaia_catalog is None:
-        # No catalog provided - return with NaN ruwe values
+    # Fetch RUWE from Gaia TAP for candidate coordinates
+    if show_tqdm:
+        tqdm.write(f"[validate_gaia_ruwe] Querying Gaia TAP for {n0} sources...")
+    try:
+        gaia_df = fetch_gaia_dr3_ruwe(
+            coords=(df["ra_deg"].tolist(), df["dec_deg"].tolist()),
+            radius_arcsec=3.0,
+            show_tqdm=show_tqdm,
+        )
+        if gaia_df.empty:
+            if show_tqdm:
+                tqdm.write("[validate_gaia_ruwe] No Gaia matches found - returning unchanged")
+            df_out = df.copy()
+            df_out["ruwe"] = np.nan
+            df_out["high_ruwe_flag"] = False
+            return df_out
+    except Exception as e:
         if show_tqdm:
-            tqdm.write(f"[validate_gaia_ruwe] No catalog provided - returning unchanged")
+            tqdm.write(f"[validate_gaia_ruwe] Gaia TAP query failed: {e} - returning unchanged")
         df_out = df.copy()
         df_out["ruwe"] = np.nan
         df_out["high_ruwe_flag"] = False
         return df_out
-
-    if isinstance(gaia_catalog, (str, Path)):
-        gaia_df = pd.read_csv(gaia_catalog)
-    else:
-        gaia_df = gaia_catalog
-
-    required_cols = ["ra", "dec", "ruwe"]
-    missing = [c for c in required_cols if c not in gaia_df.columns]
-    if missing:
-        raise ValueError(f"Gaia catalog missing columns: {missing}")
 
     candidates_coords = SkyCoord(
         ra=df["ra_deg"].values * u.deg,
@@ -619,7 +951,6 @@ def validate_gaia_ruwe(
 def validate_periodic_catalog(
     df: pd.DataFrame,
     *,
-    catalog_path: Path | None = None,
     max_sep_arcsec: float = 3.0,
     flag_only: bool = True,
     show_tqdm: bool = False,
@@ -627,18 +958,16 @@ def validate_periodic_catalog(
     rejected_log_csv: str | Path | None = None,
 ) -> pd.DataFrame:
     """
-    Crossmatch candidates to known periodic variable catalogs.
+    Crossmatch candidates to Chen+2020 ZTF periodic variable catalog.
 
-    Paper crossmatched to Chen+2020 ZTF periodic catalog and found
-    14 matches, including 1 compelling BY Dra variable.
+    Fetches catalog from VizieR (cached locally after first download).
+    Paper crossmatched to Chen+2020 and found 14 matches, including
+    1 compelling BY Dra variable.
 
     Parameters
     ----------
     df : pd.DataFrame
         Candidates (must have ra_deg, dec_deg columns)
-    catalog_path : Path | None
-        Path to periodic catalog CSV (e.g., Chen+2020, ASAS-SN variables)
-        Must have: ra, dec, period, class columns
     max_sep_arcsec : float
         Maximum separation for crossmatch (default 3 arcsec)
     flag_only : bool
@@ -669,22 +998,22 @@ def validate_periodic_catalog(
 
     n0 = len(df)
 
-    if catalog_path is None:
+    # Fetch Chen+2020 ZTF periodic catalog from VizieR (cached)
+    if show_tqdm:
+        tqdm.write(f"[validate_periodic_catalog] Fetching Chen+2020 from VizieR...")
+    try:
+        catalog_df = fetch_chen2020_ztf_periodic(show_tqdm=show_tqdm)
+        # Rename columns to match expected format
+        catalog_df = catalog_df.rename(columns={"var_type": "class"})
+    except Exception as e:
         if show_tqdm:
-            tqdm.write(f"[validate_periodic_catalog] No catalog provided - returning unchanged")
+            tqdm.write(f"[validate_periodic_catalog] VizieR query failed: {e} - returning unchanged")
         df_out = df.copy()
         df_out["catalog_match"] = False
         df_out["catalog_period"] = np.nan
         df_out["catalog_class"] = ""
         df_out["catalog_sep_arcsec"] = np.nan
         return df_out
-
-    catalog_df = pd.read_csv(catalog_path)
-
-    required_cols = ["ra", "dec"]
-    missing = [c for c in required_cols if c not in catalog_df.columns]
-    if missing:
-        raise ValueError(f"Catalog missing columns: {missing}")
 
     candidates_coords = SkyCoord(
         ra=df["ra_deg"].values * u.deg,
@@ -755,8 +1084,8 @@ def validate_periodic_catalog(
 def apply_post_filters(
     df: pd.DataFrame,
     *,
-    # Filter 7: posterior strength
-    apply_posterior_strength: bool = True,
+    # Filter 7: evidence strength
+    apply_evidence_strength: bool = True,
     min_bayes_factor: float = 10.0,
     require_finite_local_bf: bool = True,
     # Filter 9: run robustness
@@ -772,26 +1101,20 @@ def apply_post_filters(
     # Filter 11: event score
     apply_score: bool = True,
     min_score: float = 0.0,
-    # Validation: camera medians
-    apply_camera_median_validation: bool = False,
-    max_camera_median_spread: float = 0.3,
-    mag_bin: str | None = None,
-    mag_tolerance: float = 0.5,
-    allow_missing_raw: bool = False,
     # Validation: periodicity
     apply_periodicity_validation: bool = False,
     periodicity_n_bootstrap: int = 1000,
     periodicity_significance: float = 0.01,
     periodicity_exclude_aliases: bool = True,
+    periodicity_workers: int = 1,
+    periodicity_checkpoint_dir: Path | None = None,
     # Validation: Gaia RUWE
     apply_gaia_ruwe_validation: bool = True,
-    gaia_catalog_path: Path | None = None,
     gaia_max_ruwe: float = 1.4,
     gaia_flag_only: bool = True,
     # Validation: periodic catalog
     apply_periodic_catalog_validation: bool = True,
-    periodic_catalog_path: Path | None = None,
-    periodic_catalog_max_sep: float = 1.0,
+    periodic_catalog_max_sep: float = 3.0,
     periodic_catalog_flag_only: bool = True,
     # General
     show_tqdm: bool = True,
@@ -806,20 +1129,17 @@ def apply_post_filters(
         Input dataframe from events.py
     apply_* : bool
         Whether to apply each filter
-    periodicity_validation : bool
+    apply_periodicity_validation : bool
         Apply bootstrap LSP validation (expensive, off by default)
-    gaia_ruwe_validation : bool
-        Apply Gaia RUWE validation (requires gaia_catalog_path)
-    periodic_catalog_validation : bool
-        Apply periodic catalog crossmatch (requires periodic_catalog_path)
-    gaia_catalog_path : Path | None
-        Path to Gaia catalog CSV (columns: ra, dec, ruwe)
-    periodic_catalog_path : Path | None
-        Path to periodic catalog CSV (columns: ra, dec, period, class)
+    apply_gaia_ruwe_validation : bool
+        Apply Gaia RUWE validation (queries Gaia TAP)
+    apply_periodic_catalog_validation : bool
+        Apply periodic catalog crossmatch (fetches Chen+2020 from VizieR)
     show_tqdm : bool
         Show progress bars
     verbose : bool
         Print per-filter summaries and totals
+
     Returns
     -------
     pd.DataFrame
@@ -832,8 +1152,8 @@ def apply_post_filters(
 
     filters = []
 
-    if apply_posterior_strength:
-        filters.append(("posterior_strength", filter_posterior_strength, {
+    if apply_evidence_strength:
+        filters.append(("posterior_strength", filter_evidence_strength, {
             "min_bayes_factor": min_bayes_factor,
             "require_finite_local_bf": require_finite_local_bf,
             "show_tqdm": show_tqdm,
@@ -865,28 +1185,19 @@ def apply_post_filters(
             "verbose": verbose,
         }))
 
-    if apply_camera_median_validation:
-        filters.append(("camera_medians", validate_camera_medians, {
-            "max_median_spread": max_camera_median_spread,
-            "mag_bin": mag_bin,
-            "mag_tolerance": mag_tolerance,
-            "allow_missing_raw": allow_missing_raw,
-            "show_tqdm": show_tqdm,
-            "verbose": verbose,
-        }))
-
     if apply_periodicity_validation:
         filters.append(("periodicity", validate_periodicity, {
             "n_bootstrap": periodicity_n_bootstrap,
             "significance_level": periodicity_significance,
             "exclude_alias_periods": periodicity_exclude_aliases,
+            "workers": periodicity_workers,
+            "checkpoint_dir": periodicity_checkpoint_dir,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
         }))
 
     if apply_gaia_ruwe_validation:
         filters.append(("gaia_ruwe", validate_gaia_ruwe, {
-            "gaia_catalog": gaia_catalog_path,
             "max_ruwe": gaia_max_ruwe,
             "flag_only": gaia_flag_only,
             "show_tqdm": show_tqdm,
@@ -895,7 +1206,6 @@ def apply_post_filters(
 
     if apply_periodic_catalog_validation:
         filters.append(("periodic_catalog", validate_periodic_catalog, {
-            "catalog_path": periodic_catalog_path,
             "max_sep_arcsec": periodic_catalog_max_sep,
             "flag_only": periodic_catalog_flag_only,
             "show_tqdm": show_tqdm,
@@ -950,7 +1260,8 @@ def main() -> None:
 Example usage:
   python -m malca.post_filter --input results.csv --output results_filtered.csv
   python -m malca.post_filter --input results.csv --output results_filtered.csv --min-bayes-factor 20
-  python -m malca.post_filter --input results.csv --output results_filtered.csv --apply-periodicity-validation --apply-gaia-ruwe-validation --gaia-catalog input/gaia_dr3_ruwe.csv
+  python -m malca.post_filter --input results.csv --output results_filtered.csv --apply-periodicity-validation
+  python -m malca.post_filter --input results.csv --output results_filtered.csv --skip-gaia-ruwe-validation --skip-periodic-catalog-validation
 """
     )
 
@@ -961,11 +1272,9 @@ Example usage:
     parser.add_argument("--output", type=Path, default=None, help="Output CSV/Parquet path (overrides default location)")
 
     # Filter toggles (all enabled by default except morphology)
-    parser.add_argument("--skip-posterior-strength", action="store_true", help="Skip posterior strength filter")
+    parser.add_argument("--skip-evidence-strength", action="store_true", help="Skip evidence strength filter (Bayes factor threshold)")
     parser.add_argument("--skip-run-robustness", action="store_true", help="Skip run robustness filter")
     parser.add_argument("--apply-morphology", action="store_true", help="Apply morphology filter (off by default)")
-    parser.add_argument("--apply-camera-median-validation", action="store_true",
-                        help="Apply camera median validation using .raw2 files (off by default)")
 
     # Posterior strength parameters
     parser.add_argument("--min-bayes-factor", type=float, default=10.0,
@@ -997,16 +1306,6 @@ Example usage:
     parser.add_argument("--min-score", type=float, default=-3.0,
                         help="Minimum log10 event score (dipper_score) to keep (default: -3.0)")
 
-    # Camera median validation parameters
-    parser.add_argument("--max-camera-median-spread", type=float, default=0.3,
-                        help="Max allowed spread between camera medians (default: 0.3)")
-    parser.add_argument("--mag-bin", type=str, default=None,
-                        help="Expected magnitude bin (e.g., 13_13.5). If omitted, try to parse from path.")
-    parser.add_argument("--mag-tolerance", type=float, default=0.5,
-                        help="Allowed magnitude tolerance beyond mag bin (default: 0.5)")
-    parser.add_argument("--allow-missing-raw", action="store_true",
-                        help="Do not reject candidates missing .raw2 stats")
-
     # Periodicity validation parameters
     parser.add_argument("--apply-periodicity-validation", action="store_true",
                         help="Apply bootstrap LSP periodicity validation (off by default)")
@@ -1016,22 +1315,23 @@ Example usage:
                         help="Significance threshold (default: 0.01)")
     parser.add_argument("--periodicity-no-exclude-aliases", action="store_true",
                         help="Do not exclude alias periods (1d, 29.53d, etc.)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of parallel workers for LSP validation (default: 1)")
+    parser.add_argument("--checkpoint-dir", type=Path, default=None,
+                        help="Directory for checkpoints (enables resume on restart)")
+
 
     # Gaia RUWE validation parameters
-    parser.add_argument("--apply-gaia-ruwe-validation", action="store_true",
-                        help="Apply Gaia RUWE validation (off by default)")
-    parser.add_argument("--gaia-catalog", type=Path, default=None,
-                        help="Path to Gaia catalog CSV (ra, dec, ruwe columns)")
+    parser.add_argument("--skip-gaia-ruwe-validation", action="store_true",
+                        help="Skip Gaia RUWE validation (on by default, queries Gaia TAP)")
     parser.add_argument("--gaia-max-ruwe", type=float, default=1.4,
                         help="Maximum RUWE to keep (default: 1.4)")
     parser.add_argument("--gaia-reject", action="store_true",
                         help="Reject high RUWE sources (default: flag only)")
 
     # Periodic catalog validation parameters
-    parser.add_argument("--apply-periodic-catalog-validation", action="store_true",
-                        help="Apply periodic catalog crossmatch validation (off by default)")
-    parser.add_argument("--periodic-catalog", type=Path, default=None,
-                        help="Path to periodic catalog CSV (ra, dec, period, class columns)")
+    parser.add_argument("--skip-periodic-catalog-validation", action="store_true",
+                        help="Skip periodic catalog crossmatch (on by default, fetches Chen+2020 from VizieR)")
     parser.add_argument("--periodic-catalog-max-sep", type=float, default=3.0,
                         help="Maximum separation in arcsec for catalog match (default: 3.0)")
     parser.add_argument("--periodic-catalog-reject", action="store_true",
@@ -1088,10 +1388,9 @@ Example usage:
     df_filtered = apply_post_filters(
         df,
         # Filter toggles
-        apply_posterior_strength=not args.skip_posterior_strength,
+        apply_evidence_strength=not args.skip_evidence_strength,
         apply_run_robustness=not args.skip_run_robustness,
         apply_morphology=args.apply_morphology,
-        apply_camera_median_validation=args.apply_camera_median_validation,
         # Posterior strength
         min_bayes_factor=args.min_bayes_factor,
         require_finite_local_bf=not args.allow_infinite_local_bf,
@@ -1106,24 +1405,19 @@ Example usage:
         # Score
         apply_score=args.apply_score_filter,
         min_score=args.min_score,
-        # Camera median validation
-        max_camera_median_spread=args.max_camera_median_spread,
-        mag_bin=args.mag_bin,
-        mag_tolerance=args.mag_tolerance,
-        allow_missing_raw=args.allow_missing_raw,
         # Periodicity validation
         apply_periodicity_validation=args.apply_periodicity_validation,
         periodicity_n_bootstrap=args.periodicity_n_bootstrap,
         periodicity_significance=args.periodicity_significance,
         periodicity_exclude_aliases=not args.periodicity_no_exclude_aliases,
+        periodicity_workers=args.workers,
+        periodicity_checkpoint_dir=args.checkpoint_dir.expanduser() if args.checkpoint_dir else (detect_run / "checkpoints" if args.detect_run and args.apply_periodicity_validation else None),
         # Gaia RUWE validation
-        apply_gaia_ruwe_validation=args.apply_gaia_ruwe_validation,
-        gaia_catalog_path=args.gaia_catalog.expanduser() if args.gaia_catalog else None,
+        apply_gaia_ruwe_validation=not args.skip_gaia_ruwe_validation,
         gaia_max_ruwe=args.gaia_max_ruwe,
         gaia_flag_only=not args.gaia_reject,
         # Periodic catalog validation
-        apply_periodic_catalog_validation=args.apply_periodic_catalog_validation,
-        periodic_catalog_path=args.periodic_catalog.expanduser() if args.periodic_catalog else None,
+        apply_periodic_catalog_validation=not args.skip_periodic_catalog_validation,
         periodic_catalog_max_sep=args.periodic_catalog_max_sep,
         periodic_catalog_flag_only=not args.periodic_catalog_reject,
         # General
@@ -1151,14 +1445,13 @@ Example usage:
                 "input_file": str(input_path),
                 "output_file": str(output_path),
                 "filter_params": {
-                    "apply_posterior_strength": not args.skip_posterior_strength,
+                    "apply_evidence_strength": not args.skip_evidence_strength,
                     "apply_run_robustness": not args.skip_run_robustness,
                     "apply_morphology": args.apply_morphology,
                     "apply_score": args.apply_score_filter,
-                    "apply_camera_median_validation": args.apply_camera_median_validation,
                     "apply_periodicity_validation": args.apply_periodicity_validation,
-                    "apply_gaia_ruwe_validation": args.apply_gaia_ruwe_validation,
-                    "apply_periodic_catalog_validation": args.apply_periodic_catalog_validation,
+                    "apply_gaia_ruwe_validation": not args.skip_gaia_ruwe_validation,
+                    "apply_periodic_catalog_validation": not args.skip_periodic_catalog_validation,
                     "min_bayes_factor": args.min_bayes_factor,
                     "require_finite_local_bf": not args.allow_infinite_local_bf,
                     "min_run_count": args.min_run_count,
@@ -1168,9 +1461,10 @@ Example usage:
                     "jump_morphology": args.jump_morphology if args.apply_morphology else None,
                     "min_delta_bic": args.min_delta_bic if args.apply_morphology else None,
                     "min_score": args.min_score if args.apply_score_filter else None,
-                    "max_camera_median_spread": args.max_camera_median_spread if args.apply_camera_median_validation else None,
-                    "gaia_max_ruwe": args.gaia_max_ruwe if args.apply_gaia_ruwe_validation else None,
-                    "gaia_reject": args.gaia_reject if args.apply_gaia_ruwe_validation else None,
+                    "gaia_max_ruwe": args.gaia_max_ruwe if not args.skip_gaia_ruwe_validation else None,
+                    "gaia_reject": args.gaia_reject if not args.skip_gaia_ruwe_validation else None,
+                    "periodic_catalog_max_sep": args.periodic_catalog_max_sep if not args.skip_periodic_catalog_validation else None,
+                    "periodic_catalog_reject": args.periodic_catalog_reject if not args.skip_periodic_catalog_validation else None,
                 },
                 "results": {
                     "total_rows": len(df_filtered),

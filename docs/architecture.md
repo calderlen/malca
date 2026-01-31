@@ -38,7 +38,7 @@ graph TB
       end
 
       subgraph "Production Pipeline"
-          EV_FILT[events_filtered.py<br/>Wrapper + Batching + Resume]
+          EV_FILT[detect.py<br/>Wrapper + Batching + Resume]
           PREFILT[pre_filter.py<br/>Sparse/VSX/Multi-cam]
           EVENTS[events.py<br/>Bayesian Detection]
           AMP_FILT[filter.py<br/>Signal amplitude filter]
@@ -57,7 +57,7 @@ graph TB
       end
 
       subgraph "Testing & Validation (tests/)"
-          REPRO[tests/reproduction.py<br/>Known object validation<br/>Bayes only]
+          REPRO[tests/reproduce.py<br/>Known object validation<br/>Bayes only]
           VALID[tests/validation.py<br/>Results validation<br/>No raw data needed]
           INJ[injection.py<br/>Synthetic dip testing]
 
@@ -79,7 +79,7 @@ graph TB
           PLOT[plot.py<br/>LC + event plots]
           SCORE_CLI[score.py<br/>Standalone scoring]
           LTV[ltv/pipeline.py<br/>Long-term variability]
-          FP[fp_analysis.py<br/>Pre/post comparison]
+          FP[filter_attrition.py<br/>Pre/post comparison]
 
           CAND --> PLOT
           RAW -.-> PLOT
@@ -174,7 +174,7 @@ graph TB
 - **`vsx/reproducibility.py`**: Tests recovery of VSX objects
 
 #### **Production Pipeline** (Discovery)
-1. **`events_filtered.py`**: Wrapper orchestrating pre-filters + events.py with batching and resume
+1. **`detect.py`**: Wrapper orchestrating pre-filters + events.py with batching and resume
 2. **`pre_filter.py`**: Removes sparse LCs, VSX matches, single-camera sources
 3. **`events.py`**: Bayesian event detection (core algorithm)
    - Light-curve symmetry score (Tzanidakis+2025 Eq. 5) computed per dip
@@ -182,7 +182,7 @@ graph TB
 4. **`post_filter.py`**: Quality filters on candidates (posterior strength, morphology, RUWE)
 
 #### **Testing & Validation** (`tests/` directory)
-- **`tests/reproduction.py`**: Re-runs detection on known objects (dippers, eclipsing binaries)
+- **`tests/reproduce.py`**: Re-runs detection on known objects (dippers, eclipsing binaries)
   - Only supports `method='bayes'` (current implementation)
   - Legacy methods `naive` and `biweight` have been deprecated
   - Requires raw light curve data
@@ -197,7 +197,7 @@ graph TB
 - **`plot.py`**: Light curve plotting with event overlays
 - **`score.py`**: Event scoring (library used in `events.py` + standalone CLI)
 - **`ltv/`**: Long-term variability pipeline (seasonal trend analysis)
-- **`fp_analysis.py`**: False-positive reduction analysis (pre vs post filter)
+- **`filter_attrition.py`**: Filter attrition analysis (pre vs post filter)
 - **`characterize.py`**: Multi-wavelength characterization (Gaia DR3, dustmaps3d, StarHorse, YSO classification)
   - Queries Gaia DR3 for astrometry, astrophysics, 2MASS/AllWISE photometry
   - Applies 3D dust extinction correction using `dustmaps3d` (Wang et al. 2025)
@@ -225,16 +225,16 @@ graph TB
 - **`__main__.py`**: Unified command-line interface
   - `python -m malca manifest` → Build manifest
   - `python -m malca detect` → Run event detection
-  - `python -m malca validate` → Validate on known objects (reproduction)
-  - `python -m malca validation` → Validate results (no raw data)
+  - `python -m malca reproduce` → Re-run detection on known objects
+  - `python -m malca validate` → Validate results (no raw data)
   - `python -m malca plot` → Plot light curves
   - `python -m malca score` → Score events
   - `python -m malca filter` → Apply filters
 
 ## Key Insights
 
-- **`tests/reproduction.py`** and **`tests/validation.py`** are validation tools, NOT part of production discovery
-- `reproduction.py` re-runs detection on raw data; `validation.py` validates existing results
+- **`tests/reproduce.py`** and **`tests/validation.py`** are validation tools, NOT part of production discovery
+- `reproduce.py` re-runs detection on raw data; `validation.py` validates existing results
 - Both share core libraries (`utils.py`, `baseline.py`) with `events.py`
 - Take input from manifest, known candidates, OR production candidates
 - Output validation reports comparing expected vs actual detections

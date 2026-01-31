@@ -1148,6 +1148,7 @@ def process_one(
     require_sigma_eff: bool,
 
     compute_event_prob: bool,
+    excluded_cameras: str | None = None,
 ):
     """
     
@@ -1191,7 +1192,7 @@ def process_one(
         basename = os.path.basename(path)
         asassn_id = basename.replace('.dat2', '')
         try:
-            dfg, dfv = read_lc_dat2(asassn_id, dir_path)
+            dfg, dfv = read_lc_dat2(asassn_id, dir_path, excluded_cameras=excluded_cameras)
             df = pd.concat([dfg, dfv], ignore_index=True) if not (dfg.empty and dfv.empty) else pd.DataFrame()
         except Exception as e:
             raise ValueError(f"Error reading .dat2 file {path}: {e}")
@@ -1789,8 +1790,18 @@ def main():
     )
 
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
-        futs = {
-            ex.submit(
+        futs = {}
+        for path in expanded_inputs:
+            # Extract excluded_cameras from metadata if available
+            path_excluded = None
+            if metadata_by_path:
+                meta = metadata_by_path.get(str(path))
+                if meta and "excluded_cameras" in meta:
+                    path_excluded = meta.get("excluded_cameras")
+                    if pd.isna(path_excluded) or path_excluded == "":
+                        path_excluded = None
+
+            fut = ex.submit(
                 process_one, path, trigger_mode=args.trigger_mode, logbf_threshold_dip=args.logbf_threshold_dip,
                 logbf_threshold_jump=args.logbf_threshold_jump, significance_threshold=args.significance_threshold,
                 p_points=args.p_points, p_min_dip=args.p_min_dip, p_max_dip=args.p_max_dip,
@@ -1802,8 +1813,10 @@ def main():
                 baseline_tag=baseline_tag, baseline_kwargs=baseline_kwargs,
                 use_sigma_eff=use_sigma_eff, require_sigma_eff=require_sigma_eff,
                 compute_event_prob=compute_event_prob,
-            ): path for path in expanded_inputs
-        }
+                excluded_cameras=path_excluded,
+            )
+            futs[fut] = path
+
 
         for fut in tqdm(as_completed(futs), total=len(futs), desc="LCs", unit="lc", disable=quiet):
             path = futs[fut]

@@ -450,7 +450,162 @@ def filter_multi_camera(
     return out
 
 
+# =============================================================================
+# Filter: Camera Median Validation
+# =============================================================================
+
+RAW2_COLUMNS = ["camera", "median", "sig1_low", "sig1_high", "pct90_low", "pct90_high"]
+
+
+def _parse_mag_bin_range(mag_bin: str | None) -> tuple[float, float] | None:
+    """Parse magnitude bin string (e.g., '13_13.5') into (min, max) tuple."""
+    if not mag_bin:
+        return None
+    token = mag_bin.strip().replace("-", "_")
+    parts = token.split("_")
+    if len(parts) != 2:
+        return None
+    try:
+        return float(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+
+
+def _read_raw2_camera_stats(raw2_path: Path) -> pd.DataFrame:
+    """
+    Read .raw2 file with per-camera statistics.
+
+    Format (space-separated):
+        camera_id median 1sig_low 1sig_high 90pct_low 90pct_high
+    """
+    if not raw2_path.exists():
+        return pd.DataFrame(columns=RAW2_COLUMNS)
+
+    try:
+        df = pd.read_csv(
+            raw2_path,
+            sep=r"\s+",
+            header=None,
+            names=RAW2_COLUMNS,
+            comment="#",
+        )
+        for col in ("median", "sig1_low", "sig1_high", "pct90_low", "pct90_high"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df[df["median"].notna()].reset_index(drop=True)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=RAW2_COLUMNS)
+
+
+def filter_camera_medians(
+    df: pd.DataFrame,
+    *,
+    mag_tolerance: float = 0.2,
+    show_tqdm: bool = False,
+    n_workers: int = 1,
+    rejected_log_csv: str | Path | None = None,
+) -> pd.DataFrame:
+    """
+    Identify cameras with median magnitudes outside the expected mag bin range.
+
+    Adds 'excluded_cameras' column (comma-separated camera IDs to exclude).
+    Does NOT reject sources - just marks which cameras to skip during LC loading.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Input dataframe with 'path' and 'mag_bin' columns
+    mag_tolerance : float
+        Tolerance beyond mag bin edges (default 0.2). Camera is excluded if
+        its median falls outside [mag_min - tolerance, mag_max + tolerance].
+    show_tqdm : bool
+        Show progress bar
+    n_workers : int
+        Number of parallel workers (not yet implemented, placeholder)
+
+    Returns
+    -------
+    pd.DataFrame
+        Input dataframe with added 'excluded_cameras' column containing
+        comma-separated camera IDs outside the expected magnitude range.
+
+    Notes
+    -----
+    The .raw2 file format:
+        camera_id median 1sig_low 1sig_high 90pct_low 90pct_high
+
+    Example (from guidance):
+        1   14.0666       14.0395       14.0981       14.0233 14.1128
+        6   12.9477       12.9177       12.9683       12.8972 12.9810
+
+    If mag_bin is 14_14.5, camera 6 (median 12.9) would be excluded.
+    """
+    if "path" not in df.columns:
+        raise ValueError("Need 'path' column to find .raw2 files")
+    if "mag_bin" not in df.columns:
+        raise ValueError("Need 'mag_bin' column to determine expected magnitude range")
+
+    excluded_cameras_list = []
+    n_excluded_total = 0
+
+    paths = df["path"].astype(str).tolist()
+    mag_bins = df["mag_bin"].astype(str).tolist()
+
+    iterator = zip(paths, mag_bins)
+    if show_tqdm:
+        iterator = tqdm(list(iterator), desc="filter_camera_medians", leave=False)
+
+    for path_str, mag_bin in iterator:
+        path = Path(path_str)
+
+        # Determine .raw2 path (same as .dat2 but different extension)
+        if path.is_dir():
+            # path is directory, need source_id to construct filename
+            # This case requires the dat2 filename - skip for now
+            excluded_cameras_list.append("")
+            continue
+
+        raw2_path = path.with_suffix(".raw2")
+        stats = _read_raw2_camera_stats(raw2_path)
+
+        if stats.empty:
+            excluded_cameras_list.append("")
+            continue
+
+        mag_range = _parse_mag_bin_range(mag_bin)
+        if mag_range is None:
+            excluded_cameras_list.append("")
+            continue
+
+        mag_min = mag_range[0] - mag_tolerance
+        mag_max = mag_range[1] + mag_tolerance
+
+        # Find cameras with medians outside the expected range
+        bad_cameras = stats[
+            (stats["median"] < mag_min) | (stats["median"] > mag_max)
+        ]["camera"].astype(int).tolist()
+
+        if bad_cameras:
+            excluded_cameras_list.append(",".join(map(str, bad_cameras)))
+            n_excluded_total += len(bad_cameras)
+        else:
+            excluded_cameras_list.append("")
+
+    df_out = df.copy()
+    df_out["excluded_cameras"] = excluded_cameras_list
+
+    if show_tqdm:
+        n_sources_with_exclusions = sum(1 for x in excluded_cameras_list if x)
+        tqdm.write(
+            f"[filter_camera_medians] {n_sources_with_exclusions}/{len(df)} sources have excluded cameras "
+            f"({n_excluded_total} total cameras excluded)"
+        )
+
+    return df_out
+
+
 def apply_pre_filters(
+
     df: pd.DataFrame,
     *,
     # Filter 1: VSX crossmatch

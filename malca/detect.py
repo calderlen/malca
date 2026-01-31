@@ -14,8 +14,8 @@ Workflow:
 9. [Optional] Enrich passing candidates with comprehensive light curve stats
 
 Usage:
-    python -m malca.events_filtered --mag-bin 13_13.5 [events.py args...]
-    python -m malca.events_filtered --mag-bin 13_13.5 --run-post-filter --run-classify --run-enrich
+    python -m malca detect --mag-bin 13_13.5 [options...]
+    python -m malca detect --mag-bin 13_13.5 --run-post-filter --run-classify --run-enrich
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import pandas as pd
 import tempfile
 
 from malca.manifest import build_manifest_dataframe
-from malca.pre_filter import apply_pre_filters
+from malca.pre_filter import apply_pre_filters, filter_camera_medians
 from malca.post_filter import apply_post_filters
 from malca.postprocess import run_postprocess
 from malca.classify import compute_all_classifications
@@ -114,6 +114,8 @@ def main():
     parser.add_argument("--skip-sparse", action="store_true", help="Skip sparse LC filter")
     parser.add_argument("--skip-multi-camera", action="store_true", help="Skip multi-camera filter")
     parser.add_argument("--skip-vsx", action="store_true", help="Skip VSX crossmatch/tagging")
+    parser.add_argument("--skip-camera-median", action="store_true", help="Skip camera median filter (identifies cameras to exclude from .raw2 files)")
+    parser.add_argument("--camera-median-tolerance", type=float, default=0.2, help="Tolerance beyond mag bin for camera median filter (default: 0.2 mag)")
     parser.add_argument("--vsx-max-sep", type=float, default=3.0, help="Max separation for VSX match (arcsec)")
     parser.add_argument("--vsx-mode", type=str, default="filter", choices=["tag", "filter"], help="VSX handling: tag adds sep_arcsec/class columns, filter removes matches (default: filter)")
     parser.add_argument("--vsx-crossmatch", type=Path, default=Path("input/vsx/asassn_x_vsx_matches_20250919_2252.csv"), help="Path to pre-crossmatched VSX CSV (with asas_sn_id, sep_arcsec, class)")
@@ -459,25 +461,39 @@ def main():
         df_filtered = pd.read_parquet(filtered_file)
         log(f"Loaded {len(df_filtered)} filtered sources")
 
+    # Step 2.5: Apply camera median filter to identify cameras to exclude
+    if not args.skip_camera_median and "mag_bin" in df_filtered.columns:
+        log(f"\nApplying camera median filter (tolerance={args.camera_median_tolerance} mag)...")
+        # Ensure 'path' column exists for filter_camera_medians
+        if "path" not in df_filtered.columns and "dat_path" in df_filtered.columns:
+            df_filtered = df_filtered.rename(columns={"dat_path": "path"})
+        df_filtered = filter_camera_medians(
+            df_filtered,
+            mag_tolerance=args.camera_median_tolerance,
+            show_tqdm=args.verbose,
+        )
+        n_with_exclusions = (df_filtered["excluded_cameras"].fillna("") != "").sum()
+        log(f"Found {n_with_exclusions}/{len(df_filtered)} sources with excluded cameras")
+
     # Step 3: Construct file paths (use full dat_path for events.py input)
     file_col = "dat_path" if "dat_path" in df_filtered.columns else "path"
 
-    vsx_tags_file = None
+    # Build metadata CSV with VSX tags and excluded_cameras
+    metadata_file = None
+    meta_cols = [file_col]
     if not args.skip_vsx and "sep_arcsec" in df_filtered.columns and "class" in df_filtered.columns:
-        vsx_tags_dir = prefilter_dir / "vsx_tags"
-        vsx_tags_dir.mkdir(parents=True, exist_ok=True)
-        vsx_tags_file = vsx_tags_dir / f"vsx_tags_{mag_bin_tag}.csv"
-        tag_df = df_filtered[[file_col, "sep_arcsec", "class"]].rename(columns={file_col: "path"})
-        tag_df.to_csv(vsx_tags_file, index=False)
-        events_args.extend(["--metadata-csv", str(vsx_tags_file)])
-        if run_log.exists():
-            try:
-                with run_log.open("a") as f:
-                    f.write(f"vsx_tags: {vsx_tags_file}\n")
-                    f.write(f"events_metadata_csv: {vsx_tags_file}\n")
-            except Exception as e:
-                if args.verbose:
-                    print(f"Warning: could not update run log with vsx_tags: {e}")
+        meta_cols.extend(["sep_arcsec", "class"])
+    if "excluded_cameras" in df_filtered.columns:
+        meta_cols.append("excluded_cameras")
+
+    if len(meta_cols) > 1:  # More than just file_col
+        metadata_dir = prefilter_dir / "metadata"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        metadata_file = metadata_dir / f"metadata_{mag_bin_tag}.csv"
+        meta_df = df_filtered[meta_cols].rename(columns={file_col: "path"})
+        meta_df.to_csv(metadata_file, index=False)
+        events_args.extend(["--metadata-csv", str(metadata_file)])
+        log(f"Wrote metadata CSV with columns: {', '.join(meta_cols[1:])}")
 
     file_paths = df_filtered[file_col].tolist()
 

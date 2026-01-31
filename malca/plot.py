@@ -256,7 +256,7 @@ def lookup_metadata_for_path(path: Path, detection_results_csv=None):
     # Fallback to brayden_candidates if no metadata found from CSV
     if not meta:
         try:
-            from tests.reproduction import brayden_candidates
+            from tests.reproduce import brayden_candidates
             
             # Extract source_id from filename
             source_id = stem.replace("-light-curves", "").split("-")[0]

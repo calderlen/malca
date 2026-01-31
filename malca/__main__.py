@@ -10,7 +10,7 @@ Usage:
     python -m malca injection [options]   # Run injection-recovery tests
     python -m malca detection_rate [options]  # Measure detection rate
     python -m malca plot [options]        # Plot light curves
-    python -m malca filter [options]      # Apply filters
+    python -m malca post_filter [options] # Apply post-filters
     python -m malca postprocess [options] # Plot passing candidates
 """
 
@@ -19,6 +19,55 @@ import argparse
 
 
 def main():
+    # Check if user is calling a subcommand with --help
+    # If so, forward directly to the submodule
+    if len(sys.argv) >= 2 and sys.argv[1] in [
+        "manifest", "detect", "reproduce", "injection", 
+        "detection_rate", "validate", "plot", "postprocess", "post_filter"
+    ]:
+        command = sys.argv[1]
+        remaining = sys.argv[2:]
+        
+        # Dispatch to appropriate module (--help will be handled by that module)
+        if command == "manifest":
+            from malca import manifest
+            sys.argv = [sys.argv[0]] + remaining
+            manifest.main()
+        elif command == "detect":
+            from malca import detect
+            sys.argv = [sys.argv[0]] + remaining
+            detect.main()
+        elif command == "reproduce":
+            from tests import reproduce
+            sys.argv = [sys.argv[0]] + remaining
+            reproduce.main()
+        elif command == "injection":
+            from malca import injection
+            sys.argv = [sys.argv[0]] + remaining
+            injection.main()
+        elif command == "detection_rate":
+            from malca import detection_rate
+            sys.argv = [sys.argv[0]] + remaining
+            detection_rate.main()
+        elif command == "plot":
+            from malca import plot
+            sys.argv = [sys.argv[0]] + remaining
+            plot.main()
+        elif command == "postprocess":
+            from malca import postprocess
+            sys.argv = [sys.argv[0]] + remaining
+            postprocess.main()
+        elif command == "post_filter":
+            from malca import post_filter
+            sys.argv = [sys.argv[0]] + remaining
+            post_filter.main()
+        elif command == "validate":
+            from tests import validation
+            sys.argv = [sys.argv[0]] + remaining
+            validation.main()
+        return 0
+    
+    # If no subcommand or just --help for main, show main help
     parser = argparse.ArgumentParser(
         prog="malca",
         description="MALCA: Multi-timescale ASAS-SN Light Curve Analysis",
@@ -28,174 +77,17 @@ def main():
     
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
-    # Manifest command
-    manifest_parser = subparsers.add_parser(
-        "manifest",
-        help="Build manifest (source_id → path index)",
-        description="Build a manifest that maps ASAS-SN IDs to their light-curve paths"
-    )
-    manifest_parser.add_argument("--help-full", action="store_true", help="Show full help for manifest command")
+    subparsers.add_parser("manifest", help="Build manifest (source_id → path index)")
+    subparsers.add_parser("detect", help="Run event detection pipeline")
+    subparsers.add_parser("reproduce", help="Re-run detection on known objects (needs raw data)")
+    subparsers.add_parser("injection", help="Run injection-recovery tests")
+    subparsers.add_parser("detection_rate", help="Measure detection rate")
+    subparsers.add_parser("validate", help="Validate results against known candidates")
+    subparsers.add_parser("plot", help="Plot light curves with events")
+    subparsers.add_parser("postprocess", help="Plot passing candidates from post-filter output")
+    subparsers.add_parser("post_filter", help="Apply quality post-filters")
     
-    # Detect command
-    detect_parser = subparsers.add_parser(
-        "detect",
-        help="Run event detection pipeline",
-        description="Run Bayesian event detection on light curves"
-    )
-    detect_parser.add_argument("--help-full", action="store_true", help="Show full help for detect command")
-    
-    # Validate command
-    validate_parser = subparsers.add_parser(
-        "validate",
-        help="Validate detection on known objects",
-        description="Run reproduction/validation on known candidates"
-    )
-    validate_parser.add_argument("--help-full", action="store_true", help="Show full help for validate command")
-
-    # Injection command
-    injection_parser = subparsers.add_parser(
-        "injection",
-        help="Run injection-recovery tests",
-        description="Inject synthetic dips and measure detection efficiency"
-    )
-    injection_parser.add_argument("--help-full", action="store_true", help="Show full help for injection command")
-
-    # Detection rate command
-    detection_rate_parser = subparsers.add_parser(
-        "detection_rate",
-        help="Measure detection rate",
-        description="Measure detection rate on light curves without injection"
-    )
-    detection_rate_parser.add_argument("--help-full", action="store_true", help="Show full help for detection_rate command")
-
-    # Validation command (results-based, no raw data needed)
-    validation_parser = subparsers.add_parser(
-        "validation",
-        help="Validate results against known candidates",
-        description="Compare detection results to known candidates without raw data"
-    )
-    validation_parser.add_argument("--help-full", action="store_true", help="Show full help for validation command")
-    
-    # Plot command
-    plot_parser = subparsers.add_parser(
-        "plot",
-        help="Plot light curves with events",
-        description="Generate light curve plots with event overlays"
-    )
-    plot_parser.add_argument("--help-full", action="store_true", help="Show full help for plot command")
-
-    # Postprocess command
-    postprocess_parser = subparsers.add_parser(
-        "postprocess",
-        help="Plot passing candidates from post-filter output",
-        description="Plot light curves that pass all post-filters into a timestamped directory"
-    )
-    postprocess_parser.add_argument("--help-full", action="store_true", help="Show full help for postprocess command")
-
-    # Filter command (pre/post)
-    filter_parser = subparsers.add_parser(
-        "filter",
-        help="Apply quality filters",
-        description="Apply pre-filters or post-filters to candidates"
-    )
-    filter_parser.add_argument("--help-full", action="store_true", help="Show full help for filter command")
-    
-    args, remaining = parser.parse_known_args()
-    
-    if not args.command:
-        parser.print_help()
-        return 0
-    
-    # Dispatch to appropriate module
-    if args.command == "manifest":
-        if hasattr(args, 'help_full') and args.help_full:
-            from malca import manifest
-            manifest.parse_args(['--help'])
-        else:
-            from malca import manifest
-            sys.argv = [sys.argv[0]] + remaining
-            manifest.main()
-    
-    elif args.command == "detect":
-        if hasattr(args, 'help_full') and args.help_full:
-            from malca import events_filtered
-            sys.argv = [sys.argv[0], '--help']
-            events_filtered.main()
-        else:
-            from malca import events_filtered
-            sys.argv = [sys.argv[0]] + remaining
-            events_filtered.main()
-    
-    elif args.command == "validate":
-        if hasattr(args, 'help_full') and args.help_full:
-            from tests import reproduction
-            sys.argv = [sys.argv[0], '--help']
-            reproduction.main()
-        else:
-            from tests import reproduction
-            sys.argv = [sys.argv[0]] + remaining
-            reproduction.main()
-
-    elif args.command == "injection":
-        if hasattr(args, 'help_full') and args.help_full:
-            from malca import injection
-            sys.argv = [sys.argv[0], '--help']
-            injection.main()
-        else:
-            from malca import injection
-            sys.argv = [sys.argv[0]] + remaining
-            injection.main()
-
-    elif args.command == "detection_rate":
-        if hasattr(args, 'help_full') and args.help_full:
-            from malca import detection_rate
-            sys.argv = [sys.argv[0], '--help']
-            detection_rate.main()
-        else:
-            from malca import detection_rate
-            sys.argv = [sys.argv[0]] + remaining
-            detection_rate.main()
-
-    elif args.command == "plot":
-        if hasattr(args, 'help_full') and args.help_full:
-            from malca import plot
-            sys.argv = [sys.argv[0], '--help']
-            plot.main()
-        else:
-            from malca import plot
-            sys.argv = [sys.argv[0]] + remaining
-            plot.main()
-
-    elif args.command == "postprocess":
-        if hasattr(args, 'help_full') and args.help_full:
-            from malca import postprocess
-            sys.argv = [sys.argv[0], '--help']
-            postprocess.main()
-        else:
-            from malca import postprocess
-            sys.argv = [sys.argv[0]] + remaining
-            postprocess.main()
-
-    elif args.command == "filter":
-        if hasattr(args, 'help_full') and args.help_full:
-            from malca import post_filter
-            sys.argv = [sys.argv[0], '--help']
-            post_filter.main()
-        else:
-            from malca import post_filter
-            sys.argv = [sys.argv[0]] + remaining
-            post_filter.main()
-    
-    elif args.command == "validation":
-        if hasattr(args, 'help_full') and args.help_full:
-            from tests import validation
-            sys.argv = [sys.argv[0], '--help']
-            validation.main()
-        else:
-            from tests import validation
-            sys.argv = [sys.argv[0]] + remaining
-            validation.main()
-    
+    parser.print_help()
     return 0
 
 
