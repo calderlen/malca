@@ -82,8 +82,8 @@ def fetch_chen2020_ztf_periodic(
     try:
         from astroquery.vizier import Vizier
 
-        # Query the main table with all rows
-        v = Vizier(columns=["RAJ2000", "DEJ2000", "Per", "Type"], row_limit=-1)
+        # Query the main table with all rows (include Gaia source_id if available)
+        v = Vizier(columns=["RAJ2000", "DEJ2000", "Per", "Type", "GaiaEDR3"], row_limit=-1)
         tables = v.get_catalogs("J/ApJS/249/18")
 
         if not tables:
@@ -99,6 +99,14 @@ def fetch_chen2020_ztf_periodic(
             "period": cat["Per"].astype(float),
             "var_type": cat["Type"].astype(str),
         })
+
+        # Add Gaia ID if available
+        if "GaiaEDR3" in cat.columns:
+            df["gaia_id"] = pd.to_numeric(cat["GaiaEDR3"], errors="coerce").astype("Int64")
+        elif "GaiaDR3" in cat.columns:
+            df["gaia_id"] = pd.to_numeric(cat["GaiaDR3"], errors="coerce").astype("Int64")
+        elif "GaiaDR2" in cat.columns:
+            df["gaia_id"] = pd.to_numeric(cat["GaiaDR2"], errors="coerce").astype("Int64")
 
         # Cache to disk
         df.to_parquet(cache_file, index=False)
@@ -851,7 +859,7 @@ def validate_gaia_ruwe(
     Parameters
     ----------
     df : pd.DataFrame
-        Candidates (must have ra_deg, dec_deg columns)
+        Candidates (must have gaia_id column)
     max_ruwe : float
         RUWE threshold (default 1.4, from paper)
     flag_only : bool
@@ -875,18 +883,29 @@ def validate_gaia_ruwe(
     - 5/81 candidates flagged (potential companions)
     - Still need follow-up (imaging, RV) to confirm
     """
-    from astropy import units as u
-    from astropy.coordinates import SkyCoord
-
     n0 = len(df)
 
-    # Fetch RUWE from Gaia TAP for candidate coordinates
+    if "gaia_id" not in df.columns:
+        raise ValueError("[validate_gaia_ruwe] Missing gaia_id column")
+
+    # Get unique Gaia IDs (excluding NaN/invalid)
+    valid_mask = df["gaia_id"].notna() & (df["gaia_id"] != 0)
+    unique_ids = df.loc[valid_mask, "gaia_id"].astype(int).unique().tolist()
+
+    if not unique_ids:
+        if show_tqdm:
+            tqdm.write("[validate_gaia_ruwe] No valid Gaia IDs - returning unchanged")
+        df_out = df.copy()
+        df_out["ruwe"] = np.nan
+        df_out["high_ruwe_flag"] = False
+        return df_out
+
+    # Fetch RUWE from Gaia TAP by source_id
     if show_tqdm:
-        tqdm.write(f"[validate_gaia_ruwe] Querying Gaia TAP for {n0} sources...")
+        tqdm.write(f"[validate_gaia_ruwe] Querying Gaia TAP for {len(unique_ids)} unique sources...")
     try:
         gaia_df = fetch_gaia_dr3_ruwe(
-            coords=(df["ra_deg"].tolist(), df["dec_deg"].tolist()),
-            radius_arcsec=3.0,
+            source_ids=unique_ids,
             show_tqdm=show_tqdm,
         )
         if gaia_df.empty:
@@ -904,24 +923,15 @@ def validate_gaia_ruwe(
         df_out["high_ruwe_flag"] = False
         return df_out
 
-    candidates_coords = SkyCoord(
-        ra=df["ra_deg"].values * u.deg,
-        dec=df["dec_deg"].values * u.deg
-    )
+    # Create lookup dict from Gaia results
+    ruwe_lookup = dict(zip(gaia_df["source_id"].astype(int), gaia_df["ruwe"]))
 
-    gaia_coords = SkyCoord(
-        ra=gaia_df["ra"].values * u.deg,
-        dec=gaia_df["dec"].values * u.deg
-    )
-
-    idx_gaia, sep2d, _ = candidates_coords.match_to_catalog_sky(gaia_coords)
-
+    # Map RUWE values to candidates
     ruwes = []
     high_ruwe_flags = []
-
-    for i, (gaia_idx, sep) in enumerate(zip(idx_gaia, sep2d)):
-        if sep < 3.0 * u.arcsec:
-            ruwe_val = float(gaia_df.iloc[gaia_idx]["ruwe"])
+    for gaia_id in df["gaia_id"]:
+        if pd.notna(gaia_id) and int(gaia_id) in ruwe_lookup:
+            ruwe_val = float(ruwe_lookup[int(gaia_id)])
             ruwes.append(ruwe_val)
             high_ruwe_flags.append(ruwe_val > max_ruwe)
         else:
@@ -967,9 +977,9 @@ def validate_periodic_catalog(
     Parameters
     ----------
     df : pd.DataFrame
-        Candidates (must have ra_deg, dec_deg columns)
+        Candidates (must have gaia_id column)
     max_sep_arcsec : float
-        Maximum separation for crossmatch (default 3 arcsec)
+        Maximum separation for coordinate fallback (default 3 arcsec)
     flag_only : bool
         If True, add 'periodic_catalog_match' flag but don't reject
         If False, reject catalog matches
@@ -993,10 +1003,10 @@ def validate_periodic_catalog(
     Suggests many catalog "periodic" sources aren't strongly periodic
     at the level detected by events.py Bayesian fitting.
     """
-    from astropy import units as u
-    from astropy.coordinates import SkyCoord
-
     n0 = len(df)
+
+    if "gaia_id" not in df.columns:
+        raise ValueError("[validate_periodic_catalog] Missing gaia_id column")
 
     # Fetch Chen+2020 ZTF periodic catalog from VizieR (cached)
     if show_tqdm:
@@ -1012,54 +1022,79 @@ def validate_periodic_catalog(
         df_out["catalog_match"] = False
         df_out["catalog_period"] = np.nan
         df_out["catalog_class"] = ""
-        df_out["catalog_sep_arcsec"] = np.nan
         return df_out
 
-    candidates_coords = SkyCoord(
-        ra=df["ra_deg"].values * u.deg,
-        dec=df["dec_deg"].values * u.deg
-    )
+    # Check if catalog has Gaia IDs for direct matching
+    use_gaia_match = "gaia_id" in catalog_df.columns and catalog_df["gaia_id"].notna().any()
 
-    catalog_coords = SkyCoord(
-        ra=catalog_df["ra"].values * u.deg,
-        dec=catalog_df["dec"].values * u.deg
-    )
+    if use_gaia_match:
+        if show_tqdm:
+            tqdm.write(f"[validate_periodic_catalog] Matching by Gaia ID...")
+        # Create lookup dict from catalog
+        catalog_lookup = {}
+        for _, row in catalog_df.iterrows():
+            gid = row.get("gaia_id")
+            if pd.notna(gid):
+                catalog_lookup[int(gid)] = {
+                    "period": row.get("period", np.nan),
+                    "class": str(row.get("class", "")),
+                }
 
-    idx_catalog, sep2d, _ = candidates_coords.match_to_catalog_sky(catalog_coords)
+        matches = []
+        periods = []
+        classes = []
 
-    matches = []
-    periods = []
-    classes = []
-    seps = []
-
-    for i, (cat_idx, sep) in enumerate(zip(idx_catalog, sep2d)):
-        sep_arcsec = sep.to(u.arcsec).value
-        if sep_arcsec < max_sep_arcsec:
-            matches.append(True)
-            seps.append(float(sep_arcsec))
-
-            if "period" in catalog_df.columns:
-                periods.append(float(catalog_df.iloc[cat_idx].get("period", np.nan)))
+        for gaia_id in df["gaia_id"]:
+            if pd.notna(gaia_id) and int(gaia_id) in catalog_lookup:
+                matches.append(True)
+                periods.append(float(catalog_lookup[int(gaia_id)]["period"]))
+                classes.append(catalog_lookup[int(gaia_id)]["class"])
             else:
+                matches.append(False)
                 periods.append(np.nan)
-
-            if "class" in catalog_df.columns:
-                classes.append(str(catalog_df.iloc[cat_idx].get("class", "")))
-            elif "type" in catalog_df.columns:
-                classes.append(str(catalog_df.iloc[cat_idx].get("type", "")))
-            else:
                 classes.append("")
-        else:
-            matches.append(False)
-            periods.append(np.nan)
-            classes.append("")
-            seps.append(np.nan)
+    else:
+        # Fallback to coordinate crossmatch
+        if show_tqdm:
+            tqdm.write(f"[validate_periodic_catalog] Catalog has no Gaia IDs, falling back to coordinate match...")
+
+        if "ra_deg" not in df.columns or "dec_deg" not in df.columns:
+            raise ValueError("[validate_periodic_catalog] Need ra_deg/dec_deg for coordinate fallback")
+
+        from astropy import units as u
+        from astropy.coordinates import SkyCoord
+
+        candidates_coords = SkyCoord(
+            ra=df["ra_deg"].values * u.deg,
+            dec=df["dec_deg"].values * u.deg
+        )
+
+        catalog_coords = SkyCoord(
+            ra=catalog_df["ra"].values * u.deg,
+            dec=catalog_df["dec"].values * u.deg
+        )
+
+        idx_catalog, sep2d, _ = candidates_coords.match_to_catalog_sky(catalog_coords)
+
+        matches = []
+        periods = []
+        classes = []
+
+        for i, (cat_idx, sep) in enumerate(zip(idx_catalog, sep2d)):
+            sep_arcsec = sep.to(u.arcsec).value
+            if sep_arcsec < max_sep_arcsec:
+                matches.append(True)
+                periods.append(float(catalog_df.iloc[cat_idx].get("period", np.nan)))
+                classes.append(str(catalog_df.iloc[cat_idx].get("class", "")))
+            else:
+                matches.append(False)
+                periods.append(np.nan)
+                classes.append("")
 
     df_out = df.copy()
     df_out["catalog_match"] = matches
     df_out["catalog_period"] = periods
     df_out["catalog_class"] = classes
-    df_out["catalog_sep_arcsec"] = seps
 
     if flag_only:
         df_filtered = df_out
@@ -1391,20 +1426,20 @@ Example usage:
     else:
         raise ValueError("Cannot determine join column between events results and index file")
 
-    # Join ra_deg, dec_deg from index
-    coord_cols = ["ra_deg", "dec_deg"]
-    available_coords = [c for c in coord_cols if c in index_df.columns]
-    if not available_coords:
-        raise ValueError(f"Index file missing ra_deg/dec_deg columns")
+    # Join gaia_id, ra_deg, dec_deg from index
+    join_cols = ["gaia_id", "ra_deg", "dec_deg"]
+    available_cols = [c for c in join_cols if c in index_df.columns]
+    if "gaia_id" not in available_cols:
+        raise ValueError(f"Index file missing gaia_id column")
 
     df = df.merge(
-        index_df[[join_col] + available_coords].drop_duplicates(subset=[join_col]),
+        index_df[[join_col] + available_cols].drop_duplicates(subset=[join_col]),
         on=join_col,
         how="left"
     )
     if "_join_id" in df.columns:
         df = df.drop(columns=["_join_id"])
-    print(f"Joined coordinates from {index_path}")
+    print(f"Joined {len(available_cols)} columns ({', '.join(available_cols)}) from {index_path}")
 
     # Determine output path
     if args.output:
