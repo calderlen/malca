@@ -1270,6 +1270,8 @@ Example usage:
                         help="Detect run directory (e.g., output/runs/20250121_143052). If specified, reads from <detect-run>/results/ and writes filtered results there.")
     parser.add_argument("--input", type=Path, default=None, help="Input CSV/Parquet from events.py (overrides --detect-run)")
     parser.add_argument("--output", type=Path, default=None, help="Output CSV/Parquet path (overrides default location)")
+    parser.add_argument("--index-file", type=Path, default=Path("input/asassn_index_masked_concat_cleaned_20250919_154524_brotli.parquet"),
+                        help="ASAS-SN index file to join ra_deg/dec_deg coordinates")
 
     # Filter toggles (all enabled by default except morphology)
     parser.add_argument("--skip-evidence-strength", action="store_true", help="Skip evidence strength filter (Bayes factor threshold)")
@@ -1366,6 +1368,43 @@ Example usage:
         df = pd.read_csv(input_path)
 
     print(f"Loaded {len(df)} rows from {input_path}")
+
+    # Join coordinates from index file
+    index_path = args.index_file.expanduser()
+    if not index_path.exists():
+        raise FileNotFoundError(f"Index file not found: {index_path}")
+
+    if index_path.suffix.lower() in (".parquet", ".pq"):
+        index_df = pd.read_parquet(index_path)
+    else:
+        index_df = pd.read_csv(index_path)
+
+    # Determine join column (asas_sn_id or path stem)
+    if "asas_sn_id" in df.columns and "asas_sn_id" in index_df.columns:
+        join_col = "asas_sn_id"
+    elif "path" in df.columns:
+        # Extract ID from path
+        df["_join_id"] = df["path"].apply(lambda p: Path(p).stem)
+        if "asas_sn_id" in index_df.columns:
+            index_df["_join_id"] = index_df["asas_sn_id"]
+        join_col = "_join_id"
+    else:
+        raise ValueError("Cannot determine join column between events results and index file")
+
+    # Join ra_deg, dec_deg from index
+    coord_cols = ["ra_deg", "dec_deg"]
+    available_coords = [c for c in coord_cols if c in index_df.columns]
+    if not available_coords:
+        raise ValueError(f"Index file missing ra_deg/dec_deg columns")
+
+    df = df.merge(
+        index_df[[join_col] + available_coords].drop_duplicates(subset=[join_col]),
+        on=join_col,
+        how="left"
+    )
+    if "_join_id" in df.columns:
+        df = df.drop(columns=["_join_id"])
+    print(f"Joined coordinates from {index_path}")
 
     # Determine output path
     if args.output:
