@@ -56,6 +56,44 @@ def load_passing_candidates(
     return df.reset_index(drop=True)
 
 
+def _plot_single_candidate(args: tuple) -> tuple[str, bool, str]:
+    """Worker function for parallel plotting."""
+    (
+        lc_path_str, out_path_str, baseline, baseline_kwargs,
+        skip_events, plot_fits, logbf_threshold_dip, logbf_threshold_jump,
+        jd_offset, clean_max_error_absolute, clean_max_error_sigma,
+        detection_results_csv, annotations
+    ) = args
+
+    lc_path = Path(lc_path_str)
+    out_path = Path(out_path_str)
+
+    if not lc_path.exists():
+        return (lc_path_str, False, "file not found")
+
+    try:
+        baseline_func = BASELINE_FUNCTIONS.get(baseline, BASELINE_FUNCTIONS["per_camera_gp"])
+        plot_bayes_results(
+            lc_path,
+            out_path=out_path,
+            show=False,
+            baseline_func=baseline_func,
+            baseline_kwargs=baseline_kwargs or {},
+            skip_events=skip_events,
+            plot_fits=plot_fits,
+            logbf_threshold_dip=logbf_threshold_dip,
+            logbf_threshold_jump=logbf_threshold_jump,
+            jd_offset=jd_offset,
+            clean_max_error_absolute=clean_max_error_absolute,
+            clean_max_error_sigma=clean_max_error_sigma,
+            detection_results_csv=detection_results_csv,
+            annotations=annotations,
+        )
+        return (lc_path_str, True, "")
+    except Exception as e:
+        return (lc_path_str, False, str(e))
+
+
 def plot_passing_candidates(
     filtered_path: Path,
     out_dir: Path,
@@ -68,6 +106,7 @@ def plot_passing_candidates(
     format: str = "png",
     show: bool = False,
     verbose: bool = False,
+    workers: int = 1,
     logbf_threshold_dip: float = 5.0,
     logbf_threshold_jump: float = 5.0,
     jd_offset: float = 2458000.0,
@@ -129,22 +168,13 @@ def plot_passing_candidates(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    baseline_func = BASELINE_FUNCTIONS.get(baseline, BASELINE_FUNCTIONS["per_camera_gp"])
     if baseline_kwargs is None:
         baseline_kwargs = {}
 
-    n_plotted = 0
-    n_failed = 0
-
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Plotting candidates"):
+    # Build work items
+    work_items = []
+    for _, row in df.iterrows():
         lc_path = Path(row["path"])
-
-        if not lc_path.exists():
-            if verbose:
-                print(f"Skipping {lc_path} - file not found")
-            n_failed += 1
-            continue
-
         asas_sn_id = lc_path.stem.split("-")[0]
         out_path = out_dir / f"{asas_sn_id}_candidate.{format}"
 
@@ -159,28 +189,45 @@ def plot_passing_candidates(
         if "catalog_match" in row.index:
             annotations["periodic"] = "Yes" if row["catalog_match"] else "No"
 
-        try:
-            plot_bayes_results(
-                lc_path,
-                out_path=out_path,
-                show=show,
-                baseline_func=baseline_func,
-                baseline_kwargs=baseline_kwargs,
-                skip_events=skip_events,
-                plot_fits=plot_fits,
-                logbf_threshold_dip=logbf_threshold_dip,
-                logbf_threshold_jump=logbf_threshold_jump,
-                jd_offset=jd_offset,
-                clean_max_error_absolute=clean_max_error_absolute,
-                clean_max_error_sigma=clean_max_error_sigma,
-                detection_results_csv=detection_results_csv,
-                annotations=annotations,
-            )
-            n_plotted += 1
-        except Exception as e:
-            if verbose:
-                print(f"Failed to plot {lc_path}: {e}")
-            n_failed += 1
+        work_items.append((
+            str(lc_path), str(out_path), baseline, baseline_kwargs,
+            skip_events, plot_fits, logbf_threshold_dip, logbf_threshold_jump,
+            jd_offset, clean_max_error_absolute, clean_max_error_sigma,
+            str(detection_results_csv) if detection_results_csv else None,
+            annotations
+        ))
+
+    n_plotted = 0
+    n_failed = 0
+
+    if workers > 1:
+        from multiprocessing import Pool, cpu_count
+        actual_workers = min(workers, cpu_count(), len(work_items))
+        print(f"Plotting with {actual_workers} workers...")
+
+        with Pool(processes=actual_workers) as pool:
+            results = list(tqdm(
+                pool.imap_unordered(_plot_single_candidate, work_items),
+                total=len(work_items),
+                desc="Plotting candidates"
+            ))
+
+        for lc_path, success, error in results:
+            if success:
+                n_plotted += 1
+            else:
+                n_failed += 1
+                if verbose:
+                    print(f"Failed to plot {lc_path}: {error}")
+    else:
+        for item in tqdm(work_items, desc="Plotting candidates"):
+            lc_path, success, error = _plot_single_candidate(item)
+            if success:
+                n_plotted += 1
+            else:
+                n_failed += 1
+                if verbose:
+                    print(f"Failed to plot {lc_path}: {error}")
 
     print(f"\nGenerated {n_plotted} plots, {n_failed} failed")
     return n_plotted
@@ -291,6 +338,12 @@ Example usage:
         "--gp-jitter", type=float, default=None, help="GP jitter term"
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel workers (default: 1)",
+    )
+    parser.add_argument(
         "--show",
         action="store_true",
         help="Show plots interactively",
@@ -357,6 +410,7 @@ Example usage:
         format=args.format,
         show=args.show,
         verbose=args.verbose,
+        workers=args.workers,
         logbf_threshold_dip=args.logbf_threshold_dip,
         logbf_threshold_jump=args.logbf_threshold_jump,
         jd_offset=args.jd_offset,
