@@ -33,6 +33,11 @@ from malca.review.sed_storage import (
 
 SED_TABLE_NAME = "sed_photometry"
 VIZIER_QUERY_TIMEOUT_SEC = 30
+IRSA_QUERY_TIMEOUT_SEC = 60
+IRSA_BATCH_JOB_TIMEOUT_SEC = max(
+    float(os.environ.get("MALCA_IRSA_BATCH_JOB_TIMEOUT_SECONDS", "600")),
+    1.0,
+)
 SED_CACHE_DIR = DEFAULT_CACHE_DIR.expanduser() / "sed"
 SED_CACHE_META_COLUMNS = {
     "_cache_candidate_id",
@@ -5287,16 +5292,19 @@ def _irsa_query_region_frame(
 ) -> tuple[pd.DataFrame, float | None, float | None, str]:
     from astroquery.ipac.irsa import Irsa
     from astropy.coordinates import SkyCoord
+    from malca.enrichment.sed_archive import _default_requests_timeout
 
     ra, dec, coordinate_method = _archive_query_position(row, epoch_jyear=epoch_jyear)
     if ra is None or dec is None:
         return pd.DataFrame(), None, None, coordinate_method
-    result = Irsa.query_region(
-        SkyCoord(ra=ra * u.deg, dec=dec * u.deg),
-        catalog=catalog,
-        radius=float(radius_arcsec) * u.arcsec,
-        columns=columns,
-    )
+    # PyVO's synchronous TAP path bypasses astroquery's timeout settings.
+    with _default_requests_timeout(Irsa._session, IRSA_QUERY_TIMEOUT_SEC):
+        result = Irsa.query_region(
+            SkyCoord(ra=ra * u.deg, dec=dec * u.deg),
+            catalog=catalog,
+            radius=float(radius_arcsec) * u.arcsec,
+            columns=columns,
+        )
     if result is None:
         return pd.DataFrame(), ra, dec, coordinate_method
     if hasattr(result, "to_pandas"):
@@ -5309,9 +5317,255 @@ def _irsa_query_region_frame(
     return frame, ra, dec, coordinate_method
 
 
+def _irsa_allwise_batch_matches(
+    df: pd.DataFrame,
+    *,
+    radius_arcsec: float,
+    columns: str,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[
+    dict[str, list[tuple[float, pd.Series]]],
+    dict[str, str],
+    dict[str, str],
+]:
+    """Crossmatch a candidate chunk against AllWISE in one IRSA TAP job."""
+    statuses = _all_candidate_status(df, "covered_no_detection")
+    coordinate_methods: dict[str, str] = {}
+    target_rows: list[dict[str, object]] = []
+    target_ids: dict[int, str] = {}
+    target_positions: dict[int, tuple[float, float]] = {}
+
+    for _, item in df.iterrows():
+        cid = _candidate_id_for_row(item)
+        ra, dec, coordinate_method = _archive_query_position(
+            item,
+            epoch_jyear=2010.5,
+        )
+        coordinate_methods[cid] = coordinate_method
+        if ra is None or dec is None:
+            statuses[cid] = "query_error"
+            continue
+        target_idx = len(target_rows)
+        target_rows.append(
+            {
+                "target_idx": target_idx,
+                "ra": float(ra),
+                "dec": float(dec),
+            }
+        )
+        target_ids[target_idx] = cid
+        target_positions[target_idx] = (float(ra), float(dec))
+
+    if not target_rows:
+        return {}, statuses, coordinate_methods
+
+    radius_deg = float(radius_arcsec) / 3600.0
+    selected_columns = ", ".join(
+        f"w.{column.strip()} AS {column.strip()}"
+        for column in str(columns).split(",")
+        if column.strip()
+    )
+    query = f"""
+        SELECT
+            u.target_idx AS target_idx,
+            {selected_columns}
+        FROM TAP_UPLOAD.targets AS u, allwise_p3as_psd AS w
+        WHERE 1=CONTAINS(
+            POINT(w.ra, w.dec),
+            CIRCLE(u.ra, u.dec, {radius_deg:.12f})
+        )
+    """
+
+    try:
+        import pyvo
+        from astropy.table import Table
+        from astroquery.ipac.irsa import Irsa
+        from malca.enrichment.sed_archive import _default_requests_timeout
+
+        upload = Table.from_pandas(pd.DataFrame(target_rows))
+        tap = pyvo.dal.TAPService(
+            "https://irsa.ipac.caltech.edu/TAP",
+            session=Irsa._session,
+        )
+        if progress_callback:
+            progress_callback(
+                f"[SED] allwise IRSA TAP upload: {len(target_rows)} targets"
+            )
+        with _default_requests_timeout(Irsa._session, IRSA_QUERY_TIMEOUT_SEC):
+            result = tap.run_async(
+                query,
+                uploads={"targets": upload},
+                timeout=IRSA_BATCH_JOB_TIMEOUT_SEC,
+            )
+            frame = result.to_table().to_pandas() if result is not None else pd.DataFrame()
+    except Exception as exc:
+        for cid in target_ids.values():
+            statuses[cid] = "query_error"
+        if progress_callback:
+            progress_callback(f"[SED] allwise IRSA TAP upload failed: {exc}")
+        return {}, statuses, coordinate_methods
+    finally:
+        _sleep_after_sed_request()
+
+    if frame.empty:
+        return {}, statuses, coordinate_methods
+
+    target_column = next(
+        (
+            column
+            for column in frame.columns
+            if str(column).strip().casefold() == "target_idx"
+        ),
+        None,
+    )
+    if target_column is None or not {"ra", "dec"}.issubset(
+        {str(column).strip().casefold() for column in frame.columns}
+    ):
+        for cid in target_ids.values():
+            statuses[cid] = "query_error"
+        return {}, statuses, coordinate_methods
+
+    matches: dict[str, list[tuple[float, pd.Series]]] = {}
+    numeric_target_indexes = pd.to_numeric(frame[target_column], errors="coerce")
+    for target_idx, target_frame in frame.groupby(numeric_target_indexes, sort=False):
+        if not np.isfinite(target_idx):
+            continue
+        index = int(target_idx)
+        cid = target_ids.get(index)
+        target_position = target_positions.get(index)
+        if cid is None or target_position is None:
+            continue
+        target_ra, target_dec = target_position
+        remaining = target_frame.copy()
+        candidate_matches: list[tuple[float, pd.Series]] = []
+        while not remaining.empty:
+            selected, separation, _separations = _nearest_archive_row(
+                remaining,
+                target_ra_deg=target_ra,
+                target_dec_deg=target_dec,
+                radius_arcsec=radius_arcsec,
+            )
+            if selected is None or separation is None:
+                break
+            candidate_matches.append((float(separation), selected))
+            remaining = remaining.drop(index=selected.name)
+        if candidate_matches:
+            candidate_matches.sort(key=lambda item: item[0])
+            matches[cid] = candidate_matches
+
+    if progress_callback:
+        progress_callback(
+            f"[SED] allwise IRSA TAP upload returned matches for "
+            f"{len(matches)}/{len(target_rows)} targets"
+        )
+    return matches, statuses, coordinate_methods
+
+
 def _band_character(value: object, band_index: int) -> str:
     text = _clean_text(value)
     return text[band_index] if band_index < len(text) else ""
+
+
+def _rows_from_allwise_match(
+    candidate_id: str,
+    payload: Mapping[str, object],
+    match: pd.Series,
+    *,
+    separation_arcsec: float | None,
+    candidate_separations_arcsec: Iterable[float],
+    coordinate_method: str,
+    radius_arcsec: float,
+) -> list[dict]:
+    designation = _clean_text(_row_value(match, ("designation", "source_id")))
+    separations = list(candidate_separations_arcsec)
+    match_flags = _counterpart_validation_flags(
+        payload,
+        match,
+        source_key="allwise",
+        separation_arcsec=separation_arcsec,
+        candidate_separations_arcsec=separations,
+        radius_arcsec=radius_arcsec,
+    )
+    candidate_rows: list[dict] = []
+    for band_index, band in enumerate(("W1", "W2", "W3", "W4")):
+        number = band_index + 1
+        mag = _catalog_mag_value(match, f"w{number}mpro")
+        if mag is None:
+            continue
+        mag_err = _catalog_mag_error(match, f"w{number}sigmpro")
+        ph_qual = _band_character(_row_value(match, "ph_qual"), band_index).upper()
+        cc_flag = _band_character(_row_value(match, "cc_flags"), band_index)
+        snr = _row_float_value(match, f"w{number}snr")
+        rchi2 = _row_float_value(match, f"w{number}rchi2")
+        saturation = _row_float_value(match, f"w{number}sat")
+        ext_flg = _row_float_value(match, "ext_flg")
+        quality = [
+            *match_flags,
+            "irsa_direct",
+            f"ph_qual={ph_qual or 'unknown'}",
+            f"cc_flag={cc_flag or 'unknown'}",
+        ]
+        is_upper_limit = ph_qual == "U"
+        bad = (
+            ph_qual not in {"A", "B", "U"}
+            or (cc_flag not in {"", "0"})
+            or (ext_flg is not None and ext_flg > 0)
+            or (snr is not None and snr < 2.0 and not is_upper_limit)
+            or (saturation is not None and saturation > 0)
+        )
+        if rchi2 is not None and rchi2 > 3.0:
+            quality.append("allwise_large_rchi2")
+        if bad:
+            quality.append("bad_quality")
+        bp = bandpass_for("AllWISE", band)
+        if bp is None:
+            continue
+        provenance = {
+            "catalog": "allwise_p3as_psd",
+            "catalog_object_id": designation or None,
+            "selected_sep_arcsec": separation_arcsec,
+            "match_count_returned": len(separations),
+            "coordinate_method": coordinate_method,
+            "ph_qual": ph_qual or None,
+            "cc_flag": cc_flag or None,
+            "ext_flg": ext_flg,
+            "snr": snr,
+            "rchi2": rchi2,
+            "saturation": saturation,
+        }
+        sed_row = _row_from_bandpass(
+            candidate_id=candidate_id,
+            bandpass=bp,
+            mag=mag,
+            mag_err=mag_err,
+            distance_pc=distance_pc_from_payload(payload),
+            av=None,
+            dereddened=False,
+            sep_arcsec=separation_arcsec,
+            quality_flags=";".join(dict.fromkeys(quality)),
+            is_upper_limit=is_upper_limit,
+            wavelength_metadata={
+                "catalog_release": "allwise_p3as_psd",
+                "source_object_id": designation or None,
+                "catalog_measurement_id": (
+                    f"{designation}:{band}" if designation else None
+                ),
+                "instrument": "WISE",
+                "epoch_mjd": 55379.0,
+                "correlation_group": (
+                    f"allwise:{designation}"
+                    if designation
+                    else f"allwise:{candidate_id}"
+                ),
+                "provenance_json": _canonical_sed_json_text(provenance),
+            },
+            policy_payload=payload,
+        )
+        if sed_row is not None:
+            if bad:
+                sed_row["fit_policy"] = "diagnostic_only"
+            candidate_rows.append(sed_row)
+    return candidate_rows
 
 
 def query_irsa_allwise_photometry(
@@ -5355,6 +5609,35 @@ def query_irsa_allwise_photometry(
             "w4sat",
         ]
     )
+    radius_arcsec = 3.0
+    if len(df) >= SED_BULK_XMATCH_MIN_CANDIDATES:
+        matches, statuses, coordinate_methods = _irsa_allwise_batch_matches(
+            df,
+            radius_arcsec=radius_arcsec,
+            columns=columns,
+            progress_callback=progress_callback,
+        )
+        payloads = _candidate_rows_by_id(df)
+        for cid, candidate_matches in matches.items():
+            payload_row = payloads.get(cid)
+            if payload_row is None or not candidate_matches:
+                continue
+            separation, selected = candidate_matches[0]
+            candidate_rows = _rows_from_allwise_match(
+                cid,
+                payload_row.to_dict(),
+                selected,
+                separation_arcsec=separation,
+                candidate_separations_arcsec=[item[0] for item in candidate_matches],
+                coordinate_method=coordinate_methods.get(cid, "unknown"),
+                radius_arcsec=radius_arcsec,
+            )
+            rows.extend(candidate_rows)
+            statuses[cid] = (
+                "catalog_detection" if candidate_rows else "covered_no_detection"
+            )
+        return _fetch_result(rows, statuses)
+
     total = len(df)
     for idx, (_, item) in enumerate(df.iterrows(), start=1):
         cid = _candidate_id_for_row(item)
@@ -5365,7 +5648,7 @@ def query_irsa_allwise_photometry(
                 item,
                 catalog="allwise_p3as_psd",
                 epoch_jyear=2010.5,
-                radius_arcsec=3.0,
+                radius_arcsec=radius_arcsec,
                 columns=columns,
             )
             if target_ra is None or target_dec is None:
@@ -5375,97 +5658,20 @@ def query_irsa_allwise_photometry(
                 result,
                 target_ra_deg=target_ra,
                 target_dec_deg=target_dec,
-                radius_arcsec=3.0,
+                radius_arcsec=radius_arcsec,
             )
             if match is None:
                 statuses[cid] = "covered_no_detection"
                 continue
-            designation = _clean_text(_row_value(match, ("designation", "source_id")))
-            match_flags = _counterpart_validation_flags(
+            candidate_rows = _rows_from_allwise_match(
+                cid,
                 item.to_dict(),
                 match,
-                source_key="allwise",
                 separation_arcsec=separation,
                 candidate_separations_arcsec=separations,
-                radius_arcsec=3.0,
+                coordinate_method=coordinate_method,
+                radius_arcsec=radius_arcsec,
             )
-            candidate_rows: list[dict] = []
-            for band_index, band in enumerate(("W1", "W2", "W3", "W4")):
-                number = band_index + 1
-                mag = _catalog_mag_value(match, f"w{number}mpro")
-                if mag is None:
-                    continue
-                mag_err = _catalog_mag_error(match, f"w{number}sigmpro")
-                ph_qual = _band_character(_row_value(match, "ph_qual"), band_index).upper()
-                cc_flag = _band_character(_row_value(match, "cc_flags"), band_index)
-                snr = _row_float_value(match, f"w{number}snr")
-                rchi2 = _row_float_value(match, f"w{number}rchi2")
-                saturation = _row_float_value(match, f"w{number}sat")
-                ext_flg = _row_float_value(match, "ext_flg")
-                quality = [
-                    *match_flags,
-                    "irsa_direct",
-                    f"ph_qual={ph_qual or 'unknown'}",
-                    f"cc_flag={cc_flag or 'unknown'}",
-                ]
-                is_upper_limit = ph_qual == "U"
-                bad = (
-                    ph_qual not in {"A", "B", "U"}
-                    or (cc_flag not in {"", "0"})
-                    or (ext_flg is not None and ext_flg > 0)
-                    or (snr is not None and snr < 2.0 and not is_upper_limit)
-                    or (saturation is not None and saturation > 0)
-                )
-                if rchi2 is not None and rchi2 > 3.0:
-                    quality.append("allwise_large_rchi2")
-                if bad:
-                    quality.append("bad_quality")
-                bp = bandpass_for("AllWISE", band)
-                if bp is None:
-                    continue
-                provenance = {
-                    "catalog": "allwise_p3as_psd",
-                    "catalog_object_id": designation or None,
-                    "selected_sep_arcsec": separation,
-                    "match_count_returned": len(separations),
-                    "coordinate_method": coordinate_method,
-                    "ph_qual": ph_qual or None,
-                    "cc_flag": cc_flag or None,
-                    "ext_flg": ext_flg,
-                    "snr": snr,
-                    "rchi2": rchi2,
-                    "saturation": saturation,
-                }
-                sed_row = _row_from_bandpass(
-                    candidate_id=cid,
-                    bandpass=bp,
-                    mag=mag,
-                    mag_err=mag_err,
-                    distance_pc=distance_pc_from_payload(item.to_dict()),
-                    av=None,
-                    dereddened=False,
-                    sep_arcsec=separation,
-                    quality_flags=";".join(dict.fromkeys(quality)),
-                    is_upper_limit=is_upper_limit,
-                    wavelength_metadata={
-                        "catalog_release": "allwise_p3as_psd",
-                        "source_object_id": designation or None,
-                        "catalog_measurement_id": (
-                            f"{designation}:{band}" if designation else None
-                        ),
-                        "instrument": "WISE",
-                        "epoch_mjd": 55379.0,
-                        "correlation_group": (
-                            f"allwise:{designation}" if designation else f"allwise:{cid}"
-                        ),
-                        "provenance_json": _canonical_sed_json_text(provenance),
-                    },
-                    policy_payload=item.to_dict(),
-                )
-                if sed_row is not None:
-                    if bad:
-                        sed_row["fit_policy"] = "diagnostic_only"
-                    candidate_rows.append(sed_row)
             rows.extend(candidate_rows)
             statuses[cid] = "catalog_detection" if candidate_rows else "covered_no_detection"
         except Exception as exc:

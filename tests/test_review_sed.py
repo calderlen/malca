@@ -2140,6 +2140,181 @@ def test_direct_irsa_spitzer_provenance_is_json_and_cache_writable(
     assert json.loads(cached_provenance)["catalog"] == "slphotdr4"
 
 
+def test_irsa_region_timeout_reaches_transport_and_restores_session(monkeypatch) -> None:
+    from astroquery.ipac.irsa import Irsa
+    from pyvo.dal.exceptions import DALFormatError
+    from requests.exceptions import ReadTimeout
+
+    seen = []
+
+    def stalled_request(*args, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        raise ReadTimeout("simulated stalled IRSA response")
+
+    monkeypatch.setattr(Irsa._session, "request", stalled_request)
+    with pytest.raises(DALFormatError, match="simulated stalled IRSA response"):
+        review_sed._irsa_query_region_frame(
+            pd.Series({"ra_deg": 10.0, "dec_deg": 20.0}),
+            catalog="allwise_p3as_psd",
+            epoch_jyear=2010.5,
+            radius_arcsec=3.0,
+        )
+
+    assert seen == [(15.0, 60.0)]
+    assert Irsa._session.request is stalled_request
+
+
+def test_allwise_bulk_tap_upload_queries_chunk_once_and_selects_nearest(monkeypatch) -> None:
+    import pyvo
+
+    candidates = pd.DataFrame(
+        [
+            {"candidate_id": "cand-a", "ra_deg": 10.0, "dec_deg": 20.0},
+            {"candidate_id": "cand-b", "ra_deg": 30.0, "dec_deg": -10.0},
+        ]
+    )
+    returned = pd.DataFrame(
+        [
+            {
+                "target_idx": 0,
+                "ra": 10.0005,
+                "dec": 20.0,
+                "designation": "farther",
+                "w1mpro": 13.0,
+                "w1sigmpro": 0.03,
+                "ph_qual": "A---",
+                "cc_flags": "0000",
+                "ext_flg": 0,
+                "w1snr": 20.0,
+                "w1rchi2": 1.0,
+                "w1sat": 0,
+            },
+            {
+                "target_idx": 0,
+                "ra": 10.0001,
+                "dec": 20.0,
+                "designation": "nearest",
+                "w1mpro": 12.0,
+                "w1sigmpro": 0.02,
+                "ph_qual": "A---",
+                "cc_flags": "0000",
+                "ext_flg": 0,
+                "w1snr": 50.0,
+                "w1rchi2": 1.0,
+                "w1sat": 0,
+            },
+        ]
+    )
+    calls = []
+
+    class FakeResult:
+        def to_table(self):
+            return self
+
+        def to_pandas(self):
+            return returned
+
+    class FakeTapService:
+        def __init__(self, url, *, session=None):
+            calls.append(("service", url, session))
+
+        def run_async(self, query, *, uploads, timeout):
+            calls.append(("query", query, uploads, timeout))
+            return FakeResult()
+
+    monkeypatch.setattr(review_sed, "SED_BULK_XMATCH_MIN_CANDIDATES", 2)
+    monkeypatch.setattr(review_sed, "_sleep_after_sed_request", lambda: None)
+    monkeypatch.setattr(pyvo.dal, "TAPService", FakeTapService)
+
+    rows = review_sed.query_irsa_allwise_photometry(candidates)
+
+    query_calls = [call for call in calls if call[0] == "query"]
+    assert len(query_calls) == 1
+    assert "TAP_UPLOAD.targets" in query_calls[0][1]
+    assert len(query_calls[0][2]["targets"]) == 2
+    assert query_calls[0][3] == review_sed.IRSA_BATCH_JOB_TIMEOUT_SEC
+    assert rows["candidate_id"].tolist() == ["cand-a"]
+    assert rows["band"].tolist() == ["W1"]
+    assert rows.iloc[0]["mag"] == pytest.approx(12.0)
+    provenance = json.loads(rows.iloc[0]["provenance_json"])
+    assert provenance["catalog_object_id"] == "nearest"
+    assert provenance["match_count_returned"] == 2
+    statuses = rows.attrs[review_sed.SED_FETCH_STATUS_ATTR]
+    assert statuses == {
+        "cand-a": "catalog_detection",
+        "cand-b": "covered_no_detection",
+    }
+
+
+def test_allwise_bulk_tap_upload_failure_is_retryable(monkeypatch) -> None:
+    import pyvo
+
+    candidates = pd.DataFrame(
+        [
+            {"candidate_id": "cand-a", "ra_deg": 10.0, "dec_deg": 20.0},
+            {"candidate_id": "cand-b", "ra_deg": 30.0, "dec_deg": -10.0},
+        ]
+    )
+
+    class FakeTapService:
+        def __init__(self, url, *, session=None):
+            pass
+
+        def run_async(self, query, *, uploads, timeout):
+            raise TimeoutError("simulated IRSA batch timeout")
+
+    messages = []
+    monkeypatch.setattr(review_sed, "SED_BULK_XMATCH_MIN_CANDIDATES", 2)
+    monkeypatch.setattr(review_sed, "_sleep_after_sed_request", lambda: None)
+    monkeypatch.setattr(pyvo.dal, "TAPService", FakeTapService)
+
+    rows = review_sed.query_irsa_allwise_photometry(
+        candidates,
+        progress_callback=messages.append,
+    )
+
+    assert rows.empty
+    assert rows.attrs[review_sed.SED_FETCH_STATUS_ATTR] == {
+        "cand-a": "query_error",
+        "cand-b": "query_error",
+    }
+    assert any("TAP upload failed" in message for message in messages)
+
+
+def test_allwise_timeout_retries_and_resumes_completed_cache(tmp_path: Path, monkeypatch) -> None:
+    from requests.exceptions import ReadTimeout
+
+    candidates = pd.DataFrame([
+        {"candidate_id": "done", "ra_deg": 10.0, "dec_deg": 20.0},
+        {"candidate_id": "retry", "ra_deg": 11.0, "dec_deg": 21.0},
+    ])
+    calls = []
+
+    def query(row, **kwargs):
+        cid = row["candidate_id"]
+        calls.append(cid)
+        if cid == "retry" and calls.count(cid) == 1:
+            raise ReadTimeout("simulated stalled IRSA response")
+        return pd.DataFrame(), row["ra_deg"], row["dec_deg"], "test"
+
+    monkeypatch.setattr(review_sed, "SED_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(review_sed, "_irsa_query_region_frame", query)
+    monkeypatch.setattr(review_sed, "_sleep_after_sed_request", lambda: None)
+    for _ in range(2):
+        review_sed._fetch_sed_source_with_cache(
+            "allwise",
+            review_sed.query_irsa_allwise_photometry,
+            candidates,
+            max_attempts=2,
+            retry_base_seconds=0.0,
+        )
+
+    assert calls == ["done", "retry", "retry"]
+    cached = pd.read_parquet(tmp_path / "allwise.parquet")
+    assert set(cached["_cache_candidate_id"]) == {"done", "retry"}
+    assert set(cached["_cache_status"]) == {"covered_no_detection"}
+
+
 def test_direct_irsa_allwise_is_canonical_and_payload_is_not_a_fallback(
     monkeypatch,
 ) -> None:
