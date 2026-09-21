@@ -45,6 +45,7 @@ from malca.evaluation.period_candidate_ranker import (
     label_candidates,
     load_candidate_ranker_artifact,
     method_ablation_summary,
+    rank_deterministic_baseline,
     save_candidate_ranker_artifact,
     score_candidate_ranker,
     select_trial_solutions,
@@ -965,6 +966,42 @@ def test_default_baseline_has_explicit_scientific_directions() -> None:
     assert specs["ls_power"].higher_is_better is True
     assert specs["pdm_theta"].higher_is_better is False
     assert specs["event_rms_oc_days"].higher_is_better is False
+
+
+def test_duplicate_diagnostics_do_not_add_votes_to_default_baseline() -> None:
+    # Three pieces of evidence favor a; four favor b. Repeating the first
+    # three under diagnostic aliases must not reverse the selected period.
+    frame = pd.DataFrame(
+        {
+            "base_trial_id": ["trial", "trial"],
+            "candidate_id": ["a", "b"],
+            "period_days": [10.0, 20.0],
+            "ls_power": [0.9, 0.2],
+            "bls_power": [9.0, 2.0],
+            "lafler_kinman_t_phase": [0.1, 0.9],
+            "pdm_theta": [0.9, 0.1],
+            "ce_entropy": [0.9, 0.1],
+            "template_q": [0.9, 0.1],
+            "event_phase_concentration": [0.1, 0.9],
+        }
+    )
+    expected = rank_deterministic_baseline(frame)
+    with_duplicates = frame.assign(
+        fourier_1_power=frame["ls_power"],
+        bls_log_likelihood=frame["bls_power"],
+        lafler_kinman_delta=frame["lafler_kinman_t_phase"] - 1.0,
+    )
+    actual = rank_deterministic_baseline(with_duplicates, include_components=True)
+
+    np.testing.assert_allclose(actual["baseline_score"], [3.0 / 7.0, 4.0 / 7.0])
+    assert actual["baseline_rank"].tolist() == [2, 1]
+    pd.testing.assert_frame_equal(
+        actual[["baseline_score", "baseline_rank"]],
+        expected[["baseline_score", "baseline_rank"]],
+    )
+    for name in ("fourier_1_power", "bls_log_likelihood", "lafler_kinman_delta"):
+        pd.testing.assert_series_equal(actual[name], with_duplicates[name])
+        assert f"baseline_score__{name}" not in actual
 
 
 def test_new_learned_rankers_exclude_redundant_aov_features() -> None:

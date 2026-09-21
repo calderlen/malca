@@ -1006,7 +1006,10 @@ _DEFAULT_BASELINE_FEATURE_DIRECTIONS: tuple[tuple[str, bool], ...] = (
     ("proposal_normalized_score", True),
     ("proposal_prominence", True),
     ("proposal_independent_method_family_count", True),
-    # Fixed-period photometric evidence.
+    # Fixed-period photometric evidence. Keep one vote per equivalent
+    # statistic: ls_power covers fourier_1_power; bls_power covers the
+    # likelihood objective; LK phase length covers its affine delta.
+    # The redundant raw columns remain available as diagnostics.
     ("ls_power", True),
     ("ls_local_best_power", True),
     ("pdm_theta", False),
@@ -1014,12 +1017,9 @@ _DEFAULT_BASELINE_FEATURE_DIRECTIONS: tuple[tuple[str, bool], ...] = (
     ("bls_power", True),
     ("bls_local_best_power", True),
     ("bls_depth_snr", True),
-    ("bls_log_likelihood", True),
-    ("fourier_1_power", True),
     ("fourier_2_power", True),
     ("fourier_3_power", True),
     ("lafler_kinman_t_phase", False),
-    ("lafler_kinman_delta", False),
     ("supersmoother_cv_standardized_mse", False),
     ("supersmoother_explained_fraction", True),
     ("template_q", False),
