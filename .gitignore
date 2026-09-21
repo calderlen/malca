@@ -78,3 +78,15 @@ malca/notebooks/**/output/
 .env
 data/dustmaps/
 /data/external/open_clusters/
+/allStar-*.fits
+/gaia_allsky_*.parquet
+/input/ATLAS.txt
+/malca/data/apogee_lookup.parquet
+/build/
+/output_old/
+/reviews/
+/tmp/
+/temp_*/
+/test_desi_out/
+/test_*.parquet
+~$*
