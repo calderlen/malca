@@ -11,6 +11,7 @@ from malca.config import GAIA_TCB_EPOCH_JD, MJD_TO_JD, TESS_BTJD_OFFSET
 from malca.enrichment.multi_survey_features import (
     _derive_event_window,
     compute_multi_survey_features,
+    compute_multi_survey_features_batched,
     run as run_multi_survey_features,
 )
 from malca.review.pipeline import (
@@ -235,3 +236,37 @@ def test_review_stage_status_and_runner(tmp_path: Path) -> None:
 
     assert payload["ms_feature_status"] == "ok"
     assert detect_pipeline_status(payload)["multi_survey_features"] == "complete"
+
+
+def test_batched_features_resume_completed_batches(tmp_path: Path, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_features(row, **_kwargs):
+        calls.append(str(row["candidate_id"]))
+        return {"ms_feature_status": "ok", "ms_feature_version": "2"}
+
+    monkeypatch.setattr(
+        "malca.enrichment.multi_survey_features.compute_candidate_multi_survey_features",
+        fake_features,
+    )
+    candidates = pd.DataFrame([_base_event_row(f"C{index}") for index in range(5)])
+    checkpoint_dir = tmp_path / "batches"
+
+    first = compute_multi_survey_features_batched(
+        candidates,
+        external_lc_dir=tmp_path,
+        checkpoint_dir=checkpoint_dir,
+        batch_size=2,
+    )
+    assert calls == ["C0", "C1", "C2", "C3", "C4"]
+    assert first["ms_feature_status"].tolist() == ["ok"] * 5
+
+    calls.clear()
+    second = compute_multi_survey_features_batched(
+        candidates,
+        external_lc_dir=tmp_path,
+        checkpoint_dir=checkpoint_dir,
+        batch_size=2,
+    )
+    assert calls == []
+    assert second["candidate_id"].tolist() == ["C0", "C1", "C2", "C3", "C4"]

@@ -17,7 +17,7 @@ from tqdm.auto import tqdm
 
 from malca.products.candidates import select_passing_candidates_if_present
 from malca.config import NEIGHBOR_RADIUS_ARCSEC, NEIGHBOR_CHUNK_SIZE
-from malca.io.table_io import read_feature_table
+from malca.io.table_io import read_feature_table, write_parquet_table
 
 
 DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
@@ -26,6 +26,7 @@ DEFAULT_NEIGHBOR_CATALOGS: dict[str, str] = {
     "allwise": "II/328/allwise",
     "vsx": "B/vsx/vsx",
 }
+NEIGHBOR_COVERAGE_FILE = "neighbors_coverage.parquet"
 
 _CATALOG_OBJECT_ID_COLUMNS = (
     "Source", "source_id", "SOURCE_ID", "AllWISE", "_2MASS", "2MASS",
@@ -467,7 +468,27 @@ def run_neighbor_enrichment(
     coords["candidate_id"] = coords["candidate_id"].astype(str)
     coords = coords.drop_duplicates(subset=["candidate_id"])
 
-    # Load checkpoint to skip already-processed candidates
+    coverage_path = out_dir / NEIGHBOR_COVERAGE_FILE
+    coverage = pd.DataFrame()
+    covered_ids: set[str] = set()
+    if coverage_path.exists():
+        try:
+            coverage = pd.read_parquet(coverage_path)
+            expected_catalogs = json.dumps(catalogs, sort_keys=True, separators=(",", ":"))
+            valid = (
+                coverage.get("status", pd.Series(dtype=str)).astype(str).isin({"ok", "no_coordinates"})
+                & pd.to_numeric(
+                    coverage.get("radius_arcsec", pd.Series(index=coverage.index, dtype=float)),
+                    errors="coerce",
+                ).eq(float(radius_arcsec))
+                & coverage.get("catalogs_json", pd.Series(dtype=str)).astype(str).eq(expected_catalogs)
+            )
+            covered_ids = set(coverage.loc[valid, "candidate_id"].astype(str))
+        except Exception:
+            coverage = pd.DataFrame()
+            covered_ids = set()
+
+    # Load checkpoint to recover positive rows from an interrupted run.
     ckpt_df = pd.DataFrame()
     cached_ids: set[str] = set()
     if checkpoint_path and Path(checkpoint_path).exists():
@@ -479,17 +500,20 @@ def run_neighbor_enrichment(
         except Exception:
             ckpt_df = pd.DataFrame()
 
-    coords_todo = coords[~coords["candidate_id"].isin(cached_ids)] if cached_ids else coords
+    completed_ids = covered_ids | cached_ids
+    coords_todo = coords[~coords["candidate_id"].isin(completed_ids)] if completed_ids else coords
 
-    # Load cache only if no checkpoint (checkpoint is a superset of cache)
+    # Positive-result caches and terminal coverage serve different purposes:
+    # the latter also remembers candidates with zero matches.
     cache_df = pd.DataFrame()
-    if not cached_ids and cache_file and Path(cache_file).exists():
+    if cache_file and Path(cache_file).exists():
         try:
             cache_df = pd.read_parquet(cache_file)
         except Exception:
             cache_df = pd.DataFrame()
 
     fresh_frames: list[pd.DataFrame] = []
+    query_status_rows: list[dict] = []
     if not coords_todo.empty:
         catalog_items = list(catalogs.items())
         catalog_iter = tqdm(catalog_items, desc="Neighbor catalogs", disable=not show_progress)
@@ -501,11 +525,12 @@ def run_neighbor_enrichment(
                 chunk_size=chunk_size,
                 show_progress=show_progress,
                 progress_desc=f"neighbor:{catalog_name}",
+                status_rows=query_status_rows,
             )
             if not fresh.empty:
                 fresh_frames.append(fresh)
-    elif cached_ids:
-        print(f"[neighbor] All {len(coords)} candidates already in checkpoint, skipping queries")
+    elif completed_ids:
+        print(f"[neighbor] All {len(coords)} candidates already covered, skipping queries")
 
     if fresh_frames:
         fresh_df = pd.concat(fresh_frames, ignore_index=True)
@@ -608,6 +633,44 @@ def run_neighbor_enrichment(
 
     neighbors_long.to_parquet(out_dir / "neighbors_long.parquet", index=False, compression="zstd")
     summary.to_parquet(out_dir / "neighbors_summary.parquet", index=False, compression="zstd")
+    write_parquet_table(
+        pd.DataFrame(query_status_rows),
+        out_dir / "neighbors_query_status.parquet",
+        compression="zstd",
+    )
+
+    query_failed = any(
+        str(row.get("status", "")).lower() in {"error", "timeout", "failed"}
+        for row in query_status_rows
+    )
+    coverage_rows = [] if coverage.empty else coverage.to_dict("records")
+    catalogs_json = json.dumps(catalogs, sort_keys=True, separators=(",", ":"))
+    if not query_failed:
+        coverage_rows.extend(
+            {
+                "candidate_id": str(candidate_id),
+                "status": "ok",
+                "radius_arcsec": float(radius_arcsec),
+                "catalogs_json": catalogs_json,
+            }
+            for candidate_id in coords_todo["candidate_id"].astype(str)
+        )
+    valid_coord_ids = set(coords["candidate_id"].astype(str))
+    coverage_rows.extend(
+        {
+            "candidate_id": str(candidate_id),
+            "status": "no_coordinates",
+            "radius_arcsec": float(radius_arcsec),
+            "catalogs_json": catalogs_json,
+        }
+        for candidate_id in df_use["candidate_id"].astype(str)
+        if str(candidate_id) not in valid_coord_ids
+    )
+    if coverage_rows:
+        coverage_out = pd.DataFrame(coverage_rows).drop_duplicates(
+            subset=["candidate_id", "radius_arcsec", "catalogs_json"], keep="last"
+        )
+        write_parquet_table(coverage_out, coverage_path, compression="snappy")
 
     # Clean up checkpoint on success
     if checkpoint_path and Path(checkpoint_path).exists():

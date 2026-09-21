@@ -15,7 +15,7 @@ from malca.products.candidates import select_passing_candidates_if_present
 from malca.config import GAIA_TCB_EPOCH_JD, MJD_TO_JD, SKYPATROL_JD_OFFSET, TESS_BTJD_OFFSET
 from malca.products.feature_layers import with_feature_columns
 from malca.io.lightcurve_io import load_lightcurve_df
-from malca.io.table_io import read_feature_table, write_feature_table
+from malca.io.table_io import read_feature_table, write_feature_table, write_parquet_table
 from malca.external_lc_manifest import index_external_lc_paths_from_manifest
 
 
@@ -803,6 +803,84 @@ def compute_multi_survey_features(
     features = pd.DataFrame(rows, index=out.index)
     for col in MS_FEATURE_COLUMNS:
         out[col] = features[col] if col in features.columns else np.nan
+    return out
+
+
+def compute_multi_survey_features_batched(
+    df: pd.DataFrame,
+    *,
+    external_lc_dir: Path | str | None = None,
+    checkpoint_dir: Path | str,
+    batch_size: int = 250,
+    reuse_checkpoints: bool = True,
+    progress_callback=None,
+) -> pd.DataFrame:
+    """Compute features in small, atomically saved, resumable batches."""
+    out = _ensure_candidate_id(df).copy()
+    if "candidate_id" not in out.columns:
+        raise ValueError("Multi-survey batching requires candidate_id")
+    candidate_ids = out["candidate_id"].astype(str)
+    if candidate_ids.eq("").any() or candidate_ids.duplicated().any():
+        raise ValueError("Multi-survey batching requires unique, nonblank candidate_id values")
+
+    checkpoint_root = Path(checkpoint_dir)
+    checkpoint_root.mkdir(parents=True, exist_ok=True)
+    external_index = _index_external_lc_paths(external_lc_dir)
+    size = max(1, int(batch_size))
+    batch_paths: list[Path] = []
+
+    for batch_index, start in enumerate(range(0, len(out), size)):
+        batch = out.iloc[start : start + size]
+        expected_ids = batch["candidate_id"].astype(str).tolist()
+        checkpoint_path = checkpoint_root / f"batch_{batch_index:05d}.parquet"
+        batch_paths.append(checkpoint_path)
+        cached = None
+        if reuse_checkpoints and checkpoint_path.exists():
+            try:
+                candidate = pd.read_parquet(checkpoint_path)
+                observed_ids = candidate.get("candidate_id", pd.Series(dtype=str)).astype(str).tolist()
+                versions = set(candidate.get("ms_feature_version", pd.Series(dtype=str)).dropna().astype(str))
+                if observed_ids == expected_ids and versions.issubset({MS_FEATURE_VERSION}):
+                    cached = candidate
+            except Exception:
+                cached = None
+        if cached is None:
+            rows = [
+                {
+                    "candidate_id": str(row["candidate_id"]),
+                    **compute_candidate_multi_survey_features(
+                        row,
+                        external_lc_dir=external_lc_dir,
+                        external_index=external_index,
+                    ),
+                }
+                for _, row in batch.iterrows()
+            ]
+            cached = pd.DataFrame(rows)
+            for column in MS_FEATURE_COLUMNS:
+                if column not in cached.columns:
+                    cached[column] = np.nan
+            cached = cached[["candidate_id", *MS_FEATURE_COLUMNS]]
+            write_parquet_table(cached, checkpoint_path)
+            action = "checkpointed"
+        else:
+            action = "reused"
+        if progress_callback is not None:
+            progress_callback(
+                f"Multi-survey features {action} {min(start + len(batch), len(out))}/{len(out)} candidates"
+            )
+
+    if not batch_paths:
+        for column in MS_FEATURE_COLUMNS:
+            if column not in out.columns:
+                out[column] = np.nan
+        return out
+
+    features = pd.concat([pd.read_parquet(path) for path in batch_paths], ignore_index=True)
+    features["candidate_id"] = features["candidate_id"].astype(str)
+    features = features.set_index("candidate_id")
+    for column in MS_FEATURE_COLUMNS:
+        out[column] = candidate_ids.map(features[column]) if column in features.columns else np.nan
     return out
 
 

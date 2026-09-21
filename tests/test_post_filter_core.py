@@ -651,7 +651,7 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
 
     checkpoint_dir = tmp_path / "ckpt"
     checkpoint_dir.mkdir()
-    checkpoint_path = checkpoint_dir / "lsp_checkpoint.parquet"
+    checkpoint_path = checkpoint_dir / "period_selection_checkpoint.parquet"
     pd.DataFrame(
         [
             {
@@ -732,7 +732,7 @@ def test_validate_periodicity_recomputes_stale_checkpoint_rows(
         verbose=False,
     )
 
-    assert seen["calls"] == 1
+    assert seen["calls"] == 2  # observed-data selection, then requested significance
     row = out.iloc[0]
     assert float(row["pdm_snr"]) == 5.5
     assert float(row["ce_snr"]) == 5.8

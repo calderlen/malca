@@ -18,17 +18,23 @@ pytest.importorskip("banyan_sigma")
 from malca.stv.pipeline import (
     PIPELINE_STAGE_CHOICES,
     _branch_events_attempted_this_run,
+    _adopt_completed_characterization_output,
     _build_filter_kwargs,
     _build_home_external_validation_cmd,
     _candidate_result_priority,
     _collect_bundle_lightcurve_files,
     _count_true_feature_rows,
     _copy_single_tagged_table_output,
+    _complete_downstream_stage,
+    _downstream_stage_fingerprint,
     _effective_enrich_workers,
     _first_existing_candidate_result,
     _first_existing_gaia_binary_input,
+    _load_review_import_state,
     _metadata_frame_digest,
+    _prepare_downstream_stage,
     _prune_resolved_event_errors,
+    _record_review_artifact,
     _reconcile_cached_event_rows,
     load_side_table,
     load_passing_table,
@@ -36,11 +42,13 @@ from malca.stv.pipeline import (
     _run_gaia_binary_enrichment,
     _run_external_lcs_enrichment,
     _run_multi_survey_features_enrichment,
+    _review_artifact_needs_import,
     _select_passing_candidates,
     _should_skip_filter_stage,
     _stage_defaults_to_extended_enrichment,
     _stage_runs_downstream,
     _stage_runs_upstream,
+    _write_review_import_state,
     main as detect_main,
 )
 from malca.config import EVENTS_OUTPUT_CHUNK_SIZE
@@ -75,6 +83,105 @@ def test_event_branch_metadata_digest_rejects_non_scalar_values() -> None:
 
     with pytest.raises(ValueError, match="requires scalar values"):
         _metadata_frame_digest(frame)
+
+
+def test_downstream_stage_reuses_only_matching_complete_output(tmp_path: Path) -> None:
+    frame = pd.DataFrame({"candidate_id": ["C1", "C2"]})
+    input_path = tmp_path / "input.parquet"
+    output_path = tmp_path / "output.parquet"
+    state_path = tmp_path / "OUTPUT_STAGE.json"
+    frame.to_parquet(input_path, index=False)
+    frame.to_parquet(output_path, index=False)
+    fingerprint = _downstream_stage_fingerprint(
+        stage="test_stage",
+        stage_version="1",
+        frame=frame,
+        input_paths=[input_path],
+        settings={"radius": 2.0},
+        code_paths=(),
+    )
+
+    assert not _prepare_downstream_stage(
+        stage="test_stage",
+        fingerprint=fingerprint,
+        state_path=state_path,
+        output_path=output_path,
+        expected=2,
+        overwrite=False,
+        logger=lambda _message: None,
+    )
+    _complete_downstream_stage(
+        stage="test_stage",
+        fingerprint=fingerprint,
+        state_path=state_path,
+        output_paths=(output_path,),
+        expected=2,
+    )
+    assert _prepare_downstream_stage(
+        stage="test_stage",
+        fingerprint=fingerprint,
+        state_path=state_path,
+        output_path=output_path,
+        expected=2,
+        overwrite=False,
+        logger=lambda _message: None,
+    )
+
+
+def test_completed_legacy_characterization_is_adopted(tmp_path: Path) -> None:
+    output_path = tmp_path / "characterized.parquet"
+    state_path = tmp_path / "CHARACTERIZED_STAGE.json"
+    frame = pd.DataFrame(
+        {
+            "candidate_id": ["C1"],
+            "characterization_status_version": ["2"],
+            "char_status_population": ["ok"],
+            "char_status_unwise": ["disabled"],
+        }
+    )
+    frame.to_parquet(output_path, index=False)
+    fingerprint = _downstream_stage_fingerprint(
+        stage="characterization",
+        stage_version="1",
+        frame=frame,
+        input_paths=[],
+        settings={},
+        code_paths=(),
+    )
+    _adopt_completed_characterization_output(
+        output_path=output_path,
+        checkpoint_path=tmp_path / "CHECKPOINT.parquet",
+        state_path=state_path,
+        fingerprint=fingerprint,
+        candidate_ids=["C1"],
+        enabled_modules={"population": True, "unwise": False},
+        logger=lambda _message: None,
+    )
+    assert _prepare_downstream_stage(
+        stage="characterization",
+        fingerprint=fingerprint,
+        state_path=state_path,
+        output_path=output_path,
+        expected=1,
+        overwrite=False,
+        logger=lambda _message: None,
+    )
+
+
+def test_review_import_state_skips_unchanged_artifact(tmp_path: Path) -> None:
+    db_path = tmp_path / "review.db"
+    artifact_path = tmp_path / "rows.parquet"
+    state_path = tmp_path / "review_import_state.json"
+    db_path.write_bytes(b"sqlite placeholder")
+    artifact_path.write_bytes(b"first")
+    state = _load_review_import_state(state_path, db_path)
+    _record_review_artifact(state, "rows", artifact_path, rows=1)
+    _write_review_import_state(state_path, db_path, state)
+
+    loaded = _load_review_import_state(state_path, db_path)
+    assert not _review_artifact_needs_import(loaded, "rows", artifact_path)[0]
+    artifact_path.write_bytes(b"changed")
+    assert _review_artifact_needs_import(loaded, "rows", artifact_path)[0]
 
 
 def test_detection_summary_counts_layer_first_significance() -> None:
@@ -503,6 +610,7 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
     args.periodicity_all_candidates = True
     args.periodicity_workers = 2
     args.periodicity_checkpoint_dir = Path("output/checkpoints")
+    args.periodicity_reuse_from = Path("output/previous_periodicity.parquet")
     args.phase_plot_max_sig = 0.05
     args.phase_plot_min_power = 0.5
     args.phase_plot_allow_alias = True
@@ -535,6 +643,7 @@ def test_build_filter_kwargs_respects_cli_overrides() -> None:
     assert kwargs["periodicity_all_candidates"] is True
     assert kwargs["periodicity_workers"] == 2
     assert kwargs["periodicity_checkpoint_dir"] == Path("output/checkpoints")
+    assert kwargs["periodicity_reuse_from"] == Path("output/previous_periodicity.parquet")
 
     assert kwargs["phase_plot_max_sig"] == 0.05
     assert kwargs["phase_plot_min_power"] == 0.5
@@ -691,6 +800,7 @@ def test_build_home_external_validation_cmd_forwards_periodicity_options() -> No
     args.periodicity_all_candidates = True
     args.periodicity_workers = 2
     args.periodicity_checkpoint_dir = Path("output/checkpoints")
+    args.periodicity_reuse_from = Path("output/previous_periodicity.parquet")
     args.phase_plot_max_sig = 0.05
     args.phase_plot_min_power = 0.5
     args.phase_plot_allow_alias = True
@@ -716,6 +826,8 @@ def test_build_home_external_validation_cmd_forwards_periodicity_options() -> No
     assert "2" in cmd
     assert "--checkpoint-dir" in cmd
     assert "output/checkpoints" in cmd
+    assert "--periodicity-reuse-from" in cmd
+    assert "output/previous_periodicity.parquet" in cmd
     assert "--phase-plot-max-sig" in cmd
     assert "0.05" in cmd
     assert "--phase-plot-min-power" in cmd

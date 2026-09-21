@@ -26,7 +26,7 @@ from malca.enrich.spectra_queries import query_spectra_catalog_group
 from malca.enrich.transient_spectra import run_transient_spectra_enrichment
 from malca.products.candidates import select_passing_candidates_if_present
 from malca.config import SPECTRA_RADIUS_ARCSEC, SPECTRA_CHUNK_SIZE, SPECTRA_TAP_CHUNK_SIZE, SPECTRA_TAP_TIMEOUT
-from malca.io.table_io import read_feature_table
+from malca.io.table_io import read_feature_table, write_parquet_table
 
 
 SPECTRA_REDSHIFT_COLUMNS: tuple[str, ...] = (
@@ -70,6 +70,7 @@ SPECTRUM_RECORD_ID_COLUMNS: tuple[str, ...] = (
     "sobject_id", "SOBJECT_ID", "RAVEID", "APOGEE_ID", "ID",
     "TARGETID", "TargetID", "targetid", "source_id", "SOURCE_ID", "Source",
 )
+SPECTRA_COVERAGE_FILE = "spectra_coverage.parquet"
 
 
 def _first_numeric_column(frame: pd.DataFrame, columns: tuple[str, ...]) -> pd.Series:
@@ -566,6 +567,30 @@ def run_spectra_availability(
     coords = coords.drop_duplicates(subset=["candidate_id"])
     coords["candidate_id"] = coords["candidate_id"].astype(str)
 
+    coverage_path = out_dir / SPECTRA_COVERAGE_FILE
+    coverage = pd.DataFrame()
+    covered_ids: set[str] = set()
+    catalog_signature = json.dumps(
+        {str(key): str(value) for key, value in catalog_map.items()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if coverage_path.exists():
+        try:
+            coverage = pd.read_parquet(coverage_path)
+            valid = (
+                coverage.get("status", pd.Series(dtype=str)).astype(str).isin({"ok", "no_coordinates"})
+                & pd.to_numeric(
+                    coverage.get("radius_arcsec", pd.Series(index=coverage.index, dtype=float)),
+                    errors="coerce",
+                ).eq(float(radius_arcsec))
+                & coverage.get("catalogs_json", pd.Series(dtype=str)).astype(str).eq(catalog_signature)
+            )
+            covered_ids = set(coverage.loc[valid, "candidate_id"].astype(str))
+        except Exception:
+            coverage = pd.DataFrame()
+            covered_ids = set()
+
     ckpt_df = pd.DataFrame()
     cached_ids: set[str] = set()
     if checkpoint_path and Path(checkpoint_path).exists():
@@ -577,10 +602,11 @@ def run_spectra_availability(
         except Exception:
             ckpt_df = pd.DataFrame()
 
-    coords_todo = coords[~coords["candidate_id"].isin(cached_ids)] if cached_ids else coords
+    completed_ids = covered_ids | cached_ids
+    coords_todo = coords[~coords["candidate_id"].isin(completed_ids)] if completed_ids else coords
 
     cache_df = pd.DataFrame()
-    if not cached_ids and cache_file and Path(cache_file).exists():
+    if cache_file and Path(cache_file).exists():
         try:
             cache_df = pd.read_parquet(cache_file)
         except Exception:
@@ -599,8 +625,8 @@ def run_spectra_availability(
             tap_chunk_size=tap_chunk_size,
             status_rows=status_rows,
         )
-    elif cached_ids:
-        print(f"[spectra] All {len(coords)} candidates already in checkpoint, skipping queries")
+    elif completed_ids:
+        print(f"[spectra] All {len(coords)} candidates already covered, skipping queries")
 
     parts = [p for p in [ckpt_df, cache_df, fresh] if not p.empty]
     spectra_long = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
@@ -634,6 +660,38 @@ def run_spectra_availability(
     _write_spectra_parquet(spectra_long, out_dir / "spectra_long.parquet", compression="zstd")
     summary.to_parquet(out_dir / "spectra_summary.parquet", index=False, compression="zstd")
     _write_spectra_parquet(_spectra_query_status_frame(status_rows), out_dir / "spectra_query_status.parquet", compression="zstd")
+
+    query_failed = any(
+        str(row.get("status", "")).lower() in {"error", "timeout", "failed"}
+        for row in status_rows
+    )
+    coverage_rows = [] if coverage.empty else coverage.to_dict("records")
+    if not query_failed:
+        coverage_rows.extend(
+            {
+                "candidate_id": str(candidate_id),
+                "status": "ok",
+                "radius_arcsec": float(radius_arcsec),
+                "catalogs_json": catalog_signature,
+            }
+            for candidate_id in coords_todo["candidate_id"].astype(str)
+        )
+    valid_coord_ids = set(coords["candidate_id"].astype(str))
+    coverage_rows.extend(
+        {
+            "candidate_id": str(candidate_id),
+            "status": "no_coordinates",
+            "radius_arcsec": float(radius_arcsec),
+            "catalogs_json": catalog_signature,
+        }
+        for candidate_id in df_use["candidate_id"].astype(str)
+        if str(candidate_id) not in valid_coord_ids
+    )
+    if coverage_rows:
+        coverage_out = pd.DataFrame(coverage_rows).drop_duplicates(
+            subset=["candidate_id", "radius_arcsec", "catalogs_json"], keep="last"
+        )
+        write_parquet_table(coverage_out, coverage_path, compression="snappy")
 
     if checkpoint_path and Path(checkpoint_path).exists():
         Path(checkpoint_path).unlink()

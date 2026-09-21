@@ -301,3 +301,39 @@ def test_run_spectra_availability_records_xmatch_query_failure(monkeypatch, tmp_
     assert status.loc[0, "mode"] == "xmatch"
     assert status.loc[0, "status"] == "error"
     assert "not available" in status.loc[0, "error_message"]
+
+
+def test_spectra_enrichment_remembers_zero_match_candidates(monkeypatch, tmp_path: Path) -> None:
+    targets = pd.DataFrame(
+        [
+            {"candidate_id": "C1", "ra_deg": 10.0, "dec_deg": 20.0},
+            {"candidate_id": "C2", "ra_deg": 11.0, "dec_deg": 21.0},
+        ]
+    )
+    calls: list[int] = []
+
+    def no_matches(coords, *, status_rows, **_kwargs):
+        calls.append(len(coords))
+        status_rows.append({"catalog": "test/catalog", "status": "no_data"})
+        return pd.DataFrame()
+
+    monkeypatch.setattr("malca.enrich.spectra._query_all_catalogs", no_matches)
+    out_dir = tmp_path / "spectra"
+    run_spectra_availability(
+        targets,
+        out_dir=out_dir,
+        catalogs={"test": "test/catalog"},
+        merge_provenance_from_input=False,
+    )
+    assert calls == [2]
+
+    calls.clear()
+    run_spectra_availability(
+        targets,
+        out_dir=out_dir,
+        catalogs={"test": "test/catalog"},
+        merge_provenance_from_input=False,
+    )
+    assert calls == []
+    coverage = pd.read_parquet(out_dir / "spectra_coverage.parquet")
+    assert set(coverage["candidate_id"]) == {"C1", "C2"}

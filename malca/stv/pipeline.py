@@ -133,6 +133,7 @@ from malca.stv.tag import (
     filter_camera_medians,
 )
 from malca.products.feature_layers import expand_feature_layers, to_layer_first_frame, with_feature_columns
+from malca.products.enriched_refresh import refreshed_enriched_is_current
 from malca.io.table_io import (
     read_feature_table,
     read_parquet_table,
@@ -239,6 +240,7 @@ RUN_REUSE_PARAM_ATTRS = (
     "periodicity_no_exclude_aliases",
     "periodicity_reject",
     "periodicity_checkpoint_dir",
+    "periodicity_reuse_from",
     "periodicity_all_candidates",
     "phase_plot_max_sig",
     "phase_plot_min_power",
@@ -456,7 +458,7 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "jump_morphology": "paczynski",
     "min_delta_bic": 10.0,
     "apply_periodicity_validation": False,
-    "periodicity_n_bootstrap": 1000,
+    "periodicity_n_bootstrap": 0,
     "periodicity_significance": 0.01,
     "periodicity_pdm_method": POST_FILTER_PDM_METHOD,
     "periodicity_no_exclude_aliases": False,
@@ -464,6 +466,7 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "periodicity_all_candidates": False,
     "periodicity_workers": WORKERS,
     "periodicity_checkpoint_dir": None,
+    "periodicity_reuse_from": None,
     "phase_plot_max_sig": 0.01,
     "phase_plot_min_power": 0.3,
     "phase_plot_allow_alias": False,
@@ -501,6 +504,7 @@ PIPELINE_CONFIG_DEFAULTS: dict[str, Any] = {
     "sed_fetch_chunk_size": 500,
     "sed_fetch_max_attempts": 3,
     "sed_fetch_retry_base_seconds": 1.0,
+    "sed_fit_batch_size": 250,
     "fit_atmosphere": True,
     "run_classify": True,
     "run_enrich": True,
@@ -558,6 +562,7 @@ PIPELINE_CONFIG_PATH_KEYS = {
     "export_bundle",
     "review_sync_dir",
     "periodicity_checkpoint_dir",
+    "periodicity_reuse_from",
     "gaia_cache",
     "characterize_crossmatch",
     "characterize_starhorse_cache",
@@ -642,7 +647,7 @@ def _run_input_inventory(
 ) -> list[dict[str, Any]]:
     """Return cheap signatures that detect additions/removals/remapped inputs."""
     paths: list[Path] = []
-    for attr in ("import_bundle", "manifest_file", "filtered_file"):
+    for attr in ("import_bundle", "manifest_file", "filtered_file", "periodicity_reuse_from"):
         raw_value = getattr(args, attr, None)
         if raw_value is not None:
             paths.append(Path(raw_value).expanduser())
@@ -972,13 +977,32 @@ def _run_multi_survey_features_enrichment(
     *,
     results_dir: Path,
     external_lc_dir: Path,
+    checkpoint_dir: Path | None = None,
+    batch_size: int = 250,
+    reuse_checkpoints: bool = True,
+    progress_callback=None,
 ) -> tuple[Path, pd.DataFrame]:
     """Compute event-relative multi-survey features and write the enriched table."""
-    from malca.enrichment.multi_survey_features import compute_multi_survey_features
+    from malca.enrichment.multi_survey_features import (
+        compute_multi_survey_features,
+        compute_multi_survey_features_batched,
+    )
 
     output_path = results_dir / "lc_events_multi_survey_features.parquet"
     df_run = _ensure_candidate_id_column(_select_passing_candidates(df_input))
-    df_out = compute_multi_survey_features(df_run, external_lc_dir=external_lc_dir)
+    if checkpoint_dir is None:
+        df_out = compute_multi_survey_features(
+            df_run, external_lc_dir=external_lc_dir
+        )
+    else:
+        df_out = compute_multi_survey_features_batched(
+            df_run,
+            external_lc_dir=external_lc_dir,
+            checkpoint_dir=checkpoint_dir,
+            batch_size=batch_size,
+            reuse_checkpoints=reuse_checkpoints,
+            progress_callback=progress_callback,
+        )
     save_table(df_out, output_path)
     return output_path, df_out
 
@@ -1083,6 +1107,249 @@ def _copy_single_tagged_table_output(tagged_outputs: list[Path], merged_path: Pa
 def _ensure_candidate_id_column(df: pd.DataFrame) -> pd.DataFrame:
     """Ensure downstream enrichment has a candidate_id key when one can be inferred."""
     return add_stv_identity(df)
+
+
+def _downstream_stage_fingerprint(
+    *,
+    stage: str,
+    stage_version: str,
+    frame: pd.DataFrame,
+    input_paths: list[Path],
+    settings: dict[str, object],
+    code_paths: tuple[str, ...],
+) -> dict[str, object]:
+    identified = _ensure_candidate_id_column(frame)
+    return build_stage_fingerprint(
+        stage=stage,
+        stage_version=stage_version,
+        candidate_ids=identified["candidate_id"].astype(str).tolist(),
+        input_paths=input_paths,
+        settings=settings,
+        code_base=Path(__file__).resolve().parent.parent,
+        code_paths=code_paths,
+        hash_input_contents=False,
+    )
+
+
+def _prepare_downstream_stage(
+    *,
+    stage: str,
+    fingerprint: dict[str, object],
+    state_path: Path,
+    output_path: Path,
+    expected: int,
+    overwrite: bool,
+    checkpoint_paths: tuple[Path, ...] = (),
+    logger=print,
+) -> bool:
+    """Return True only for a provenance-matched, successfully completed output."""
+    if overwrite:
+        state_path.unlink(missing_ok=True)
+        for checkpoint_path in checkpoint_paths:
+            checkpoint_path.unlink(missing_ok=True)
+    elif output_path.exists():
+        try:
+            assert_reusable_stage_state(
+                read_stage_state(state_path),
+                fingerprint=fingerprint,
+                require_complete=True,
+            )
+        except ValueError as exc:
+            logger(f"{stage}: existing output is not reusable ({exc}); recomputing")
+        else:
+            logger(f"{stage}: reusing completed output {output_path}")
+            return True
+
+    if not overwrite and any(path.exists() for path in checkpoint_paths):
+        try:
+            assert_reusable_stage_state(
+                read_stage_state(state_path),
+                fingerprint=fingerprint,
+                require_complete=False,
+            )
+        except ValueError as exc:
+            logger(f"{stage}: discarding incompatible checkpoint ({exc})")
+            for checkpoint_path in checkpoint_paths:
+                checkpoint_path.unlink(missing_ok=True)
+
+    write_stage_state(
+        state_path,
+        fingerprint=fingerprint,
+        result=StageResult(stage=stage, status="running", expected=int(expected)),
+    )
+    return False
+
+
+def _adopt_legacy_candidate_checkpoint(
+    *,
+    stage: str,
+    checkpoint_path: Path,
+    state_path: Path,
+    fingerprint: dict[str, object],
+    candidate_ids: list[str],
+    logger=print,
+) -> None:
+    """Attach state to an older checkpoint only when its candidate set is exact."""
+    if state_path.exists() or not checkpoint_path.exists():
+        return
+    try:
+        checkpoint_ids = pd.read_parquet(
+            checkpoint_path, columns=["candidate_id"]
+        )["candidate_id"].astype(str).tolist()
+        if len(checkpoint_ids) != len(candidate_ids) or set(checkpoint_ids) != set(candidate_ids):
+            return
+    except Exception:
+        return
+    write_stage_state(
+        state_path,
+        fingerprint=fingerprint,
+        result=StageResult(stage=stage, status="running", expected=len(candidate_ids)),
+    )
+    logger(f"{stage}: adopted compatible legacy checkpoint {checkpoint_path}")
+
+
+def _adopt_completed_characterization_output(
+    *,
+    output_path: Path,
+    checkpoint_path: Path,
+    state_path: Path,
+    fingerprint: dict[str, object],
+    candidate_ids: list[str],
+    enabled_modules: dict[str, bool],
+    logger=print,
+) -> None:
+    """Validate and adopt a completed pre-stage-state characterization table."""
+    if state_path.exists() or checkpoint_path.exists() or not output_path.exists():
+        return
+    status_columns = [f"char_status_{module}" for module in enabled_modules]
+    try:
+        completed = pd.read_parquet(
+            output_path,
+            columns=["candidate_id", "characterization_status_version", *status_columns],
+        )
+        observed_ids = completed["candidate_id"].astype(str).tolist()
+        if len(observed_ids) != len(candidate_ids) or set(observed_ids) != set(candidate_ids):
+            return
+        if not completed["characterization_status_version"].astype(str).eq("2").all():
+            return
+        terminal = {"ok", "no_data", "not_applicable", "skipped"}
+        for module, enabled in enabled_modules.items():
+            statuses = set(completed[f"char_status_{module}"].dropna().astype(str))
+            allowed = terminal if enabled else terminal | {"disabled"}
+            if not statuses or not statuses.issubset(allowed):
+                return
+    except Exception:
+        return
+    _complete_downstream_stage(
+        stage="characterization",
+        fingerprint=fingerprint,
+        state_path=state_path,
+        output_paths=(output_path,),
+        expected=len(candidate_ids),
+    )
+    logger(f"characterization: adopted validated completed output {output_path}")
+
+
+def _complete_downstream_stage(
+    *,
+    stage: str,
+    fingerprint: dict[str, object],
+    state_path: Path,
+    output_paths: tuple[Path, ...],
+    expected: int,
+) -> None:
+    write_stage_state(
+        state_path,
+        fingerprint=fingerprint,
+        result=StageResult(
+            stage=stage,
+            status="success",
+            expected=int(expected),
+            succeeded=int(expected),
+        ),
+        outputs=output_paths,
+    )
+
+
+def _load_review_import_state(state_path: Path, db_path: Path) -> dict[str, object]:
+    if not state_path.exists() or not db_path.exists():
+        return {"version": 1, "artifacts": {}}
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        db_stat = db_path.stat()
+        if (
+            state.get("version") != 1
+            or int(state.get("db_inode", -1)) != int(db_stat.st_ino)
+            or not isinstance(state.get("artifacts"), dict)
+        ):
+            raise ValueError("stale review import state")
+        return state
+    except Exception:
+        return {"version": 1, "artifacts": {}}
+
+
+def _write_review_import_state(state_path: Path, db_path: Path, state: dict[str, object]) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(state)
+    payload["version"] = 1
+    payload["db_inode"] = int(db_path.stat().st_ino)
+    temporary = state_path.with_name(f".{state_path.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, state_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _review_artifact_needs_import(
+    state: dict[str, object], label: str, path: Path
+) -> tuple[bool, dict[str, object]]:
+    current = file_signature(path, content_hash=False)
+    artifacts = state.setdefault("artifacts", {})
+    stored = artifacts.get(label) if isinstance(artifacts, dict) else None
+    if isinstance(stored, dict):
+        same_metadata = all(
+            stored.get(key) == current.get(key) for key in ("path", "exists", "size", "mtime_ns")
+        )
+        if same_metadata:
+            return False, stored
+        if stored.get("sha256") and path.exists():
+            hashed = file_signature(path, content_hash=True)
+            if stored.get("sha256") == hashed.get("sha256"):
+                return False, hashed
+    return True, current
+
+
+def _record_review_artifact(
+    state: dict[str, object], label: str, path: Path, *, rows: int
+) -> None:
+    artifacts = state.setdefault("artifacts", {})
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+        state["artifacts"] = artifacts
+    signature = file_signature(path, content_hash=True)
+    signature["rows"] = int(rows)
+    artifacts[label] = signature
+
+
+def _iter_parquet_batches(path: Path, *, batch_rows: int = 25_000):
+    import pyarrow.parquet as pq
+
+    parquet = pq.ParquetFile(path)
+    for batch in parquet.iter_batches(batch_size=max(1, int(batch_rows))):
+        yield batch.to_pandas()
+
+
+def _read_parquet_candidate_subset(path: Path, candidate_ids: list[str]) -> pd.DataFrame:
+    if not path.exists() or not candidate_ids:
+        return pd.DataFrame()
+    try:
+        return pd.read_parquet(path, filters=[("candidate_id", "in", candidate_ids)])
+    except Exception:
+        frame = load_side_table(path)
+        if "candidate_id" not in frame.columns:
+            return frame.iloc[0:0]
+        return frame[frame["candidate_id"].astype(str).isin(candidate_ids)].copy()
 
 
 def _branch_events_attempted_this_run(branch_detection_stats: dict[str, object] | None) -> int | None:
@@ -1523,6 +1790,7 @@ def _build_filter_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "periodicity_flag_only": not args.periodicity_reject,
         "periodicity_workers": args.periodicity_workers,
         "periodicity_checkpoint_dir": args.periodicity_checkpoint_dir,
+        "periodicity_reuse_from": _config_arg(args, "periodicity_reuse_from"),
         "periodicity_all_candidates": args.periodicity_all_candidates,
         "phase_plot_max_sig": args.phase_plot_max_sig,
         "phase_plot_min_power": args.phase_plot_min_power,
@@ -1619,6 +1887,9 @@ def _build_home_external_validation_cmd(
             cmd.append("--phase-plot-allow-alias")
         if args.periodicity_checkpoint_dir:
             cmd.extend(["--checkpoint-dir", str(args.periodicity_checkpoint_dir)])
+        reuse_from = _config_arg(args, "periodicity_reuse_from")
+        if reuse_from:
+            cmd.extend(["--periodicity-reuse-from", str(reuse_from)])
 
     if args.gaia_reject:
         cmd.append("--gaia-reject")
@@ -1804,6 +2075,12 @@ def main():
         dest="fit_atmosphere",
         action="store_true",
         help="Enable mandatory pystellibs Castelli/Kurucz atmosphere fitting after SED photometry.",
+    )
+    g_sed.add_argument(
+        "--sed-fit-batch-size",
+        type=int,
+        default=250,
+        help="Candidates per resumable SED atmosphere-fit checkpoint (default: 250).",
     )
     g_sed.add_argument(
         "--no-fit-atmosphere",
@@ -2245,6 +2522,7 @@ def main():
             "periodicity_flag_only": not args.periodicity_reject,
             "periodicity_workers": args.periodicity_workers,
             "periodicity_checkpoint_dir": str(args.periodicity_checkpoint_dir) if args.periodicity_checkpoint_dir else None,
+            "periodicity_reuse_from": str(args.periodicity_reuse_from) if args.periodicity_reuse_from else None,
             "periodicity_all_candidates": args.periodicity_all_candidates,
             "phase_plot_max_sig": args.phase_plot_max_sig,
             "phase_plot_min_power": args.phase_plot_min_power,
@@ -2437,6 +2715,7 @@ def main():
             "periodicity_reject": args.periodicity_reject,
             "periodicity_workers": args.periodicity_workers,
             "periodicity_checkpoint_dir": str(args.periodicity_checkpoint_dir) if args.periodicity_checkpoint_dir else None,
+            "periodicity_reuse_from": str(args.periodicity_reuse_from) if args.periodicity_reuse_from else None,
             "phase_plot_max_sig": args.phase_plot_max_sig,
             "phase_plot_min_power": args.phase_plot_min_power,
             "phase_plot_allow_alias": args.phase_plot_allow_alias,
@@ -3766,6 +4045,9 @@ def main():
         log("\n=== Merging per-mag-bin outputs ===")
         merge_started = time.perf_counter()
         for merge_prefix in ("lc_events_results", "lc_events_filtered", "lc_events_enriched"):
+            if merge_prefix == "lc_events_enriched" and stage == "home" and refreshed_enriched_is_current(results_dir):
+                log("Using the refreshed standard enriched table; cluster statistics are archived in backups")
+                continue
             pattern = f"{merge_prefix}_*" if merge_prefix == "lc_events_results" else f"{merge_prefix}_*.parquet"
             tagged_outputs = sorted(results_dir.glob(pattern))
             # Exclude checkpoint and temp files from merging
@@ -3892,30 +4174,96 @@ def main():
 
             # Use full characterize pipeline (single source of truth)
             char_checkpoint = results_dir / "lc_events_characterized_CHECKPOINT.parquet"
-            if args.overwrite and char_checkpoint.exists():
-                char_checkpoint.unlink()
-
-            starhorse_arg = args.characterize_starhorse if args.run_characterize else None
-            df_char = characterize_candidates_df(
-                df_char,
-                crossmatch=args.characterize_crossmatch.expanduser(),
-                chunk_size=args.characterize_chunk_size,
-                cache=args.gaia_cache.expanduser() if args.gaia_cache else (out_dir / "gaia_cache" / "gaia_cache.parquet"),
-                dust=args.run_dust,
-                starhorse=starhorse_arg,
-                starhorse_cache=args.characterize_starhorse_cache.expanduser() if args.characterize_starhorse_cache else None,
-                run_banyan=args.run_characterize and args.characterize_banyan,
-                run_iphas=args.run_characterize and args.characterize_iphas,
-                run_sfr=args.run_characterize and args.characterize_sfr,
-                run_clusters=args.run_characterize and args.characterize_clusters,
-                run_unwise=args.run_characterize and args.characterize_unwise,
-                unwise_checkpoint_every=args.characterize_unwise_checkpoint_every,
-                checkpoint_path=char_checkpoint,
-            )
-
             characterize_output = results_dir / "lc_events_characterized.parquet"
-            save_table(df_char, characterize_output)
-            log(f"Characterization results saved to {characterize_output}")
+            starhorse_arg = args.characterize_starhorse if args.run_characterize else None
+            char_state_path = results_dir / "lc_events_characterized_STAGE.json"
+            char_fingerprint = _downstream_stage_fingerprint(
+                stage="characterization",
+                stage_version="1",
+                frame=df_char,
+                input_paths=[post_filter_output, args.characterize_crossmatch.expanduser()],
+                settings={
+                    "chunk_size": int(args.characterize_chunk_size),
+                    "dust": bool(args.run_dust),
+                    "starhorse": str(starhorse_arg or ""),
+                    "banyan": bool(args.run_characterize and args.characterize_banyan),
+                    "iphas": bool(args.run_characterize and args.characterize_iphas),
+                    "sfr": bool(args.run_characterize and args.characterize_sfr),
+                    "clusters": bool(args.run_characterize and args.characterize_clusters),
+                    "unwise": bool(args.run_characterize and args.characterize_unwise),
+                },
+                code_paths=("enrichment/characterize.py", "enrichment/banyan.py"),
+            )
+            char_candidate_ids = _ensure_candidate_id_column(df_char)["candidate_id"].astype(str).tolist()
+            _adopt_completed_characterization_output(
+                output_path=characterize_output,
+                checkpoint_path=char_checkpoint,
+                state_path=char_state_path,
+                fingerprint=char_fingerprint,
+                candidate_ids=char_candidate_ids,
+                enabled_modules={
+                    "population": True,
+                    "starhorse": bool(starhorse_arg),
+                    "dust": bool(args.run_dust),
+                    "allwise": True,
+                    "yso": True,
+                    "apass": True,
+                    "galex": True,
+                    "banyan": bool(args.run_characterize and args.characterize_banyan),
+                    "iphas": bool(args.run_characterize and args.characterize_iphas),
+                    "vphas": True,
+                    "sfr": bool(args.run_characterize and args.characterize_sfr),
+                    "clusters": bool(args.run_characterize and args.characterize_clusters),
+                    "unwise": bool(args.run_characterize and args.characterize_unwise),
+                },
+                logger=log,
+            )
+            _adopt_legacy_candidate_checkpoint(
+                stage="characterization",
+                checkpoint_path=char_checkpoint,
+                state_path=char_state_path,
+                fingerprint=char_fingerprint,
+                candidate_ids=char_candidate_ids,
+                logger=log,
+            )
+            reused_characterization = _prepare_downstream_stage(
+                stage="characterization",
+                fingerprint=char_fingerprint,
+                state_path=char_state_path,
+                output_path=characterize_output,
+                expected=len(df_char),
+                overwrite=bool(args.overwrite),
+                checkpoint_paths=(char_checkpoint,),
+                logger=log,
+            )
+            if not reused_characterization:
+                df_char = characterize_candidates_df(
+                    df_char,
+                    crossmatch=args.characterize_crossmatch.expanduser(),
+                    chunk_size=args.characterize_chunk_size,
+                    cache=args.gaia_cache.expanduser() if args.gaia_cache else (out_dir / "gaia_cache" / "gaia_cache.parquet"),
+                    dust=args.run_dust,
+                    starhorse=starhorse_arg,
+                    starhorse_cache=args.characterize_starhorse_cache.expanduser() if args.characterize_starhorse_cache else None,
+                    run_banyan=args.run_characterize and args.characterize_banyan,
+                    run_iphas=args.run_characterize and args.characterize_iphas,
+                    run_sfr=args.run_characterize and args.characterize_sfr,
+                    run_clusters=args.run_characterize and args.characterize_clusters,
+                    run_unwise=args.run_characterize and args.characterize_unwise,
+                    unwise_checkpoint_every=args.characterize_unwise_checkpoint_every,
+                    checkpoint_path=char_checkpoint,
+                    banyan_reuse_from=characterize_output if not args.overwrite else None,
+                )
+
+                save_table(df_char, characterize_output)
+                _complete_downstream_stage(
+                    stage="characterization",
+                    fingerprint=char_fingerprint,
+                    state_path=char_state_path,
+                    output_paths=(characterize_output,),
+                    expected=len(df_char),
+                )
+                log(f"Characterization results saved to {characterize_output}")
             log(f"Step 8 completed in {time.perf_counter() - characterize_started:.1f}s")
 
         except Exception as e:
@@ -4114,7 +4462,9 @@ def main():
                     SED_MODEL_CURVE_COLUMNS,
                     SED_MODEL_FIT_COLUMNS,
                     SED_MODEL_POINT_COLUMNS,
-                    fit_sed_models,
+                    SED_MODEL_FIT_VERSION,
+                    fit_sed_models_batched,
+                    sed_fit_recipe_hash,
                 )
 
                 characterize_output = results_dir / "lc_events_characterized.parquet"
@@ -4134,15 +4484,46 @@ def main():
                 else:
                     sed_rows_for_model = load_side_table(sed_photometry_output)
                     log(f"SED model input: {len(df_model_in)} passing candidates; {len(sed_rows_for_model)} SED rows")
-                    sed_model_fits, sed_model_curves, sed_model_points = fit_sed_models(
+                    fit_batch_size = max(int(args.sed_fit_batch_size), 1)
+                    candidate_ids = [
+                        str(value)
+                        for value in ensure_candidate_id(df_model_in, prefix="stv")["candidate_id"]
+                    ]
+                    checkpoint_payload = {
+                        "fit_version": SED_MODEL_FIT_VERSION,
+                        "fit_recipe_hash": sed_fit_recipe_hash(),
+                        "batch_size": fit_batch_size,
+                        "candidate_ids_sha256": hashlib.sha256(
+                            "\n".join(candidate_ids).encode("utf-8")
+                        ).hexdigest(),
+                        "candidate_input": file_signature(
+                            characterize_output if characterize_output.exists() else post_filter_output,
+                            content_hash=True,
+                        ),
+                        "photometry_input": file_signature(
+                            sed_photometry_output,
+                            content_hash=True,
+                        ),
+                    }
+                    checkpoint_key = hashlib.sha256(
+                        json.dumps(
+                            checkpoint_payload,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()[:16]
+                    checkpoint_dir = results_dir / "sed_model_fit_batches" / checkpoint_key
+                    log(
+                        f"SED model checkpoints: {checkpoint_dir} "
+                        f"({fit_batch_size} candidates per batch)"
+                    )
+                    sed_model_fits, sed_model_curves, sed_model_points = fit_sed_models_batched(
                         df_model_in,
                         sed_rows_for_model,
+                        checkpoint_dir=checkpoint_dir,
+                        batch_size=fit_batch_size,
                         progress_callback=log,
-                        return_points=True,
-                        # The pystellibs interpolation path is CPU/GIL bound;
-                        # candidate-level threads are opt-in via sed-photometry
-                        # until a process-safe model-grid backend is available.
-                        workers=1,
+                        reuse_checkpoints=not args.overwrite,
                     )
                     for col in SED_MODEL_FIT_COLUMNS:
                         if col not in sed_model_fits.columns:
@@ -4278,30 +4659,76 @@ def main():
                     neighbor_dir = results_dir / "neighbor_enrichment"
                     neighbor_cache = args.neighbor_cache.expanduser() if args.neighbor_cache else (neighbor_dir / "neighbors_cache.parquet")
                     neighbor_checkpoint = neighbor_dir / "neighbors_CHECKPOINT.parquet"
-                    if args.overwrite and neighbor_checkpoint.exists():
-                        neighbor_checkpoint.unlink()
-                    df_neighbors_long, df_neighbor_summary = run_neighbor_enrichment(
-                        df_neighbors_in,
-                        out_dir=neighbor_dir,
-                        radius_arcsec=args.neighbor_radius_arcsec,
-                        chunk_size=args.neighbor_chunk_size,
-                        cache_file=neighbor_cache,
-                        checkpoint_path=neighbor_checkpoint,
-                        show_progress=args.verbose,
+                    neighbor_output = results_dir / "lc_events_neighbors.parquet"
+                    neighbor_state_path = neighbor_dir / "NEIGHBORS_STAGE.json"
+                    neighbor_fingerprint = _downstream_stage_fingerprint(
+                        stage="neighbor_enrichment",
+                        stage_version="1",
+                        frame=df_neighbors_in,
+                        input_paths=[candidate_path for candidate_path in [classify_output, characterize_output, enrich_output, post_filter_output] if candidate_path.exists()][:1],
+                        settings={
+                            "radius_arcsec": float(args.neighbor_radius_arcsec),
+                            "chunk_size": int(args.neighbor_chunk_size),
+                        },
+                        code_paths=("enrich/neighbor.py",),
                     )
-
-                    if not df_neighbor_summary.empty:
-                        merged = merge_candidate_columns(
+                    reused_neighbors = _prepare_downstream_stage(
+                        stage="neighbor_enrichment",
+                        fingerprint=neighbor_fingerprint,
+                        state_path=neighbor_state_path,
+                        output_path=neighbor_output,
+                        expected=len(df_neighbors_in),
+                        overwrite=bool(args.overwrite),
+                        checkpoint_paths=(neighbor_checkpoint,),
+                        logger=log,
+                    )
+                    if not reused_neighbors:
+                        df_neighbors_long, df_neighbor_summary = run_neighbor_enrichment(
                             df_neighbors_in,
-                            ensure_candidate_id(df_neighbor_summary, prefix="stv"),
-                            [col for col in df_neighbor_summary.columns if col != "candidate_id"],
+                            out_dir=neighbor_dir,
+                            radius_arcsec=args.neighbor_radius_arcsec,
+                            chunk_size=args.neighbor_chunk_size,
+                            cache_file=neighbor_cache,
+                            checkpoint_path=neighbor_checkpoint,
+                            show_progress=args.verbose,
                         )
-                        merged = normalize_catalog_evidence(
-                            merged,
-                            neighbors_long=df_neighbors_long,
-                            vsx_max_sep_arcsec=float(args.vsx_max_sep),
+
+                        if not df_neighbor_summary.empty:
+                            merged = merge_candidate_columns(
+                                df_neighbors_in,
+                                ensure_candidate_id(df_neighbor_summary, prefix="stv"),
+                                [col for col in df_neighbor_summary.columns if col != "candidate_id"],
+                            )
+                            merged = normalize_catalog_evidence(
+                                merged,
+                                neighbors_long=df_neighbors_long,
+                                vsx_max_sep_arcsec=float(args.vsx_max_sep),
+                            )
+                            save_table(merged, neighbor_output)
+                        else:
+                            save_table(df_neighbors_in, neighbor_output)
+                        neighbor_status_path = neighbor_dir / "neighbors_query_status.parquet"
+                        neighbor_query_status = (
+                            load_side_table(neighbor_status_path)
+                            if neighbor_status_path.exists()
+                            else pd.DataFrame()
                         )
-                        save_table(merged, results_dir / "lc_events_neighbors.parquet")
+                        neighbor_failed = (
+                            "status" in neighbor_query_status.columns
+                            and neighbor_query_status["status"].astype(str).str.lower().isin(
+                                {"error", "timeout", "failed"}
+                            ).any()
+                        )
+                        if neighbor_failed:
+                            log("Neighbor enrichment remains partial; failed catalog chunks will retry")
+                        else:
+                            _complete_downstream_stage(
+                                stage="neighbor_enrichment",
+                                fingerprint=neighbor_fingerprint,
+                                state_path=neighbor_state_path,
+                                output_paths=(neighbor_output,),
+                                expected=len(df_neighbors_in),
+                            )
 
                     summary["neighbor_enrichment_stats"] = {
                         "rows_input": int(len(df_neighbors_in)),
@@ -4355,25 +4782,71 @@ def main():
                     spectra_dir = results_dir / "spectra_enrichment"
                     spectra_cache = args.spectra_cache.expanduser() if args.spectra_cache else (spectra_dir / "spectra_cache.parquet")
                     spectra_checkpoint = spectra_dir / "spectra_CHECKPOINT.parquet"
-                    if args.overwrite and spectra_checkpoint.exists():
-                        spectra_checkpoint.unlink()
-                    _, spectra_summary = run_spectra_availability(
-                        df_spectra_in,
-                        out_dir=spectra_dir,
-                        radius_arcsec=args.spectra_radius_arcsec,
-                        chunk_size=args.spectra_chunk_size,
-                        cache_file=spectra_cache,
-                        checkpoint_path=spectra_checkpoint,
-                        show_progress=args.verbose,
+                    spectra_output = results_dir / "lc_events_spectra.parquet"
+                    spectra_state_path = spectra_dir / "SPECTRA_STAGE.json"
+                    spectra_fingerprint = _downstream_stage_fingerprint(
+                        stage="spectra_enrichment",
+                        stage_version="1",
+                        frame=df_spectra_in,
+                        input_paths=[candidate_path for candidate_path in [neighbor_output, enrich_output, classify_output, characterize_output, post_filter_output] if candidate_path.exists()][:1],
+                        settings={
+                            "radius_arcsec": float(args.spectra_radius_arcsec),
+                            "chunk_size": int(args.spectra_chunk_size),
+                        },
+                        code_paths=("enrich/spectra.py", "enrich/spectra_queries.py"),
                     )
-
-                    if not spectra_summary.empty:
-                        merged = merge_candidate_columns(
+                    reused_spectra = _prepare_downstream_stage(
+                        stage="spectra_enrichment",
+                        fingerprint=spectra_fingerprint,
+                        state_path=spectra_state_path,
+                        output_path=spectra_output,
+                        expected=len(df_spectra_in),
+                        overwrite=bool(args.overwrite),
+                        checkpoint_paths=(spectra_checkpoint,),
+                        logger=log,
+                    )
+                    if not reused_spectra:
+                        _, spectra_summary = run_spectra_availability(
                             df_spectra_in,
-                            ensure_candidate_id(spectra_summary, prefix="stv"),
-                            [col for col in spectra_summary.columns if col != "candidate_id"],
+                            out_dir=spectra_dir,
+                            radius_arcsec=args.spectra_radius_arcsec,
+                            chunk_size=args.spectra_chunk_size,
+                            cache_file=spectra_cache,
+                            checkpoint_path=spectra_checkpoint,
+                            show_progress=args.verbose,
                         )
-                        save_table(merged, results_dir / "lc_events_spectra.parquet")
+
+                        if not spectra_summary.empty:
+                            merged = merge_candidate_columns(
+                                df_spectra_in,
+                                ensure_candidate_id(spectra_summary, prefix="stv"),
+                                [col for col in spectra_summary.columns if col != "candidate_id"],
+                            )
+                            save_table(merged, spectra_output)
+                        else:
+                            save_table(df_spectra_in, spectra_output)
+                        spectra_status_path = spectra_dir / "spectra_query_status.parquet"
+                        spectra_query_status = (
+                            load_side_table(spectra_status_path)
+                            if spectra_status_path.exists()
+                            else pd.DataFrame()
+                        )
+                        spectra_failed = (
+                            "status" in spectra_query_status.columns
+                            and spectra_query_status["status"].astype(str).str.lower().isin(
+                                {"error", "timeout", "failed"}
+                            ).any()
+                        )
+                        if spectra_failed:
+                            log("Spectra enrichment remains partial; failed catalog chunks will retry")
+                        else:
+                            _complete_downstream_stage(
+                                stage="spectra_enrichment",
+                                fingerprint=spectra_fingerprint,
+                                state_path=spectra_state_path,
+                                output_paths=(spectra_output,),
+                                expected=len(df_spectra_in),
+                            )
 
                     summary["spectra_enrichment_stats"] = {
                         "rows_input": int(len(df_spectra_in)),
@@ -4431,28 +4904,80 @@ def main():
 
                 vetting_checkpoint = results_dir / "lc_events_vetting_CHECKPOINT.parquet"
                 catalog_neighbor_output_dir = results_dir / CATALOG_NEIGHBOR_OUTPUT_SUBDIR
-                df_vet = vet_candidates(
-                    df_vet,
-                    run_simbad=not args.no_vetting_simbad,
-                    run_gaia_var=not args.no_vetting_gaia_var,
-                    run_gaia_epoch=not args.no_vetting_gaia_epoch,
-                    run_asassn_var=not args.no_vetting_asassn_var,
-                    run_alerce=not args.no_vetting_alerce,
-                    run_erosita=not args.no_vetting_erosita,
-                    run_chandra_csc=not args.no_vetting_chandra_csc,
-                    run_atlas=args.vetting_atlas,
-                    run_pm_check=not args.no_vetting_pm_check,
-                    run_neowise_lc=args.vetting_neowise_lc,
-                    simbad_radius_arcsec=args.vetting_simbad_radius,
-                    asassn_radius_arcsec=args.vetting_asassn_radius,
-                    atlas_token=args.vetting_atlas_token,
-                    checkpoint_path=vetting_checkpoint,
-                    catalog_neighbor_output_dir=catalog_neighbor_output_dir,
-                    catalog_neighbor_radius_arcsec=args.vetting_catalog_neighbor_radius,
-                )
-
                 vetting_output = results_dir / "lc_events_vetted.parquet"
-                save_table(df_vet, vetting_output)
+                vetting_state_path = results_dir / "lc_events_vetted_STAGE.json"
+                vetting_settings = {
+                    "simbad": not args.no_vetting_simbad,
+                    "gaia_var": not args.no_vetting_gaia_var,
+                    "gaia_epoch": not args.no_vetting_gaia_epoch,
+                    "asassn_var": not args.no_vetting_asassn_var,
+                    "alerce": not args.no_vetting_alerce,
+                    "erosita": not args.no_vetting_erosita,
+                    "chandra": not args.no_vetting_chandra_csc,
+                    "atlas": bool(args.vetting_atlas),
+                    "pm_check": not args.no_vetting_pm_check,
+                    "neowise": bool(args.vetting_neowise_lc),
+                    "simbad_radius": float(args.vetting_simbad_radius),
+                    "asassn_radius": float(args.vetting_asassn_radius),
+                    "catalog_neighbor_radius": float(args.vetting_catalog_neighbor_radius),
+                    "min_score": args.vetting_min_score,
+                }
+                vetting_fingerprint = _downstream_stage_fingerprint(
+                    stage="vetting",
+                    stage_version="1",
+                    frame=df_vet,
+                    input_paths=[Path(vetting_input)],
+                    settings=vetting_settings,
+                    code_paths=("enrichment/vetting.py", "catalogs/evidence.py"),
+                )
+                _adopt_legacy_candidate_checkpoint(
+                    stage="vetting",
+                    checkpoint_path=vetting_checkpoint,
+                    state_path=vetting_state_path,
+                    fingerprint=vetting_fingerprint,
+                    candidate_ids=_ensure_candidate_id_column(df_vet)["candidate_id"].astype(str).tolist(),
+                    logger=log,
+                )
+                reused_vetting = _prepare_downstream_stage(
+                    stage="vetting",
+                    fingerprint=vetting_fingerprint,
+                    state_path=vetting_state_path,
+                    output_path=vetting_output,
+                    expected=len(df_vet),
+                    overwrite=bool(args.overwrite),
+                    checkpoint_paths=(vetting_checkpoint,),
+                    logger=log,
+                )
+                if reused_vetting:
+                    df_vet = load_passing_table(vetting_output)
+                else:
+                    df_vet = vet_candidates(
+                        df_vet,
+                        run_simbad=not args.no_vetting_simbad,
+                        run_gaia_var=not args.no_vetting_gaia_var,
+                        run_gaia_epoch=not args.no_vetting_gaia_epoch,
+                        run_asassn_var=not args.no_vetting_asassn_var,
+                        run_alerce=not args.no_vetting_alerce,
+                        run_erosita=not args.no_vetting_erosita,
+                        run_chandra_csc=not args.no_vetting_chandra_csc,
+                        run_atlas=args.vetting_atlas,
+                        run_pm_check=not args.no_vetting_pm_check,
+                        run_neowise_lc=args.vetting_neowise_lc,
+                        simbad_radius_arcsec=args.vetting_simbad_radius,
+                        asassn_radius_arcsec=args.vetting_asassn_radius,
+                        atlas_token=args.vetting_atlas_token,
+                        checkpoint_path=vetting_checkpoint,
+                        catalog_neighbor_output_dir=catalog_neighbor_output_dir,
+                        catalog_neighbor_radius_arcsec=args.vetting_catalog_neighbor_radius,
+                    )
+                    save_table(df_vet, vetting_output)
+                    _complete_downstream_stage(
+                        stage="vetting",
+                        fingerprint=vetting_fingerprint,
+                        state_path=vetting_state_path,
+                        output_paths=(vetting_output,),
+                        expected=len(df_vet),
+                    )
                 downstream_candidate_output_this_run = vetting_output
                 log(f"Vetting output: {vetting_output}")
                 catalog_neighbor_path = catalog_neighbor_output_dir / CATALOG_NEIGHBOR_FILENAME
@@ -4506,21 +5031,58 @@ def main():
                 )
                 gaia_source_path = _gaia_cache_arg(args).expanduser()
                 nss_catalog_path = Path(args.gaia_binary_nss_catalog).expanduser()
-                (
-                    gaia_binary_output,
-                    df_gaia_binary,
-                    gaia_binary_evidence,
-                    gaia_nss_solutions,
-                ) = _run_gaia_binary_enrichment(
-                    df_gaia_binary_in,
-                    results_dir=results_dir,
-                    gaia_source_path=gaia_source_path,
-                    nss_catalog_path=nss_catalog_path,
-                    offline=bool(args.gaia_binary_offline),
-                    query_all_eb=bool(args.gaia_binary_query_all_eb),
-                    chunk_size=int(args.gaia_binary_chunk_size),
-                    show_progress=bool(args.verbose),
+                gaia_binary_output = results_dir / "lc_events_gaia_binary.parquet"
+                gaia_binary_evidence_output = results_dir / "gaia_binary_evidence.parquet"
+                gaia_nss_output = results_dir / "gaia_nss_candidate_solutions.parquet"
+                gaia_binary_state_path = results_dir / "lc_events_gaia_binary_STAGE.json"
+                gaia_binary_fingerprint = _downstream_stage_fingerprint(
+                    stage="gaia_binary_enrichment",
+                    stage_version="1",
+                    frame=df_gaia_binary_in,
+                    input_paths=[gaia_binary_input, gaia_source_path, nss_catalog_path],
+                    settings={
+                        "offline": bool(args.gaia_binary_offline),
+                        "query_all_eb": bool(args.gaia_binary_query_all_eb),
+                        "chunk_size": int(args.gaia_binary_chunk_size),
+                    },
+                    code_paths=("enrichment/gaia_binary.py",),
                 )
+                reused_gaia_binary = _prepare_downstream_stage(
+                    stage="gaia_binary_enrichment",
+                    fingerprint=gaia_binary_fingerprint,
+                    state_path=gaia_binary_state_path,
+                    output_path=gaia_binary_output,
+                    expected=len(df_gaia_binary_in),
+                    overwrite=bool(args.overwrite),
+                    logger=log,
+                )
+                if reused_gaia_binary:
+                    df_gaia_binary = load_passing_table(gaia_binary_output)
+                    gaia_binary_evidence = load_side_table(gaia_binary_evidence_output)
+                    gaia_nss_solutions = load_side_table(gaia_nss_output)
+                else:
+                    (
+                        gaia_binary_output,
+                        df_gaia_binary,
+                        gaia_binary_evidence,
+                        gaia_nss_solutions,
+                    ) = _run_gaia_binary_enrichment(
+                        df_gaia_binary_in,
+                        results_dir=results_dir,
+                        gaia_source_path=gaia_source_path,
+                        nss_catalog_path=nss_catalog_path,
+                        offline=bool(args.gaia_binary_offline),
+                        query_all_eb=bool(args.gaia_binary_query_all_eb),
+                        chunk_size=int(args.gaia_binary_chunk_size),
+                        show_progress=bool(args.verbose),
+                    )
+                    _complete_downstream_stage(
+                        stage="gaia_binary_enrichment",
+                        fingerprint=gaia_binary_fingerprint,
+                        state_path=gaia_binary_state_path,
+                        output_paths=(gaia_binary_output, gaia_binary_evidence_output, gaia_nss_output),
+                        expected=len(df_gaia_binary),
+                    )
                 downstream_candidate_output_this_run = gaia_binary_output
                 binary_evidence_levels = {
                     str(level): int(count)
@@ -4541,8 +5103,6 @@ def main():
                     values = gaia_binary_evidence.get(column, pd.Series(dtype="boolean"))
                     return int(values.fillna(False).eq(True).sum())
 
-                gaia_binary_evidence_output = results_dir / "gaia_binary_evidence.parquet"
-                gaia_nss_output = results_dir / "gaia_nss_candidate_solutions.parquet"
                 summary["gaia_binary_stats"] = {
                     "rows_input": int(len(df_gaia_binary_in)),
                     "rows_output": int(len(df_gaia_binary)),
@@ -4609,15 +5169,88 @@ def main():
                 if df_external_in.empty:
                     log("No passing candidates for external light-curve enrichment")
                 else:
-                    external_lcs_output, external_lc_dir, df_external = _run_external_lcs_enrichment(
-                        df_external_in,
-                        results_dir=results_dir,
-                        atlas=args.external_lc_atlas,
-                        atlas_token=args.external_lc_atlas_token,
-                        workers=args.external_lc_workers or 4,
-                        refresh_cache=args.external_lc_refresh_cache,
-                        overwrite=args.overwrite,
+                    external_state_path = external_lc_dir / "EXTERNAL_LCS_STAGE.json"
+                    external_checkpoint = external_lc_dir / "external_lcs_CHECKPOINT.parquet"
+                    external_modules = [
+                        "ZTF LCs", "Gaia epoch LCs", "TESS LCs", "NEOWISE LCs",
+                        "Kepler LCs", "AAVSO LCs", "OGLE LCs", "Stripe 82 LCs",
+                        "AllWISE MEP LCs", "VVVX/VIRAC2 LCs", "Pan-STARRS LCs", "CRTS LCs",
+                    ]
+                    if args.external_lc_atlas:
+                        external_modules.insert(0, "ATLAS LCs")
+                    external_fingerprint = _downstream_stage_fingerprint(
+                        stage="external_lcs",
+                        stage_version="1",
+                        frame=df_external_in,
+                        input_paths=[external_input],
+                        settings={
+                            "atlas": bool(args.external_lc_atlas),
+                            "modules": external_modules,
+                        },
+                        code_paths=("enrichment/vetting.py", "external_lc_manifest.py"),
                     )
+                    _adopt_legacy_candidate_checkpoint(
+                        stage="external_lcs",
+                        checkpoint_path=external_checkpoint,
+                        state_path=external_state_path,
+                        fingerprint=external_fingerprint,
+                        candidate_ids=_ensure_candidate_id_column(df_external_in)["candidate_id"].astype(str).tolist(),
+                        logger=log,
+                    )
+                    reused_external = _prepare_downstream_stage(
+                        stage="external_lcs",
+                        fingerprint=external_fingerprint,
+                        state_path=external_state_path,
+                        output_path=external_lcs_output,
+                        expected=len(df_external_in),
+                        overwrite=bool(args.overwrite or args.external_lc_refresh_cache),
+                        checkpoint_paths=(external_checkpoint,),
+                        logger=log,
+                    )
+                    if reused_external:
+                        df_external = load_passing_table(external_lcs_output)
+                    else:
+                        external_lcs_output, external_lc_dir, df_external = _run_external_lcs_enrichment(
+                            df_external_in,
+                            results_dir=results_dir,
+                            atlas=args.external_lc_atlas,
+                            atlas_token=args.external_lc_atlas_token,
+                            workers=args.external_lc_workers or 4,
+                            refresh_cache=args.external_lc_refresh_cache,
+                            overwrite=args.overwrite,
+                        )
+                        external_sidecars = tuple(
+                            path for path in (
+                                external_lcs_output,
+                                external_lc_dir / "_external_lc_completion.parquet",
+                                external_lc_dir / "external_lc_manifest.parquet",
+                            ) if path.exists()
+                        )
+                        from malca.enrichment.vetting import (
+                            _external_lc_module_complete,
+                            _read_external_lc_completion,
+                        )
+
+                        completion = _read_external_lc_completion(external_lc_dir)
+                        external_candidate_ids = df_external["candidate_id"].astype(str).tolist()
+                        if all(
+                            _external_lc_module_complete(
+                                completion, module, external_candidate_ids
+                            )
+                            for module in external_modules
+                        ):
+                            _complete_downstream_stage(
+                                stage="external_lcs",
+                                fingerprint=external_fingerprint,
+                                state_path=external_state_path,
+                                output_paths=external_sidecars,
+                                expected=len(df_external),
+                            )
+                        else:
+                            log(
+                                "External light curves remain partial; incomplete/error surveys "
+                                "will retry on the next run"
+                            )
                     downstream_candidate_output_this_run = external_lcs_output
                     summary["external_lc_stats"] = {
                         "rows_input": int(len(df_external_in)),
@@ -4658,11 +5291,52 @@ def main():
                 if df_multi_in.empty:
                     log("No passing candidates for multi-survey feature extraction")
                 else:
-                    multi_survey_output, df_multi = _run_multi_survey_features_enrichment(
-                        df_multi_in,
-                        results_dir=results_dir,
-                        external_lc_dir=external_lc_dir,
+                    multi_state_path = results_dir / "lc_events_multi_survey_features_STAGE.json"
+                    multi_input_paths = [Path(multi_input)]
+                    for sidecar in (
+                        external_lc_dir / "external_lc_manifest.parquet",
+                        external_lc_dir / "_external_lc_completion.parquet",
+                    ):
+                        if sidecar.exists():
+                            multi_input_paths.append(sidecar)
+                    multi_fingerprint = _downstream_stage_fingerprint(
+                        stage="multi_survey_features",
+                        stage_version="1",
+                        frame=df_multi_in,
+                        input_paths=multi_input_paths,
+                        settings={"batch_size": 250},
+                        code_paths=("enrichment/multi_survey_features.py", "external_lc_manifest.py"),
                     )
+                    reused_multi = _prepare_downstream_stage(
+                        stage="multi_survey_features",
+                        fingerprint=multi_fingerprint,
+                        state_path=multi_state_path,
+                        output_path=multi_survey_output,
+                        expected=len(df_multi_in),
+                        overwrite=bool(args.overwrite),
+                        logger=log,
+                    )
+                    if reused_multi:
+                        df_multi = load_passing_table(multi_survey_output)
+                    else:
+                        checkpoint_key = str(multi_fingerprint["digest"])
+                        multi_checkpoint_dir = results_dir / "multi_survey_feature_batches" / checkpoint_key
+                        multi_survey_output, df_multi = _run_multi_survey_features_enrichment(
+                            df_multi_in,
+                            results_dir=results_dir,
+                            external_lc_dir=external_lc_dir,
+                            checkpoint_dir=multi_checkpoint_dir,
+                            batch_size=250,
+                            reuse_checkpoints=not args.overwrite,
+                            progress_callback=log,
+                        )
+                        _complete_downstream_stage(
+                            stage="multi_survey_features",
+                            fingerprint=multi_fingerprint,
+                            state_path=multi_state_path,
+                            output_paths=(multi_survey_output,),
+                            expected=len(df_multi),
+                        )
                     downstream_candidate_output_this_run = multi_survey_output
                     summary["multi_survey_feature_stats"] = {
                         "rows_input": int(len(df_multi_in)),
@@ -4699,20 +5373,35 @@ def main():
 
             if _import_file is not None:
                 conn = db_connect(review_db_path)
-                df_import = load_review_import_table(_import_file)
-                if df_import.empty:
-                    conn.close()
-                    log(f"No passing candidates to import into {review_db_path}")
+                import_state_path = review_db_path.with_name("review_import_state.json")
+                import_state = _load_review_import_state(import_state_path, review_db_path)
+                candidate_needs_import, _ = _review_artifact_needs_import(
+                    import_state, "candidates", Path(_import_file)
+                )
+                if candidate_needs_import:
+                    df_import = load_review_import_table(_import_file)
+                    if df_import.empty:
+                        log(f"No passing candidates to import into {review_db_path}")
+                    else:
+                        df_import = add_stv_identity(df_import)
+                        assert_stv_product_schema(df_import, stage="review_import")
+                        n_total, n_new = import_candidates(
+                            conn,
+                            df_import,
+                            source_path=str(out_dir.resolve()),
+                            characterize_before_import=False,
+                            vet_before_import=False,
+                        )
+                        _record_review_artifact(
+                            import_state, "candidates", Path(_import_file), rows=len(df_import)
+                        )
+                        _write_review_import_state(import_state_path, review_db_path, import_state)
+                        review_db_updated = True
+                        log(f"Imported {n_new} new candidates ({n_total} total) into {review_db_path}")
                 else:
-                    df_import = add_stv_identity(df_import)
-                    assert_stv_product_schema(df_import, stage="review_import")
-                    n_total, n_new = import_candidates(
-                        conn,
-                        df_import,
-                        source_path=str(out_dir.resolve()),
-                        characterize_before_import=False,
-                        vet_before_import=False,
-                    )
+                    log(f"Review candidates unchanged; skipping import of {_import_file}")
+
+                if conn is not None:
                     catalog_neighbor_path = (
                         results_dir
                         / CATALOG_NEIGHBOR_OUTPUT_SUBDIR
@@ -4720,15 +5409,29 @@ def main():
                     )
                     if catalog_neighbor_path.exists():
                         try:
-                            catalog_neighbor_rows = load_side_table(catalog_neighbor_path)
-                            n_catalog_neighbors = upsert_catalog_neighbor_rows(
-                                conn,
-                                catalog_neighbor_rows,
+                            needs_import, _ = _review_artifact_needs_import(
+                                import_state, "catalog_neighbors", catalog_neighbor_path
                             )
-                            log(
-                                f"Imported {n_catalog_neighbors} catalog-neighbor rows "
-                                f"into {review_db_path}"
-                            )
+                            if needs_import:
+                                catalog_neighbor_rows = load_side_table(catalog_neighbor_path)
+                                n_catalog_neighbors = upsert_catalog_neighbor_rows(
+                                    conn,
+                                    catalog_neighbor_rows,
+                                )
+                                _record_review_artifact(
+                                    import_state,
+                                    "catalog_neighbors",
+                                    catalog_neighbor_path,
+                                    rows=n_catalog_neighbors,
+                                )
+                                _write_review_import_state(import_state_path, review_db_path, import_state)
+                                review_db_updated = True
+                                log(
+                                    f"Imported {n_catalog_neighbors} catalog-neighbor rows "
+                                    f"into {review_db_path}"
+                                )
+                            else:
+                                log("Catalog-neighbor artifact unchanged; skipping review import")
                         except Exception as catalog_neighbor_exc:
                             log(f"Warning: catalog-neighbor review import failed: {catalog_neighbor_exc}")
                             record_stage_failure("review_import_catalog_neighbors", catalog_neighbor_exc)
@@ -4736,9 +5439,26 @@ def main():
                         try:
                             from malca.review.sed import upsert_sed_rows
 
-                            sed_rows_for_review = load_side_table(sed_photometry_output)
-                            n_sed = upsert_sed_rows(conn, sed_rows_for_review)
-                            log(f"Imported {n_sed} SED photometry rows into {review_db_path}")
+                            needs_import, _ = _review_artifact_needs_import(
+                                import_state, "sed_photometry", sed_photometry_output
+                            )
+                            if needs_import:
+                                n_sed = 0
+                                for sed_batch in _iter_parquet_batches(
+                                    sed_photometry_output, batch_rows=25_000
+                                ):
+                                    n_sed += upsert_sed_rows(conn, sed_batch)
+                                _record_review_artifact(
+                                    import_state,
+                                    "sed_photometry",
+                                    sed_photometry_output,
+                                    rows=n_sed,
+                                )
+                                _write_review_import_state(import_state_path, review_db_path, import_state)
+                                review_db_updated = True
+                                log(f"Imported {n_sed} SED photometry rows into {review_db_path}")
+                            else:
+                                log("SED photometry unchanged; skipping review import")
                         except Exception as sed_exc:
                             log(f"Warning: SED photometry review import failed: {sed_exc}")
                             record_stage_failure("review_import_sed_photometry", sed_exc)
@@ -4746,37 +5466,67 @@ def main():
                         try:
                             from malca.enrichment.sed_model import upsert_sed_model_results
 
-                            sed_model_fits_for_review = (
-                                load_side_table(sed_model_fits_output)
-                                if sed_model_fits_output.exists()
-                                else pd.DataFrame()
+                            model_paths = {
+                                "sed_model_fits": sed_model_fits_output,
+                                "sed_model_curves": sed_model_curves_output,
+                                "sed_model_points": sed_model_points_output,
+                            }
+                            model_needs_import = any(
+                                _review_artifact_needs_import(import_state, label, path)[0]
+                                for label, path in model_paths.items()
+                                if path.exists()
                             )
-                            sed_model_curves_for_review = (
-                                load_side_table(sed_model_curves_output)
-                                if sed_model_curves_output.exists()
-                                else pd.DataFrame()
-                            )
-                            sed_model_points_for_review = (
-                                load_side_table(sed_model_points_output)
-                                if sed_model_points_output.exists()
-                                else pd.DataFrame()
-                            )
-                            n_model_fits, n_model_curves = upsert_sed_model_results(
-                                conn,
-                                sed_model_fits_for_review,
-                                sed_model_curves_for_review,
-                                sed_model_points_for_review,
-                            )
-                            log(
-                                f"Imported {n_model_fits} SED model fit rows and "
-                                f"{n_model_curves} curve rows into {review_db_path}"
-                            )
+                            if model_needs_import:
+                                sed_model_fits_for_review = (
+                                    load_side_table(sed_model_fits_output)
+                                    if sed_model_fits_output.exists()
+                                    else pd.DataFrame()
+                                )
+                                if "candidate_id" not in sed_model_fits_for_review.columns:
+                                    raise ValueError("SED model fits are required for batched review import")
+                                model_ids = sed_model_fits_for_review["candidate_id"].dropna().astype(str).unique().tolist()
+                                n_model_fits = 0
+                                n_model_curves = 0
+                                for start in range(0, len(model_ids), 250):
+                                    batch_ids = model_ids[start : start + 250]
+                                    fit_batch = sed_model_fits_for_review[
+                                        sed_model_fits_for_review["candidate_id"].astype(str).isin(batch_ids)
+                                    ].copy()
+                                    curve_batch = _read_parquet_candidate_subset(
+                                        sed_model_curves_output, batch_ids
+                                    )
+                                    point_batch = _read_parquet_candidate_subset(
+                                        sed_model_points_output, batch_ids
+                                    )
+                                    n_fits_batch, n_curves_batch = upsert_sed_model_results(
+                                        conn,
+                                        fit_batch,
+                                        curve_batch,
+                                        point_batch,
+                                        replace_candidate_ids=batch_ids,
+                                    )
+                                    n_model_fits += n_fits_batch
+                                    n_model_curves += n_curves_batch
+                                for label, path in model_paths.items():
+                                    if path.exists():
+                                        rows = (
+                                            n_model_fits if label == "sed_model_fits"
+                                            else n_model_curves if label == "sed_model_curves"
+                                            else 0
+                                        )
+                                        _record_review_artifact(import_state, label, path, rows=rows)
+                                _write_review_import_state(import_state_path, review_db_path, import_state)
+                                review_db_updated = True
+                                log(
+                                    f"Imported {n_model_fits} SED model fit rows and "
+                                    f"{n_model_curves} curve rows into {review_db_path}"
+                                )
+                            else:
+                                log("SED model artifacts unchanged; skipping review import")
                         except Exception as sed_model_exc:
                             log(f"Warning: SED model review import failed: {sed_model_exc}")
                             record_stage_failure("review_import_sed_model", sed_model_exc)
                     conn.close()
-                    review_db_updated = True
-                    log(f"Imported {n_new} new candidates ({n_total} total) into {review_db_path}")
             else:
                 message = "no results file found for review DB import"
                 log(f"Error: {message}; skipping")

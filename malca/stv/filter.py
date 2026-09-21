@@ -36,6 +36,7 @@ from pathlib import Path as WorkerPath
 from time import perf_counter
 from collections.abc import Sequence
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -100,7 +101,7 @@ from malca.core.period_arbitration import (
     period_alias_matches,
 )
 from malca.core.phase import align_v_to_g_magnitude, phase_template, template_phase_lag
-from malca.products.feature_layers import to_layer_first_frame, with_feature_columns
+from malca.products.feature_layers import expand_feature_layers, to_layer_first_frame, with_feature_columns
 from malca.products.product_schema import add_stv_identity, assert_stv_product_schema
 from malca.core.period_bounds import STAGE_POSTFILTER, bounds_from_jd
 from malca.core.period_consensus import event_fold_quality
@@ -228,9 +229,77 @@ PERIODICITY_MERGE_COLS = (
     "lsp_is_significant",
     "periodicity_score",
     "periodic_flag",
+    "periodicity_reused_from",
+    "periodicity_reused_source_sha256",
+    "period_native_days",
+    "period_corrected_days",
+    "period_for_fold_days",
+    "period_method",
+    "period_confidence",
+    "period_baseline_cycles",
+    "period_confidence_reason",
+    "period_evidence_summary",
+    "event_period_days",
+    "event_period_method",
+    "event_period_n_events",
+    "event_period_is_high_confidence",
+    "long_ls_period_days",
+    "long_ls_peak_power",
+    "long_ls_fap_bootstrap",
+    "long_ls_baseline_cycles",
+    "long_ls_is_significant",
+    "long_ls_status",
 )
 
 PERIODICITY_CHECKPOINT_VERSION = "pdm_ce_lsp_long_ls_consensus_v5"
+PERIODICITY_SELECTION_VERSION = "fold_fit_before_significance_v1"
+PERIODICITY_STAGE_COLUMNS = (
+    "periodicity_selection_version", "periodicity_significance_status",
+    "periodicity_significance_scope", "periodicity_significance_error",
+    "periodicity_n_bootstrap", "period_consensus_days",
+)
+PERIODICITY_MERGE_COLS = (*PERIODICITY_MERGE_COLS, *PERIODICITY_STAGE_COLUMNS)
+PERIODICITY_REUSE_COLUMNS = (*PERIODICITY_MERGE_COLS,
+                            "phase_period_days", "phase_source", "phase_plot_ready", "phase_quality_score")
+
+
+def _load_periodicity_reuse(path: str | Path) -> pd.DataFrame:
+    """Read explicitly requested historical measurements, keyed by ASAS-SN ID.
+
+    These are historical values, not checkpoints certified for the current
+    light curve or calculation settings. Keep them out of the checkpoint file.
+    """
+    source_path = Path(path).expanduser().resolve()
+    source = expand_feature_layers(read_feature_table(source_path))
+    for old, new in (("pdm_min_theta", "pdm_theta"), ("ce_min_entropy", "ce_entropy"),
+                     ("periodicity_is_rejected", "periodic_flag")):
+        if new not in source and old in source:
+            source[new] = source[old]
+    required = ("periodicity_period", "pdm_period", "pdm_theta", "pdm_snr",
+                "ce_period", "ce_entropy", "ce_snr", "periodic_flag")
+    missing = [col for col in required if col not in source]
+    if missing:
+        raise ValueError(f"Periodicity reuse table lacks measurements: {missing}")
+    if "asas_sn_id" not in source and "lc_path" not in source:
+        raise ValueError("Periodicity reuse table needs asas_sn_id or lc_path")
+    source.index = (
+        source["asas_sn_id"].astype("string").str.strip()
+        if "asas_sn_id" in source else source["lc_path"].map(lambda p: Path(p).stem).astype("string")
+    )
+    if source.index.isna().any() or source.index.isin([""]).any() or source.index.duplicated().any():
+        raise ValueError("Periodicity reuse table needs unique, nonmissing ASAS-SN IDs")
+    usable = source["periodic_flag"].notna()
+    for col in required[:-1]:
+        values = pd.to_numeric(source[col], errors="coerce")
+        usable &= values.notna() & np.isfinite(values)
+        if col.endswith("_period"):
+            usable &= values > 0
+    if "error" in source:
+        usable &= source["error"].fillna("").astype(str).str.strip().eq("")
+    source = source.loc[usable, [col for col in PERIODICITY_REUSE_COLUMNS if col in source]].copy()
+    source["periodicity_reused_from"] = str(source_path)
+    source["periodicity_reused_source_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    return source
 
 
 def _parquet_schema_names(path: Path) -> list[str]:
@@ -1268,6 +1337,7 @@ def _checkpoint_result_is_usable(
     expected_n_bootstrap: int,
     expected_significance_level: float,
     expected_exclude_aliases: bool,
+    expected_selection_version: str | None = None,
 ) -> bool:
     if not isinstance(result, dict) or not result:
         return False
@@ -1276,7 +1346,10 @@ def _checkpoint_result_is_usable(
         return False
     if result.get("periodicity_checkpoint_version") != PERIODICITY_CHECKPOINT_VERSION:
         return False
-    if int(result.get("periodicity_n_bootstrap", -1)) != int(expected_n_bootstrap):
+    if expected_selection_version is not None:
+        if result.get("periodicity_selection_version") != expected_selection_version:
+            return False
+    elif int(result.get("periodicity_n_bootstrap", -1)) != int(expected_n_bootstrap):
         return False
     if not np.isclose(
         float(result.get("periodicity_significance_level", np.nan)),
@@ -1361,6 +1434,121 @@ def _checkpoint_result_is_usable(
     return False
 
 
+def _select_period_by_fold_fit(
+    band_resid: dict[int, tuple[np.ndarray, np.ndarray]],
+    seeds: Sequence[tuple[str, object]],
+    *,
+    min_period: float,
+    max_period: float,
+    event_epochs: Sequence[float] | None,
+) -> dict[str, object]:
+    """Compare all proposers with the existing harmonic/phase-fit objective.
+
+    No method significance or method-specific support threshold enters this
+    selection. The result is a period candidate, not a periodicity detection.
+    """
+    candidates = []
+    seen = set()
+    for method, raw in seeds:
+        period = _finite_float(raw)
+        if period is None or not min_period <= period <= max_period or period in seen:
+            continue
+        seen.add(period)
+        corrected = _correct_native_period(
+            period, band_resid, min_period=min_period, max_period=max_period,
+            event_epochs=event_epochs,
+        )
+        objective = _finite_float(corrected.get("selection_objective"))
+        if objective is not None:
+            candidates.append({**corrected, "method": method})
+    if not candidates:
+        raise ValueError("No candidate has a usable folded-curve fit")
+    return min(candidates, key=lambda item: (
+        float(item["selection_objective"]), float(item["corrected_period"]), str(item["method"]),
+    ))
+
+
+def _period_selection_worker(args: tuple) -> dict:
+    """Run observed-data searches and freeze the adopted period without nulls."""
+    return _lsp_worker((*args[:2], 0, *args[3:], "selection"))
+
+
+def _period_significance_worker(task: tuple[tuple, dict]) -> dict:
+    """Add source-level significance without replacing any selected periods.
+
+    Retain the existing full-search block-permutation tests. Bonferroni across
+    the searched methods controls choosing among those tests; it is not a
+    probability that the adopted period or its harmonic is correct.
+    """
+    args, selected = task
+    measured = _lsp_worker((*args, "significance"))
+    result = dict(selected)
+    # A failed new test must not leave an earlier budget's detection flags
+    # looking like results of this request. Period selection stays intact.
+    result.update({
+        "periodicity_significance_scope": "source_searches_bonferroni",
+        "periodicity_n_bootstrap": int(args[2]),
+        "periodicity_bootstrap_sig": np.nan,
+        "periodicity_is_significant": False,
+        "periodicity_is_rejected": False,
+        "periodicity_evidence_source": "observing_block_permutation_bonferroni",
+        "periodicity_rejection_reason": "",
+        "period_confidence_reason": "Selected by folded-curve fit; source significance is reported separately",
+    })
+    for probability, flag in (
+        ("pdm_bootstrap_sig", "pdm_is_significant"),
+        ("ce_bootstrap_sig", "ce_is_significant"),
+        ("lsp_bootstrap_sig", "lsp_is_significant"),
+        ("long_ls_fap_bootstrap", "long_ls_is_significant"),
+    ):
+        result[probability], result[flag] = np.nan, False
+    if measured.get("error"):
+        result["periodicity_significance_status"] = "error"
+        result["periodicity_significance_error"] = str(measured["error"])
+        return result
+    if any(measured.get(key) != selected.get(key) for key in (
+        "periodicity_input_size", "periodicity_input_mtime_ns",
+    )):
+        result["periodicity_significance_status"] = "error"
+        result["periodicity_significance_error"] = "Light curve changed after period selection"
+        return result
+    names = (
+        ("pdm_bootstrap_sig", "pdm_is_significant", "pdm_alias_flag"),
+        ("ce_bootstrap_sig", "ce_is_significant", "ce_alias_flag"),
+        ("lsp_bootstrap_sig", "lsp_is_significant", "lsp_is_alias"),
+    )
+    if LONG_PERIOD_ENABLED:
+        names += (("long_ls_fap_bootstrap", "long_ls_is_significant", None),)
+    probabilities = []
+    all_available = True
+    for p_col, flag_col, alias_col in names:
+        probability = _finite_float(measured.get(p_col))
+        result[p_col] = measured.get(p_col, np.nan)
+        result[flag_col] = bool(measured.get(flag_col, False))
+        all_available &= probability is not None
+        alias = bool(measured.get(alias_col, False)) if alias_col else bool(
+            period_alias_matches(
+                measured.get("long_ls_period_days"),
+                time_span_days=_finite_float(selected.get("periodicity_baseline_days")),
+            )
+        )
+        if probability is not None:
+            probabilities.append(1.0 if bool(args[4]) and alias else probability)
+    adjusted = min(1.0, len(names) * min(probabilities)) if probabilities else np.nan
+    significant = bool(np.isfinite(adjusted) and adjusted < float(args[3]))
+    result.update({
+        "periodicity_n_bootstrap": int(args[2]),
+        "periodicity_significance_status": "complete" if all_available else "partial",
+        "periodicity_significance_error": "" if all_available else "Some null tests unavailable",
+        "periodicity_bootstrap_sig": adjusted,
+        "periodicity_is_significant": significant,
+        "periodicity_is_rejected": significant,
+        "periodicity_evidence_source": "observing_block_permutation_bonferroni",
+        "periodicity_rejection_reason": "source_periodicity" if significant else "",
+    })
+    return result
+
+
 def _lsp_worker(args: tuple) -> dict:
     """
     Worker function for parallel periodicity computation (PDM + CE + LS + long-P consensus).
@@ -1374,6 +1562,13 @@ def _lsp_worker(args: tuple) -> dict:
         Dict with path and periodicity results
     """
 
+    # The seven-element form remains the historical worker contract. Keeping
+    # it stable also avoids changing workers respawned by an already-running
+    # legacy job. New production calls use the explicit selection stage.
+    stage = args[-1] if len(args) == 8 else "legacy"
+    selection_first = stage == "selection"
+    if len(args) == 8:
+        args = args[:-1]
     dip_run_epochs_json = None
     if len(args) == 7:
         original_path, path_str, n_bootstrap, significance_level, exclude_alias_periods, pdm_method, dip_run_epochs_json = args
@@ -1560,7 +1755,7 @@ def _lsp_worker(args: tuple) -> dict:
                 dip_epochs_override=dip_epochs_for_score or None,
                 detect_dip_epochs_fallback=True,
                 long_ls_kwargs={
-                    "n_bootstrap": min(int(n_bootstrap), 200) if int(n_bootstrap) > 0 else 0,
+                    "n_bootstrap": int(n_bootstrap) if stage == "significance" else min(max(int(n_bootstrap), 0), 200),
                     "random_state": (seed_base + 3) & 0xFFFFFFFF,
                 },
                 event_period_result=event_period_result,
@@ -1596,11 +1791,43 @@ def _lsp_worker(args: tuple) -> dict:
             best_period = short_best_period
             periodicity_method_out = periodicity_method
 
+        if selection_first:
+            epochs = consensus.get("dip_epochs_used") or dip_epochs_for_score
+            seeds = [
+                ("pdm", pdm_result.get("pdm_period")),
+                ("ce", ce_result.get("ce_period")),
+                ("ls", lsp_result.get("ls_period_days")),
+                ("long_ls", consensus.get("long_ls_period_days")),
+                ("event_period", consensus.get("event_period_days", event_period_result.get("event_period_days"))),
+            ]
+            seeds.extend(("long_ls", period) for period in consensus.get("long_ls_top_periods_days", []))
+            selection_max_period = max(
+                float(max_period),
+                _finite_float(consensus.get("long_ls_max_period_days")) or float(max_period),
+            )
+            selected_correction = _select_period_by_fold_fit(
+                band_resid, seeds, min_period=float(min_period),
+                max_period=selection_max_period, event_epochs=epochs or None,
+            )
+            best_period = float(selected_correction["corrected_period"])
+            base_period = float(selected_correction["raw_period"])
+            short_best_period = best_period
+            periodicity_method_out = str(selected_correction["method"])
+            consensus_method = periodicity_method_out
+            consensus_confidence = "none"
+            consensus["period_baseline_cycles"] = baseline_days / best_period
+            consensus["period_confidence_reason"] = "Selected by folded-curve fit; significance not assessed"
+            selected_alias = bool(selected_correction.get("alias_flag", False))
+            periodicity_bootstrap_sig = np.nan
+            periodicity_is_significant = False
+
         # Tier-4 canonical period columns (written alongside legacy fields).
         period_native = _finite_float(base_period)
         period_corrected = _finite_float(short_best_period)
         period_for_fold = _finite_float(best_period)
         evidence_summary = {
+            "selection_version": PERIODICITY_SELECTION_VERSION if selection_first else "legacy",
+            "selection_objective": selected_correction.get("selection_objective"),
             "pdm_period": pdm_result.get("pdm_period"),
             "ce_period": ce_result.get("ce_period"),
             "long_ls_period_days": consensus.get("long_ls_period_days"),
@@ -1628,6 +1855,11 @@ def _lsp_worker(args: tuple) -> dict:
             "lc_path": original_path,
             "resolved_path": path_str,
             "periodicity_checkpoint_version": PERIODICITY_CHECKPOINT_VERSION,
+            "periodicity_selection_version": PERIODICITY_SELECTION_VERSION if selection_first else "legacy",
+            "periodicity_significance_status": "not_requested" if selection_first else ("complete" if int(n_bootstrap) > 0 else "not_requested"),
+            "periodicity_significance_scope": "not_assessed" if selection_first else "legacy_method_search",
+            "periodicity_significance_error": "",
+            "periodicity_baseline_days": baseline_days,
             "periodicity_n_bootstrap": int(n_bootstrap),
             "periodicity_significance_level": float(significance_level),
             "periodicity_exclude_aliases": bool(exclude_alias_periods),
@@ -1643,10 +1875,11 @@ def _lsp_worker(args: tuple) -> dict:
             "periodicity_alias_matches": ";".join(str(v) for v in selected_correction.get("alias_matches", [])),
             "periodicity_bootstrap_sig": periodicity_bootstrap_sig,
             "periodicity_is_significant": periodicity_is_significant,
-            "periodicity_evidence_source": "bootstrap" if int(n_bootstrap) > 0 else "method_support",
+            "periodicity_evidence_source": "period_selection_only" if selection_first else ("bootstrap" if int(n_bootstrap) > 0 else "method_support"),
             "periodicity_rejection_reason": rejection_reason,
             "periodicity_status": decision_status,
             "period_confidence": consensus_confidence,
+            "period_consensus_days": best_period,
             "period_method": consensus_method,
             "period_baseline_cycles": consensus.get("period_baseline_cycles", np.nan),
             "period_confidence_reason": consensus.get("period_confidence_reason", ""),
@@ -1772,7 +2005,7 @@ def _lsp_worker(args: tuple) -> dict:
 def validate_periodicity(
     df: pd.DataFrame,
     *,
-    n_bootstrap: int = 1000,
+    n_bootstrap: int = 0,
     significance_level: float = 0.01,
     pdm_method: str = POST_FILTER_PDM_METHOD,
     exclude_alias_periods: bool = True,
@@ -1784,9 +2017,10 @@ def validate_periodicity(
     checkpoint_dir: str | Path | None = None,
     skip_if_consensus: bool = True,
     lightcurve_bundle_dir: str | Path | None = None,
+    reuse_from: str | Path | None = None,
 ) -> pd.DataFrame:
     """
-    Detailed periodicity validation on candidates using PDM + CE.
+    Select periods first, then optionally estimate source-level significance.
 
     Uses Phase Dispersion Minimization and Conditional Entropy to identify:
     - Eclipsing binaries (short periods ~1 day)
@@ -1800,7 +2034,10 @@ def validate_periodicity(
     df : pd.DataFrame
         Candidates from events.py (must have 'lc_path' column)
     n_bootstrap : int
-        Bootstrap shuffles used for both PDM and CE significance.
+        Optional resamples per method after selection (default zero).
+        Positive values run full-search PDM, CE, LS, and long-LS null tests.
+        Their Bonferroni-adjusted minimum tests source periodicity; it does
+        not establish that the adopted period is the correct fundamental.
     significance_level : float
         Bootstrap significance threshold (lower is more significant).
     exclude_alias_periods : bool
@@ -1818,6 +2055,9 @@ def validate_periodicity(
     lightcurve_bundle_dir : str | Path | None
         Optional local bundle directory used to resolve light curves when the
         parquet still points at cluster paths that are unavailable locally.
+    reuse_from : str | Path | None
+        Explicitly reuse historical PDM/CE/LS measurements by ASAS-SN ID,
+        retaining their provenance even when calculation settings differ.
 
     Returns
     -------
@@ -1828,8 +2068,45 @@ def validate_periodicity(
 
 
     n0 = len(df)
+    if int(n_bootstrap) < 0:
+        raise ValueError("n_bootstrap must be nonnegative")
     if "lc_path" not in df.columns:
         raise ValueError("STV candidate products must include an 'lc_path' column")
+    if reuse_from is not None:
+        df = df.copy()
+        df["periodicity_reused_from"] = ""
+        df["periodicity_reused_source_sha256"] = ""
+        prior = _load_periodicity_reuse(reuse_from)
+        ids = (df["asas_sn_id"].astype("string").str.strip() if "asas_sn_id" in df
+               else df["lc_path"].map(lambda p: Path(p).stem).astype("string"))
+        reused_mask = ids.isin(prior.index)
+        if reused_mask.any():
+            if df["lc_path"].duplicated().any():
+                raise ValueError("Periodicity reuse requires unique candidate lc_path values")
+            reused = df.loc[reused_mask].copy()
+            for col in prior:
+                reused[col] = ids.loc[reused_mask].map(prior[col]).to_numpy()
+            if show_tqdm:
+                tqdm.write(f"[validate_periodicity] Reusing saved measurements for {len(reused)}/{len(df)} "
+                           f"sources from {reuse_from}; retaining original calculation settings")
+            remaining = df.loc[~reused_mask].copy()
+            if not remaining.empty:
+                remaining = validate_periodicity(
+                    remaining, n_bootstrap=n_bootstrap, significance_level=significance_level,
+                    pdm_method=pdm_method, exclude_alias_periods=exclude_alias_periods,
+                    flag_only=True, show_tqdm=show_tqdm, verbose=verbose,
+                    workers=workers, checkpoint_dir=checkpoint_dir,
+                    skip_if_consensus=skip_if_consensus, lightcurve_bundle_dir=lightcurve_bundle_dir,
+                )
+                remaining["periodicity_reused_from"] = ""
+                remaining["periodicity_reused_source_sha256"] = ""
+            combined = reused if remaining.empty else pd.concat([reused, remaining], ignore_index=True)
+            combined = combined.set_index("lc_path", drop=False).loc[df["lc_path"]].reset_index(drop=True)
+            if not flag_only:
+                kept = combined.loc[~_to_bool_mask(combined["periodic_flag"])].reset_index(drop=True)
+                log_rejections(combined, kept, "validate_periodicity", rejected_log_csv)
+                return kept
+            return combined
     paths = [str(p) for p in df["lc_path"].astype(str).tolist()]
     bundle_dir = None
     if lightcurve_bundle_dir is not None:
@@ -1847,7 +2124,7 @@ def validate_periodicity(
     if checkpoint_dir is not None:
         checkpoint_path = Path(checkpoint_dir)
         checkpoint_path.mkdir(parents=True, exist_ok=True)
-        checkpoint_file = checkpoint_path / "lsp_checkpoint.parquet"
+        checkpoint_file = checkpoint_path / "period_selection_checkpoint.parquet"
         
         # Load existing checkpoint if present
         if checkpoint_file.exists():
@@ -1887,6 +2164,11 @@ def validate_periodicity(
                     aliases = period_alias_matches(period)
                     skipped_consensus[p] = {
                         "lc_path": p,
+                        "periodicity_selection_version": "catalog_consensus",
+                        "periodicity_significance_status": "catalog_consensus",
+                        "periodicity_significance_scope": "catalog_consensus",
+                        "periodicity_n_bootstrap": 0,
+                        "period_consensus_days": period,
                         "resolved_path": None,
                         "periodicity_period": period,
                         "periodicity_method": str(row.get("period_primary_source") or row.get("catalog_source") or "catalog_consensus"),
@@ -1946,6 +2228,7 @@ def validate_periodicity(
                 expected_n_bootstrap=n_bootstrap,
                 expected_significance_level=significance_level,
                 expected_exclude_aliases=exclude_alias_periods,
+                expected_selection_version=PERIODICITY_SELECTION_VERSION,
             ):
                 continue
             completed_results.pop(p, None)
@@ -2020,6 +2303,7 @@ def validate_periodicity(
                 expected_n_bootstrap=n_bootstrap,
                 expected_significance_level=significance_level,
                 expected_exclude_aliases=exclude_alias_periods,
+                expected_selection_version=PERIODICITY_SELECTION_VERSION,
             ):
                 continue
             completed_results.pop(p, None)
@@ -2115,9 +2399,9 @@ def validate_periodicity(
         chunksize = 1
 
         with Pool(processes=actual_workers, maxtasksperchild=50) as pool:
-            iterator = pool.imap_unordered(_lsp_worker, worker_args, chunksize=chunksize)
+            iterator = pool.imap_unordered(_period_selection_worker, worker_args, chunksize=chunksize)
             if show_tqdm:
-                iterator = tqdm(iterator, total=len(worker_args), desc="Periodicity validation")
+                iterator = tqdm(iterator, total=len(worker_args), desc="Period selection")
             
             checkpoint_batch = []
             checkpoint_interval = 100
@@ -2137,10 +2421,10 @@ def validate_periodicity(
         # Sequential execution (workers=1 or no paths to process)
         iterator = worker_args
         if show_tqdm and len(worker_args) > 0:
-            iterator = tqdm(worker_args, desc="Periodicity validation")
+            iterator = tqdm(worker_args, desc="Period selection")
         
         for args in iterator:
-            result = _lsp_worker(args)
+            result = _period_selection_worker(args)
             new_results.append(result)
             if result["error"] is not None:
                 n_errors += 1
@@ -2157,6 +2441,47 @@ def validate_periodicity(
         all_results[r["lc_path"]] = r
     for p, r in skipped_consensus.items():
         all_results[p] = r
+
+    # All selected periods have been checkpointed before any optional null
+    # simulation starts. A changed bootstrap budget reuses those selections.
+    if int(n_bootstrap) > 0:
+        significance_tasks = []
+        for _, row in df.iterrows():
+            path = str(row["lc_path"])
+            selected = all_results.get(path, {})
+            if path in skipped_consensus or selected.get("error") or not selected.get("resolved_path"):
+                continue
+            if (selected.get("periodicity_significance_status") == "complete"
+                    and int(selected.get("periodicity_n_bootstrap", -1)) == int(n_bootstrap)):
+                continue
+            args = (path, selected["resolved_path"], int(n_bootstrap), significance_level,
+                    exclude_alias_periods, str(pdm_method), row.get("dip_run_epochs_json"))
+            significance_tasks.append((args, selected))
+        significance_completed = 0
+        try:
+            if workers > 1 and significance_tasks:
+                with Pool(processes=min(workers, cpu_count(), len(significance_tasks)), maxtasksperchild=50) as pool:
+                    iterator = pool.imap_unordered(_period_significance_worker, significance_tasks, chunksize=1)
+                    if show_tqdm:
+                        iterator = tqdm(iterator, total=len(significance_tasks), desc="Period significance")
+                    for result in iterator:
+                        all_results[result["lc_path"]] = result
+                        significance_completed += 1
+                        if checkpoint_file is not None and significance_completed % 10 == 0:
+                            _save_checkpoint(checkpoint_file, all_results, [])
+            else:
+                iterator = significance_tasks
+                if show_tqdm and significance_tasks:
+                    iterator = tqdm(iterator, desc="Period significance")
+                for task in iterator:
+                    result = _period_significance_worker(task)
+                    all_results[result["lc_path"]] = result
+                    significance_completed += 1
+                    if checkpoint_file is not None and significance_completed % 10 == 0:
+                        _save_checkpoint(checkpoint_file, all_results, [])
+        finally:
+            if checkpoint_file is not None and significance_tasks:
+                _save_checkpoint(checkpoint_file, all_results, [])
     
     # Build output columns
     powers = []
@@ -2305,7 +2630,8 @@ def validate_periodicity(
         ce_significant_flags.append(bool(result.get("ce_is_significant", False)))
 
         if np.isfinite(sig):
-            min_p = max(1.0 / float(max(n_bootstrap, 1)), 1e-12)
+            completed_bootstraps = int(result.get("periodicity_n_bootstrap", n_bootstrap))
+            min_p = max(1.0 / (max(completed_bootstraps, 0) + 1.0), 1e-12)
             periodicity_scores.append(float(-np.log10(np.clip(sig, min_p, 1.0))))
         else:
             periodicity_scores.append(np.nan)
@@ -2316,6 +2642,8 @@ def validate_periodicity(
         keep_flags.append(keep)
 
     df_out = df.copy()
+    for column in PERIODICITY_STAGE_COLUMNS:
+        df_out[column] = [all_results.get(path, {}).get(column) for path in paths]
     df_out["periodicity_period"] = periodicity_periods
     df_out["periodicity_method"] = periodicity_methods
     df_out["periodicity_base_period"] = periodicity_base_periods
@@ -2418,8 +2746,10 @@ def validate_periodicity(
 
 
 def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) -> None:
-    """Save checkpoint to parquet file."""
-    all_data = list(completed.values()) + new_results
+    """Atomically preserve complete selections and optional significance."""
+    all_data = {
+        str(row["lc_path"]): row for row in [*completed.values(), *new_results]
+    }.values()
     clean_data = []
     for r in all_data:
         clean_data.append({
@@ -2475,7 +2805,12 @@ def _save_checkpoint(checkpoint_file: Path, completed: dict, new_results: list) 
             "periodicity_is_rejected": r.get("periodicity_is_rejected", False),
             "error": r.get("error"),
         })
-    pd.DataFrame(clean_data).to_parquet(checkpoint_file, index=False, compression=PARQUET_CACHE_COMPRESSION)
+        # Keep canonical period/confidence fields and stage provenance, not
+        # just the older diagnostic subset above.
+        clean_data[-1].update(r)
+    temporary = checkpoint_file.with_suffix(".tmp.parquet")
+    pd.DataFrame(clean_data).to_parquet(temporary, index=False, compression=PARQUET_CACHE_COMPRESSION)
+    temporary.replace(checkpoint_file)
 
 
 def _infer_run_dir_for_periodicity(path_like: str | Path | None) -> Path | None:
@@ -3124,13 +3459,14 @@ def apply_filters(
     min_delta_bic: float = POST_FILTER_MIN_DELTA_BIC,
     # Validation: periodicity
     apply_periodicity_validation: bool = False,
-    periodicity_n_bootstrap: int = 1000,
+    periodicity_n_bootstrap: int = 0,
     periodicity_significance: float = 0.01,
     periodicity_pdm_method: str = POST_FILTER_PDM_METHOD,
     periodicity_exclude_aliases: bool = True,
     periodicity_flag_only: bool = True,
     periodicity_workers: int = 1,
     periodicity_checkpoint_dir: Path | None = None,
+    periodicity_reuse_from: Path | None = None,
     periodicity_lightcurve_dir: Path | None = None,
     periodicity_skip_if_consensus: bool = True,
     periodicity_all_candidates: bool = False,
@@ -3369,11 +3705,12 @@ def apply_filters(
             "flag_only": periodicity_flag_only,
             "workers": periodicity_workers,
             "checkpoint_dir": periodicity_checkpoint_dir,
+            "reuse_from": periodicity_reuse_from,
             "lightcurve_bundle_dir": periodicity_lightcurve_dir,
             "skip_if_consensus": periodicity_skip_if_consensus,
             "show_tqdm": show_tqdm,
             "verbose": verbose,
-        }, list(PERIODICITY_MERGE_COLS)))
+        }, list(PERIODICITY_REUSE_COLUMNS if periodicity_reuse_from else PERIODICITY_MERGE_COLS)))
 
     # With no post-filters requested, this call explicitly disables the whole
     # post-filter layer.  Clear its prior decisions while retaining upstream
@@ -3649,9 +3986,9 @@ Example usage:
                         help="Minimum delta BIC for morphology filter (default: 10)")
 
     g_periodicity.add_argument("--apply-periodicity-validation", action="store_true",
-                        help="Apply bootstrap PDM/CE periodicity validation (off by default)")
-    g_periodicity.add_argument("--periodicity-n-bootstrap", type=int, default=1000,
-                        help="Number of bootstrap iterations (default: 1000)")
+                        help="Select periods, with optional significance estimation (off by default)")
+    g_periodicity.add_argument("--periodicity-n-bootstrap", type=int, default=0,
+                        help="Optional null resamples per method after period selection (default: 0)")
     g_periodicity.add_argument("--periodicity-significance", type=float, default=0.01,
                         help="Significance threshold (default: 0.01)")
     g_periodicity.add_argument("--periodicity-pdm-method", type=str, default=POST_FILTER_PDM_METHOD,
@@ -3660,15 +3997,17 @@ Example usage:
     g_periodicity.add_argument("--periodicity-no-exclude-aliases", action="store_true",
                         help="Do not exclude alias periods (1d, 29.53d, etc.)")
     g_periodicity.add_argument("--periodicity-reject", action="store_true",
-                        help="Reject periodic candidates (default: flag only)")
+                        help="Reject significant periodic candidates; fresh significance requires a positive bootstrap budget (default: flag only)")
     g_periodicity.add_argument("--periodicity-force-bootstrap", action="store_true",
-                        help="Force bootstrap periodicity checks even if consensus period is found")
+                        help="Search even with catalog consensus; resampling still requires a positive bootstrap budget")
     g_periodicity.add_argument("--periodicity-all-candidates", action="store_true",
                         help="Run periodicity validation on all rows in the current input, not just prerequisite passers")
     g_periodicity.add_argument("--workers", type=int, default=WORKERS,
                         help="Number of parallel workers for periodicity validation (default: 10)")
     g_periodicity.add_argument("--checkpoint-dir", type=Path, default=None,
                         help="Directory for checkpoints (enables resume on restart)")
+    g_periodicity.add_argument("--periodicity-reuse-from", type=Path, default=None,
+                        help="Reuse historical periodicity measurements by ASAS-SN ID, retaining their original settings")
     g_periodicity.add_argument("--phase-plot-max-sig", type=float, default=0.01,
                         help="Require periodicity_bootstrap_sig <= this for phase plots (default: 0.01)")
     g_periodicity.add_argument("--phase-plot-min-power", type=float, default=0.3,
@@ -3869,6 +4208,7 @@ Example usage:
         periodicity_flag_only=not args.periodicity_reject,
         periodicity_workers=args.workers,
         periodicity_checkpoint_dir=args.checkpoint_dir.expanduser() if args.checkpoint_dir else (detect_run / "checkpoints" if args.detect_run and args.apply_periodicity_validation else None),
+        periodicity_reuse_from=args.periodicity_reuse_from,
         periodicity_lightcurve_dir=periodicity_lightcurve_dir,
         periodicity_skip_if_consensus=not args.periodicity_force_bootstrap,
         periodicity_all_candidates=args.periodicity_all_candidates,
@@ -3929,6 +4269,7 @@ Example usage:
                     "apply_run_robustness": not args.skip_run_robustness,
                     "apply_morphology": args.apply_morphology,
                     "apply_periodicity_validation": args.apply_periodicity_validation,
+                    "periodicity_reuse_from": str(args.periodicity_reuse_from) if args.periodicity_reuse_from else None,
                     "periodicity_reject": args.periodicity_reject if args.apply_periodicity_validation else None,
                     "periodicity_all_candidates": args.periodicity_all_candidates if args.apply_periodicity_validation else None,
                     "phase_plot_max_sig": args.phase_plot_max_sig,

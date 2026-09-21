@@ -35,6 +35,7 @@ from malca.enrichment.sed_model import (
     _patch_pystellibs_kurucz_libsdir,
     _prepare_candidate_points,
     fit_sed_models,
+    fit_sed_models_batched,
 )
 from malca.enrichment.photometric_calibration import mission_quoted_fnu_calibration
 from malca.enrichment.synthetic_photometry import (
@@ -214,6 +215,109 @@ def test_kurucz_fitter_ignores_ir_excess_and_recovers_teff_scale() -> None:
     assert points.loc[points["source"] == "AllWISE", "exclusion_reason"].iloc[0] == "ir_excess_diagnostic"
     assert points.loc[points["source"] == "2MASS", "exclusion_reason"].iloc[0] == "ir_excess_diagnostic"
     assert np.isfinite(points["model_flux_nu_jy"]).all()
+
+
+def test_fit_scopes_photometry_rows_before_candidate_preparation(monkeypatch) -> None:
+    candidates = pd.DataFrame([
+        {"candidate_id": "first"},
+        {"candidate_id": "second"},
+    ])
+    sed_rows = pd.concat(
+        [_rows_from_fake_model("first"), _rows_from_fake_model("second")],
+        ignore_index=True,
+    )
+    seen_ids: dict[str, set[str]] = {}
+    original = _prepare_candidate_points
+
+    def record_scope(candidate_id, candidate, rows, responses, response_failures):
+        seen_ids[str(candidate_id)] = set(rows["candidate_id"].astype(str))
+        return original(candidate_id, candidate, rows, responses, response_failures)
+
+    monkeypatch.setattr("malca.enrichment.sed_model._prepare_candidate_points", record_scope)
+
+    fit_sed_models(
+        candidates,
+        sed_rows,
+        library=FakeKurucz(),
+        curve_points=32,
+        response_loader=_test_response_loader,
+        allow_bandpass_download=False,
+    )
+
+    assert seen_ids == {"first": {"first"}, "second": {"second"}}
+
+
+def test_batched_fitter_checkpoints_and_reuses_complete_batches(tmp_path: Path, monkeypatch) -> None:
+    candidates = pd.DataFrame({"candidate_id": ["a", "b", "c", "d", "e"]})
+    sed_rows = pd.DataFrame(
+        {
+            "candidate_id": ["a", "b", "c", "d", "e"],
+            "source": ["test"] * 5,
+            "band": ["x"] * 5,
+        }
+    )
+    calls: list[list[str]] = []
+
+    def fake_fit(candidate_batch, photometry_batch, **_kwargs):
+        batch_ids = candidate_batch["candidate_id"].astype(str).tolist()
+        calls.append(batch_ids)
+        fits = pd.DataFrame(
+            [
+                {
+                    "candidate_id": candidate_id,
+                    "fit_version": SED_MODEL_FIT_VERSION,
+                    "status": "insufficient_data",
+                }
+                for candidate_id in batch_ids
+            ]
+        )
+        curves = pd.DataFrame(columns=SED_MODEL_CURVE_COLUMNS)
+        points = pd.DataFrame(
+            [
+                {
+                    "candidate_id": candidate_id,
+                    "fit_version": SED_MODEL_FIT_VERSION,
+                    "source": "test",
+                    "band": "x",
+                }
+                for candidate_id in photometry_batch["candidate_id"].astype(str)
+            ]
+        )
+        return fits, curves, points
+
+    monkeypatch.setattr("malca.enrichment.sed_model.fit_sed_models", fake_fit)
+    checkpoint_dir = tmp_path / "fit-checkpoints"
+
+    first = fit_sed_models_batched(
+        candidates,
+        sed_rows,
+        checkpoint_dir=checkpoint_dir,
+        batch_size=2,
+        library=FakeKurucz(),
+    )
+    assert calls == [["a", "b"], ["c", "d"], ["e"]]
+    assert first[0]["candidate_id"].tolist() == ["a", "b", "c", "d", "e"]
+
+    second = fit_sed_models_batched(
+        candidates,
+        sed_rows,
+        checkpoint_dir=checkpoint_dir,
+        batch_size=2,
+        library=FakeKurucz(),
+    )
+    assert calls == [["a", "b"], ["c", "d"], ["e"]]
+    assert second[0]["candidate_id"].tolist() == ["a", "b", "c", "d", "e"]
+
+    (checkpoint_dir / "batch_00001_points.parquet").unlink()
+    fit_sed_models_batched(
+        candidates,
+        sed_rows,
+        checkpoint_dir=checkpoint_dir,
+        batch_size=2,
+        library=FakeKurucz(),
+    )
+    assert calls[-1] == ["c", "d"]
+    assert len(calls) == 4
 
 
 def test_post_fit_rayleigh_jeans_tail_covers_far_ir_diagnostic_only() -> None:

@@ -2081,6 +2081,20 @@ def fit_sed_models(
     if not sed_rows.empty:
         _canonicalize_response_fields(sed_rows)
 
+    # Scope each fit to its candidate's rows without rescanning (and repeatedly
+    # string-converting) the complete photometry table for every candidate.
+    # ``GroupBy.indices`` stores only positional integer arrays, so this avoids
+    # materializing thousands of persistent per-candidate DataFrames.
+    sed_row_indices: dict[str, np.ndarray] = {}
+    if not sed_rows.empty and "candidate_id" in sed_rows.columns:
+        sed_rows["candidate_id"] = sed_rows["candidate_id"].astype(str)
+        sed_row_indices = {
+            str(candidate_id): np.asarray(positions, dtype=np.intp)
+            for candidate_id, positions in sed_rows.groupby(
+                "candidate_id", sort=False, observed=True,
+            ).indices.items()
+        }
+
     filter_pairs = []
     if not sed_rows.empty:
         filter_pairs = [
@@ -2116,10 +2130,16 @@ def fit_sed_models(
         calibration_hash = ""
         run_hash = ""
         try:
+            positions = sed_row_indices.get(str(candidate_id))
+            candidate_sed_rows = (
+                sed_rows.iloc[positions]
+                if positions is not None
+                else sed_rows.iloc[0:0]
+            )
             candidate_points = _prepare_candidate_points(
                 candidate_id,
                 candidate,
-                sed_rows,
+                candidate_sed_rows,
                 responses,
                 response_failures,
             )
@@ -2262,6 +2282,174 @@ def fit_sed_models(
     if return_points:
         return fits[SED_MODEL_FIT_COLUMNS], curves[SED_MODEL_CURVE_COLUMNS], points[SED_MODEL_POINT_COLUMNS]
     return fits[SED_MODEL_FIT_COLUMNS], curves[SED_MODEL_CURVE_COLUMNS]
+
+
+def fit_sed_models_batched(
+    candidates: pd.DataFrame,
+    sed_rows: pd.DataFrame,
+    *,
+    checkpoint_dir: str | Path,
+    batch_size: int = 250,
+    library: object | None = None,
+    curve_points: int = 400,
+    progress_callback: Callable[[str], None] | None = None,
+    response_loader: ResponseLoader | None = None,
+    allow_bandpass_download: bool = True,
+    reuse_checkpoints: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Fit and atomically checkpoint bounded candidate batches.
+
+    The caller is responsible for choosing a checkpoint directory tied to its
+    exact candidate and photometry inputs.  Each complete batch is independently
+    reusable after interruption; incomplete or malformed batches are recomputed.
+    """
+    from malca.io.table_io import read_parquet_table, write_parquet_table
+
+    candidate_frame = pd.DataFrame() if candidates is None else candidates.copy()
+    photometry = pd.DataFrame() if sed_rows is None else sed_rows.copy()
+    if not photometry.empty and "candidate_id" in photometry.columns:
+        photometry["candidate_id"] = photometry["candidate_id"].astype(str)
+
+    candidate_map: dict[str, pd.Series | dict] = {}
+    for index, row in candidate_frame.iterrows():
+        candidate_id = str(_candidate_id_for_row(row, index))
+        candidate = row.copy()
+        candidate["candidate_id"] = candidate_id
+        candidate_map[candidate_id] = candidate
+    if not photometry.empty and "candidate_id" in photometry.columns:
+        for candidate_id in photometry["candidate_id"].dropna().astype(str).unique():
+            candidate_map.setdefault(str(candidate_id), {"candidate_id": str(candidate_id)})
+
+    checkpoint_root = Path(checkpoint_dir)
+    checkpoint_root.mkdir(parents=True, exist_ok=True)
+    size = max(int(batch_size), 1)
+    candidate_ids = list(candidate_map)
+    if not candidate_ids:
+        return (
+            pd.DataFrame(columns=SED_MODEL_FIT_COLUMNS),
+            pd.DataFrame(columns=SED_MODEL_CURVE_COLUMNS),
+            pd.DataFrame(columns=SED_MODEL_POINT_COLUMNS),
+        )
+
+    row_indices: dict[str, np.ndarray] = {}
+    if not photometry.empty and "candidate_id" in photometry.columns:
+        row_indices = {
+            str(candidate_id): np.asarray(positions, dtype=np.intp)
+            for candidate_id, positions in photometry.groupby(
+                "candidate_id", sort=False, observed=True,
+            ).indices.items()
+        }
+
+    def paths_for(batch_index: int) -> tuple[Path, Path, Path]:
+        prefix = checkpoint_root / f"batch_{batch_index:05d}"
+        return (
+            prefix.with_name(prefix.name + "_fits.parquet"),
+            prefix.with_name(prefix.name + "_curves.parquet"),
+            prefix.with_name(prefix.name + "_points.parquet"),
+        )
+
+    def load_complete_batch(
+        paths: tuple[Path, Path, Path],
+        expected_ids: list[str],
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
+        if not reuse_checkpoints or not all(path.exists() for path in paths):
+            return None
+        try:
+            fits, curves, points = (read_parquet_table(path) for path in paths)
+        except Exception:
+            return None
+        if "candidate_id" not in fits.columns or "fit_version" not in fits.columns:
+            return None
+        observed_ids = fits["candidate_id"].astype(str).tolist()
+        if len(observed_ids) != len(expected_ids) or set(observed_ids) != set(expected_ids):
+            return None
+        if set(fits["fit_version"].dropna().astype(str)) != {SED_MODEL_FIT_VERSION}:
+            return None
+        expected = set(expected_ids)
+        for frame in (curves, points):
+            if not frame.empty and (
+                "candidate_id" not in frame.columns
+                or not set(frame["candidate_id"].astype(str)).issubset(expected)
+            ):
+                return None
+        return fits, curves, points
+
+    checkpoint_paths: list[tuple[Path, Path, Path]] = []
+    total = len(candidate_ids)
+    n_batches = math.ceil(total / size)
+    shared_library = library
+    for batch_index, start in enumerate(range(0, total, size)):
+        batch_ids = candidate_ids[start : start + size]
+        batch_paths = paths_for(batch_index)
+        checkpoint_paths.append(batch_paths)
+        cached = load_complete_batch(batch_paths, batch_ids)
+        if cached is not None:
+            if progress_callback:
+                progress_callback(
+                    f"[SED model batch] reused {min(start + len(batch_ids), total)}/{total} "
+                    f"candidate(s) from batch {batch_index + 1}/{n_batches}"
+                )
+            continue
+
+        candidate_batch = pd.DataFrame(
+            [dict(candidate_map[candidate_id]) for candidate_id in batch_ids]
+        )
+        position_parts = [row_indices[candidate_id] for candidate_id in batch_ids if candidate_id in row_indices]
+        if position_parts:
+            batch_positions = np.concatenate(position_parts)
+            photometry_batch = photometry.iloc[batch_positions].copy()
+        else:
+            photometry_batch = photometry.iloc[0:0].copy()
+        if shared_library is None:
+            shared_library = _load_kurucz_library()
+
+        def report_batch(message: str) -> None:
+            if progress_callback:
+                progress_callback(f"[SED model batch {batch_index + 1}/{n_batches}] {message}")
+
+        fits, curves, points = fit_sed_models(
+            candidate_batch,
+            photometry_batch,
+            library=shared_library,
+            curve_points=curve_points,
+            progress_callback=report_batch,
+            response_loader=response_loader,
+            allow_bandpass_download=allow_bandpass_download,
+            return_points=True,
+            workers=1,
+        )
+        for frame, columns in (
+            (fits, SED_MODEL_FIT_COLUMNS),
+            (curves, SED_MODEL_CURVE_COLUMNS),
+            (points, SED_MODEL_POINT_COLUMNS),
+        ):
+            for column in columns:
+                if column not in frame.columns:
+                    frame[column] = None
+        fits = fits[SED_MODEL_FIT_COLUMNS]
+        curves = curves[SED_MODEL_CURVE_COLUMNS]
+        points = points[SED_MODEL_POINT_COLUMNS]
+        for frame, path in zip((fits, curves, points), batch_paths, strict=True):
+            write_parquet_table(frame, path)
+        if progress_callback:
+            progress_callback(
+                f"[SED model batch] checkpointed {min(start + len(batch_ids), total)}/{total} "
+                f"candidate(s) in batch {batch_index + 1}/{n_batches}"
+            )
+
+    def combine(column_index: int, columns: list[str]) -> pd.DataFrame:
+        parts = [read_parquet_table(paths[column_index]) for paths in checkpoint_paths]
+        combined = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
+        for column in columns:
+            if column not in combined.columns:
+                combined[column] = None
+        return combined[columns]
+
+    return (
+        combine(0, SED_MODEL_FIT_COLUMNS),
+        combine(1, SED_MODEL_CURVE_COLUMNS),
+        combine(2, SED_MODEL_POINT_COLUMNS),
+    )
 
 
 def load_sed_model_fits(conn: sqlite3.Connection, candidate_id: str) -> pd.DataFrame:

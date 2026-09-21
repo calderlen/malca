@@ -434,6 +434,7 @@ def _cached_rows_by_key(cache: pd.DataFrame, key_col: str, keys: set[str]) -> di
 
 
 EXTERNAL_LC_STATUS_FILE = "_external_lc_status.parquet"
+EXTERNAL_LC_COMPLETION_FILE = "_external_lc_completion.parquet"
 OGLE_OCVS_BASE_URLS = (
     "https://ogle.astrouw.edu.pl/ogle/ogle4/OCVS",
     "https://www.astrouw.edu.pl/ogle/ogle4/OCVS",
@@ -497,6 +498,53 @@ def _external_lc_status_path(output_dir: Path | str | None) -> Path | None:
     if output_dir is None:
         return None
     return Path(output_dir) / EXTERNAL_LC_STATUS_FILE
+
+
+def _external_lc_completion_path(output_dir: Path | str | None) -> Path | None:
+    if output_dir is None:
+        return None
+    return Path(output_dir) / EXTERNAL_LC_COMPLETION_FILE
+
+
+def _read_external_lc_completion(output_dir: Path | str | None) -> pd.DataFrame:
+    path = _external_lc_completion_path(output_dir)
+    if path is None or not path.exists():
+        return pd.DataFrame(columns=["module", "candidate_id", "status"])
+    try:
+        return pd.read_parquet(path)
+    except Exception as exc:
+        _safe_print(f"  External LC completion warning: could not read {path}: {_short_error(exc)}")
+        return pd.DataFrame(columns=["module", "candidate_id", "status"])
+
+
+def _write_external_lc_completion(output_dir: Path | str | None, rows: list[dict]) -> None:
+    path = _external_lc_completion_path(output_dir)
+    if path is None or not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = _read_external_lc_completion(output_dir)
+    new = pd.DataFrame(rows)
+    combined = pd.concat([existing, new], ignore_index=True) if not existing.empty else new
+    combined = combined.drop_duplicates(subset=["module", "candidate_id"], keep="last")
+    _atomic_write_parquet(combined, path, index=False, compression=PARQUET_CACHE_COMPRESSION)
+
+
+def _external_lc_module_complete(
+    completion: pd.DataFrame,
+    module: str,
+    candidate_ids: list[str],
+) -> bool:
+    if completion.empty or not {"module", "candidate_id", "status"}.issubset(completion.columns):
+        return False
+    expected = set(map(str, candidate_ids))
+    rows = completion[completion["module"].astype(str).eq(str(module))].copy()
+    if rows.empty:
+        return False
+    rows["candidate_id"] = rows["candidate_id"].astype(str)
+    rows = rows.drop_duplicates("candidate_id", keep="last")
+    if set(rows["candidate_id"]) != expected:
+        return False
+    return bool(rows["status"].astype(str).isin({"ok", "no_data"}).all())
 
 
 def _read_external_lc_status(output_dir: Path | str | None) -> pd.DataFrame:
@@ -7082,26 +7130,21 @@ def fetch_external_lcs(
         "DASCH LCs": "dasch_lc_n_points",
     }
 
+    candidate_ids = [_candidate_cache_id(df, idx) for idx in df.index]
+
     def _module_done(name):
         # ATLAS resumes from its permanent per-task journal.  A partially
         # populated summary column never means that the whole bulk job is done.
         if name == "ATLAS LCs":
             return False
-        if not _resumed:
+        if refresh_cache:
             return False
-        col = _MODULE_MARKERS.get(name)
-        if col is None or col not in df.columns:
+        marker = _MODULE_MARKERS.get(name)
+        if marker is None or marker not in df.columns or not df[marker].notna().all():
             return False
-        status_df = _read_external_lc_status(output_dir)
-        if not status_df.empty and {"module", "status"}.issubset(status_df.columns):
-            failed = (
-                (status_df["module"].astype(str) == name)
-                & (status_df["status"].astype(str).isin({"error", "failed"}))
-            )
-            if bool(failed.any()):
-                return False
-        s = df[col]
-        return s.notna().any() and (s != 0).any()
+        return _external_lc_module_complete(
+            _read_external_lc_completion(output_dir), name, candidate_ids
+        )
 
     failures: list[str] = []
 
@@ -7121,7 +7164,47 @@ def fetch_external_lcs(
             msg = f"{name} failed: {_short_error(exc)}"
             failures.append(msg)
             _emit(msg)
+            _write_external_lc_completion(
+                output_dir,
+                [
+                    {"module": name, "candidate_id": candidate_id, "status": "error"}
+                    for candidate_id in candidate_ids
+                ],
+            )
         else:
+            marker = _MODULE_MARKERS.get(name)
+            low_level_status = _read_external_lc_status(output_dir)
+            failed_ids: set[str] = set()
+            if not low_level_status.empty and {"module", "candidate_id", "status"}.issubset(low_level_status.columns):
+                module_status = low_level_status[
+                    low_level_status["module"].astype(str).eq(name)
+                ].copy()
+                if "updated_unix" in module_status.columns:
+                    module_status = module_status.sort_values("updated_unix", kind="mergesort")
+                module_status = module_status.drop_duplicates("candidate_id", keep="last")
+                failed_rows = module_status[
+                    module_status["status"].astype(str).isin({"error", "failed"})
+                ]
+                failed_ids = set(failed_rows["candidate_id"].astype(str))
+            completion_rows = []
+            for idx, candidate_id in zip(df.index, candidate_ids, strict=True):
+                positive = False
+                if marker is not None and marker in df.columns:
+                    value = df.loc[idx, marker]
+                    try:
+                        positive = bool(pd.notna(value) and float(value) > 0)
+                    except (TypeError, ValueError):
+                        positive = bool(pd.notna(value) and bool(value))
+                if positive:
+                    status = "ok"
+                elif candidate_id in failed_ids:
+                    status = "error"
+                else:
+                    status = "no_data"
+                completion_rows.append(
+                    {"module": name, "candidate_id": candidate_id, "status": status}
+                )
+            _write_external_lc_completion(output_dir, completion_rows)
             _emit(f"{name} completed in {time.perf_counter() - t0:.1f}s")
         finally:
             if checkpoint_path:

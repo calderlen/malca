@@ -151,6 +151,40 @@ def test_query_catalog_bulk_hard_times_out_stuck_xmatch_chunk(monkeypatch) -> No
     ]
 
 
+def test_neighbor_enrichment_remembers_zero_match_candidates(monkeypatch, tmp_path) -> None:
+    targets = pd.DataFrame(
+        [
+            {"candidate_id": "C1", "ra_deg": 10.0, "dec_deg": 20.0},
+            {"candidate_id": "C2", "ra_deg": 11.0, "dec_deg": 21.0},
+        ]
+    )
+    calls: list[int] = []
+
+    def no_matches(coords, *, status_rows, catalog, **_kwargs):
+        calls.append(len(coords))
+        status_rows.append({"catalog": catalog, "status": "no_data"})
+        return pd.DataFrame()
+
+    monkeypatch.setattr(neighbor, "_query_catalog_bulk", no_matches)
+    out_dir = tmp_path / "neighbors"
+    neighbor.run_neighbor_enrichment(
+        targets,
+        out_dir=out_dir,
+        catalogs={"test": "test/catalog"},
+    )
+    assert calls == [2]
+
+    calls.clear()
+    neighbor.run_neighbor_enrichment(
+        targets,
+        out_dir=out_dir,
+        catalogs={"test": "test/catalog"},
+    )
+    assert calls == []
+    coverage = pd.read_parquet(out_dir / neighbor.NEIGHBOR_COVERAGE_FILE)
+    assert set(coverage["candidate_id"]) == {"C1", "C2"}
+
+
 def test_collect_vsx_catalog_neighbors_prefers_local_catalog(monkeypatch, tmp_path) -> None:
     vsx_path = tmp_path / "vsx_all.parquet"
     pd.DataFrame(

@@ -411,6 +411,53 @@ def test_fetch_external_lcs_resume_retries_error_status(
     assert calls == [True]
 
 
+def test_fetch_external_lcs_resume_accepts_all_zero_completed_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    df = pd.DataFrame(
+        [
+            {"candidate_id": "C1", "ra": 1.0, "dec": 2.0, "ztf_lc_n_det": 0},
+            {"candidate_id": "C2", "ra": 3.0, "dec": 4.0, "ztf_lc_n_det": 0},
+        ]
+    )
+    checkpoint_path = tmp_path / "external_lcs_CHECKPOINT.parquet"
+    df.to_parquet(checkpoint_path, index=False)
+    pd.DataFrame(
+        [
+            {"module": "ZTF LCs", "candidate_id": candidate_id, "status": "no_data"}
+            for candidate_id in ("C1", "C2")
+        ]
+    ).to_parquet(tmp_path / vetting.EXTERNAL_LC_COMPLETION_FILE, index=False)
+
+    monkeypatch.setattr(
+        vetting,
+        "fetch_ztf_lightcurves",
+        lambda *_args, **_kwargs: pytest.fail("completed zero-result module was rerun"),
+    )
+    out = vetting.fetch_external_lcs(
+        df,
+        output_dir=tmp_path,
+        run_atlas=False,
+        run_ztf=True,
+        run_gaia_epoch=False,
+        run_tess=False,
+        run_neowise=False,
+        run_kepler=False,
+        run_aavso=False,
+        run_ogle=False,
+        run_stripe82=False,
+        run_allwise_mep=False,
+        run_vvvx_virac=False,
+        run_ps1=False,
+        run_crts=False,
+        checkpoint_path=checkpoint_path,
+        progress_callback=lambda _msg: None,
+    )
+
+    assert out["ztf_lc_n_det"].tolist() == [0, 0]
+
+
 def test_fetch_tess_lightcurves_records_lookup_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
