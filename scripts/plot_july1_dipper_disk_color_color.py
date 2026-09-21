@@ -14,6 +14,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 
 from malca.extinction import MID_IR_EXTINCTION_POLICY_VERSION
 from malca.plotting.color_color_labels import LABEL_KS_W3_0, LABEL_KS_W4_0
@@ -27,10 +28,26 @@ from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 from malca.plotting.blackbody_locus import add_blackbody_locus
 from malca.plotting.lightcurve_publication import PUBLICATION_STYLE
 
+try:
+    from scripts.plot_dipper_colors import (
+        COLOR_POINT_MARKERSIZE,
+        _plot_errorbar_points,
+        _plot_reference_points,
+    )
+except ModuleNotFoundError:  # Direct execution from the scripts directory.
+    from plot_dipper_colors import (  # type: ignore[no-redef]
+        COLOR_POINT_MARKERSIZE,
+        _plot_errorbar_points,
+        _plot_reference_points,
+    )
+
 
 DEFAULT_RUN_ROOT = Path("output/runs/dat3-full-extended_2026-07-01-v4")
 DEFAULT_REVIEW_DB = DEFAULT_RUN_ROOT / "review" / "review.db"
 DEFAULT_OUTPUT_DIR = DEFAULT_RUN_ROOT / "results" / "dipper_disk_color_color"
+DEFAULT_REFERENCE_PHOTOMETRY = Path(
+    "output/dipper_color_reference_sources/dipper_reference_photometry.csv"
+)
 
 
 # Figure-style region demarcations from the supplied 2MASS-WISE diagram.
@@ -52,15 +69,6 @@ REGION_LABELS = {
 }
 
 REGION_ORDER = ("Diskless", "Debris", "Evolved", "Full", "Transition")
-REGION_ERROR_COLORS = {
-    "Diskless": "#4c72b0",
-    "Debris": "#55a868",
-    "Evolved": "#dd8452",
-    "Full": "#c44e52",
-    "Transition": "#8172b3",
-}
-
-
 plt.rcParams.update(
     {
         **PUBLICATION_STYLE,
@@ -201,43 +209,51 @@ def _write_boundary_table(output_dir: Path) -> pd.DataFrame:
     return boundary_df
 
 
-def _plot(df: pd.DataFrame, output_dir: Path) -> None:
+def _read_reference_photometry(path: Path | None) -> pd.DataFrame:
+    if path is None:
+        return pd.DataFrame()
+    if path.suffix.lower() == ".parquet":
+        references = pd.read_parquet(path)
+    else:
+        references = pd.read_csv(path)
+    if "display_name" not in references:
+        raise ValueError(f"Reference photometry requires a display_name column: {path}")
+    return references
+
+
+def _plot(
+    df: pd.DataFrame,
+    references: pd.DataFrame,
+    output_dir: Path,
+) -> tuple[int, int]:
     plotted = df[df["has_disk_color_axes"]].copy()
 
-    fig, ax = plt.subplots(figsize=(7.2, 5.4), constrained_layout=True)
+    fig, ax = plt.subplots(figsize=(7.35, 5.0))
     ax.set_facecolor("white")
     fig.patch.set_facecolor("white")
 
-    if plotted["has_disk_color_errors"].any():
-        err = plotted[plotted["has_disk_color_errors"]]
-        for region_name in REGION_ORDER:
-            region = err.loc[err["disk_region"] == region_name]
-            if region.empty:
-                continue
-            ax.errorbar(
-                region["ks_w4_0"],
-                region["ks_w3_0"],
-                xerr=region["ks_w4_err"],
-                yerr=region["ks_w3_err"],
-                fmt="none",
-                ecolor=REGION_ERROR_COLORS[region_name],
-                elinewidth=0.85,
-                capsize=2.8,
-                capthick=0.75,
-                alpha=0.9,
-                zorder=1,
-            )
-
-    ax.scatter(
-        plotted["ks_w4_0"],
-        plotted["ks_w3_0"],
-        s=22,
-        marker="o",
-        facecolor="black",
-        edgecolor="black",
-        linewidth=0.45,
-        alpha=0.95,
-        zorder=3,
+    dipper_count = _plot_errorbar_points(
+        ax,
+        plotted,
+        x="ks_w4_0",
+        y="ks_w3_0",
+        xerr="ks_w4_err",
+        yerr="ks_w3_err",
+        label=f"MALCA dippers ({len(plotted)})",
+    )
+    (
+        reference_count,
+        reference_quality_count,
+        reference_handles,
+        mechanism_handles,
+        reference_points,
+    ) = _plot_reference_points(
+        ax,
+        references,
+        x="ks_w4_0",
+        y="ks_w3_0",
+        xerr="ks_w4_err",
+        yerr="ks_w3_err",
     )
 
     for segment_name, points in BOUNDARY_SEGMENTS.items():
@@ -258,13 +274,20 @@ def _plot(df: pd.DataFrame, output_dir: Path) -> None:
 
     ax.set_xlim(-0.5, 6.8)
     ax.set_ylim(-0.75, 4.6)
-    ax.set_xlabel(LABEL_KS_W4_0, fontsize=18)
-    ax.set_ylabel(LABEL_KS_W3_0, fontsize=18)
+    ax.set_xlabel(LABEL_KS_W4_0)
+    ax.set_ylabel(LABEL_KS_W3_0)
+    main_points = list(
+        zip(
+            plotted["ks_w4_0"].astype(float),
+            plotted["ks_w3_0"].astype(float),
+        )
+    )
     add_blackbody_locus(
         ax,
         ("Ks", "W4"),
         ("Ks", "W3"),
         label_placement="above",
+        avoid_points=[*main_points, *reference_points],
     )
 
     ax.xaxis.set_major_locator(MultipleLocator(1.0))
@@ -277,23 +300,79 @@ def _plot(df: pd.DataFrame, output_dir: Path) -> None:
         spine.set_linewidth(1.0)
         spine.set_color("#222222")
 
+    legend_handles = [
+        Line2D(
+            [],
+            [],
+            color="black",
+            marker="o",
+            linestyle="none",
+            markerfacecolor="black",
+            markeredgecolor="black",
+            markersize=COLOR_POINT_MARKERSIZE,
+            label=f"MALCA dippers ({dipper_count})",
+        ),
+        *reference_handles,
+    ]
+    fig.subplots_adjust(left=0.11, right=0.805, bottom=0.15, top=0.97)
+    source_legend = ax.legend(
+        handles=legend_handles,
+        loc="upper left",
+        bbox_to_anchor=(1.01, 1.0),
+        borderaxespad=0.0,
+        frameon=False,
+        fontsize=6.75,
+        handlelength=1.0,
+        handletextpad=0.45,
+        labelspacing=0.75,
+        numpoints=1,
+    )
+    ax.add_artist(source_legend)
+    fig.canvas.draw()
+    source_bbox_axes = source_legend.get_window_extent(
+        fig.canvas.get_renderer()
+    ).transformed(ax.transAxes.inverted())
+    if mechanism_handles:
+        ax.legend(
+            handles=mechanism_handles,
+            title="Marker family",
+            loc="upper left",
+            bbox_to_anchor=(1.01, source_bbox_axes.y0 - 0.025),
+            borderaxespad=0.0,
+            frameon=False,
+            fontsize=6.2,
+            title_fontsize=6.6,
+            handlelength=1.0,
+            handletextpad=0.45,
+            labelspacing=0.55,
+            numpoints=1,
+        )
+
     stem = output_dir / "july1_dipper_2mass_wise_disk_color_color"
     fig.savefig(stem.with_suffix(".png"), dpi=300)
     fig.savefig(stem.with_suffix(".pdf"))
     plt.close(fig)
+    return reference_count, reference_quality_count
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--review-db", type=Path, default=DEFAULT_REVIEW_DB)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--reference-photometry",
+        type=Path,
+        default=DEFAULT_REFERENCE_PHOTOMETRY,
+        help="Plot-ready CSV or parquet containing labeled literature exemplar sources.",
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     df = _add_colors(_read_dippers(args.review_db))
+    references = _read_reference_photometry(args.reference_photometry)
     df.to_csv(args.output_dir / "july1_dipper_2mass_wise_disk_color_color.csv", index=False)
     _write_boundary_table(args.output_dir)
-    _plot(df, args.output_dir)
+    reference_count, reference_quality_count = _plot(df, references, args.output_dir)
 
     plotted = int(df["has_disk_color_axes"].sum())
     region_counts = {
@@ -308,6 +387,9 @@ def main() -> None:
                 "n_plotted": plotted,
                 "n_missing_axes": int(len(df) - plotted),
                 "n_with_errors": int(df["has_disk_color_errors"].sum()),
+                "reference_photometry": str(args.reference_photometry),
+                "n_reference_plotted": reference_count,
+                "n_reference_quality_ok": reference_quality_count,
                 "disk_region_counts": region_counts,
                 "extinction_correction": "Foreground A_v_3d with scalar R_V=3.1 band coefficients.",
                 "extinction_policy_version": MID_IR_EXTINCTION_POLICY_VERSION,
@@ -323,7 +405,10 @@ def main() -> None:
             sort_keys=True,
         )
 
-    print(f"Wrote disk color-color plot for {plotted}/{len(df)} dippers to {args.output_dir}")
+    print(
+        f"Wrote disk color-color plot for {plotted}/{len(df)} dippers and "
+        f"{reference_count} exemplars to {args.output_dir}"
+    )
 
 
 if __name__ == "__main__":

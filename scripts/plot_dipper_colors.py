@@ -1072,6 +1072,22 @@ def _shade_sed_alpha_bands(ax: plt.Axes, y_min: float, y_max: float, *, labels: 
         ax.axhline(value, color="0.25", linestyle="--", linewidth=0.65, zorder=1)
 
 
+def _sed_alpha_band_color(alpha: float) -> str:
+    """Return the background color used for one SED-alpha classification band."""
+    if alpha < -1.6:
+        return "0.92"
+    if alpha < -0.3:
+        return "#ffedd5"
+    if alpha < 0.3:
+        return "#fff7d6"
+    return "#fee2e2"
+
+
+def _teff_source_marker(source: object) -> str:
+    """Use distinct markers for StarHorse and Gaia GSP-Phot temperatures."""
+    return "s" if str(source) == "teff_gspphot" else "o"
+
+
 def _draw_teff_alpha_points(ax: plt.Axes, data: pd.DataFrame, *, markersize: float) -> None:
     for _, row in data.iterrows():
         alpha_err = pd.to_numeric(pd.Series([row.get("sed_alpha_err")]), errors="coerce").iloc[0]
@@ -1089,19 +1105,63 @@ def _draw_teff_alpha_points(ax: plt.Axes, data: pd.DataFrame, *, markersize: flo
             [float(row["sed_alpha"])],
             xerr=xerr,
             yerr=[[alpha_err], [alpha_err]] if has_alpha_err else None,
-            fmt="o",
+            fmt=_teff_source_marker(row.get("teff_source")),
             color="black",
             ecolor="black",
             elinewidth=0.45,
             capsize=1.2,
             capthick=0.45,
-            markerfacecolor="black" if has_complete_errors else "none",
+            # Match an incomplete point's fill to its classification band so
+            # the error-bar segment beneath it is hidden while the marker still
+            # reads visually as an open marker.
+            markerfacecolor=(
+                "black"
+                if has_complete_errors
+                else _sed_alpha_band_color(float(row["sed_alpha"]))
+            ),
             markeredgecolor="black",
             markeredgewidth=0.65 if has_complete_errors else 0.5,
             markersize=markersize,
             linestyle="none",
             alpha=1.0,
             zorder=5,
+        )
+
+
+def _add_teff_source_legend(ax: plt.Axes, data: pd.DataFrame) -> None:
+    source_styles = (
+        ("teff50", "o", "StarHorse"),
+        ("teff_gspphot", "s", "Gaia GSP-Phot"),
+    )
+    handles = []
+    for source, marker, label in source_styles:
+        count = int(data["teff_source"].astype(str).eq(source).sum())
+        if count == 0:
+            continue
+        handles.append(
+            Line2D(
+                [],
+                [],
+                linestyle="none",
+                marker=marker,
+                markerfacecolor="none",
+                markeredgecolor="black",
+                markeredgewidth=0.7,
+                markersize=4.5,
+                color="black",
+                label=f"{label} ({count})",
+            )
+        )
+    if handles:
+        ax.legend(
+            handles=handles,
+            loc="upper center",
+            ncol=len(handles),
+            frameon=False,
+            fontsize=7.5,
+            handletextpad=0.35,
+            columnspacing=0.9,
+            borderaxespad=0.35,
         )
 
 
@@ -1126,6 +1186,7 @@ def _plot_teff_sed_alpha(summary: pd.DataFrame, out_dir: Path) -> None:
     ax.set_box_aspect(1.0)
     _shade_sed_alpha_bands(ax, y_min, y_max, labels=False)
     _draw_teff_alpha_points(ax, finite, markersize=3.6)
+    _add_teff_source_legend(ax, finite)
     ax.set_xlabel(r"$T_{\rm eff}$ [$10^3$ K]", fontsize=10.5, labelpad=2)
     ax.set_ylabel(r"SED $\alpha$ [2-24 $\mu$m]", fontsize=10.5, labelpad=2)
     ax.set_ylim(y_min, y_max)
