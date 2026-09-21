@@ -64,7 +64,7 @@ from malca.catalogs.gaia_ids import canonicalize_gaia_ids_in_frame, normalize_ga
 from malca.catalogs.neowise_filters import filter_neowise_single_exposure_lc
 from malca.io.table_io import read_feature_table, read_parquet_table, write_feature_table
 from malca.vsx.metadata import normalize_asas_sn_ids, normalize_vsx_match_columns, select_best_vsx_matches
-from malca.enrichment.banyan import BANYAN_OUTPUT_COLUMNS, compute_banyan_membership
+from malca.enrichment.banyan import BANYAN_OUTPUT_COLUMNS, compute_banyan_membership, load_banyan_results
 from malca.enrichment.open_clusters import OPEN_CLUSTER_OUTPUT_COLUMNS, add_open_cluster_context
 from malca.extinction import mid_ir_av_coefficient
 
@@ -1115,11 +1115,19 @@ def classify_galactic_population(df: pd.DataFrame) -> pd.DataFrame:
 # BANYAN Σ MEMBERSHIP (Gagné+2018)
 # =============================================================================
 
-def query_banyan_sigma(df: pd.DataFrame) -> pd.DataFrame:
+def query_banyan_sigma(df: pd.DataFrame, *, reuse_from: Path | None = None) -> pd.DataFrame:
     """Evaluate BANYAN Σ through MALCA's versioned, schema-stable adapter."""
+    previous = None
+    if reuse_from is not None and Path(reuse_from).exists():
+        try:
+            previous = load_banyan_results(Path(reuse_from))
+        except Exception as exc:
+            print(f"Warning: could not reuse BANYAN results from {reuse_from}: {exc}")
     out = compute_banyan_membership(
         df,
         association_threshold=BANYAN_MIN_ASSOC_PROB,
+        show_progress=True,
+        previous_results=previous,
     )
     if out.empty:
         return out
@@ -2322,6 +2330,7 @@ def characterize_candidates_df(
     unwise_workers: int = UNWISE_WORKERS,
     unwise_checkpoint_every: int = UNWISE_CHECKPOINT_EVERY,
     checkpoint_path: Path | None = None,
+    banyan_reuse_from: Path | None = None,
 ) -> pd.DataFrame:
     """Characterize candidates and return an enriched dataframe."""
 
@@ -2693,7 +2702,7 @@ def characterize_candidates_df(
             module="banyan",
             enabled=run_banyan,
             description="Running BANYAN Σ membership checks...",
-            func=query_banyan_sigma,
+            func=lambda frame: query_banyan_sigma(frame, reuse_from=banyan_reuse_from),
         )
         if checkpoint_path:
             _save_char_checkpoint(df_char, checkpoint_path)
